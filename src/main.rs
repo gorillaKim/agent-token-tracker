@@ -59,8 +59,29 @@ enum Commands {
     },
     #[command(about = "에이전트의 무한 루프 및 오작동 의심 세션을 탐지합니다.")]
     Loops {
-        #[arg(short, long, help = "탐지 임계치 설정 (단계 수 또는 반복 횟수)")]
-        threshold: Option<u64>,
+        #[arg(short, long, help = "특정 세션 ID 필터")]
+        session_id: Option<String>,
+
+        #[arg(short, long, help = "특정 에이전트 타입 필터 (예: claude_code)")]
+        agent: Option<String>,
+
+        #[arg(long, help = "특정 이상 징후 시그널 종류 필터 (repeated_call, repeated_failure, token_inflation, ping_pong)")]
+        signal: Option<String>,
+
+        #[arg(long, help = "정렬 기준 (session_id, agent_type, started_at) [기본값: started_at]")]
+        sort: Option<String>,
+
+        #[arg(long, help = "동일 호출 반복 횟수 임계치 [기본값: 3]")]
+        max_calls: Option<usize>,
+
+        #[arg(long, help = "연속 실패 횟수 임계치 [기본값: 3]")]
+        max_failures: Option<usize>,
+
+        #[arg(long, help = "무진전 토큰 급증 임계치 [기본값: 50000]")]
+        inflation: Option<u64>,
+
+        #[arg(long, help = "핑퐁 반복 주기 임계치 [기본값: 3]")]
+        ping_pong: Option<usize>,
     },
 }
 
@@ -74,6 +95,17 @@ pub struct ScanResult {
     pub sessions_failed: usize,
     pub skip_reasons: HashMap<String, usize>,
     pub warnings: Vec<String>,
+}
+
+/// 루프 탐지 아스키 리포트 출력을 위한 임시 행 구조체
+#[derive(Debug)]
+struct LoopRow {
+    session_id: String,
+    agent_type: String,
+    started_at: String,
+    signal_type: String,
+    description: String,
+    evidence: String,
 }
 
 fn main() {
@@ -441,11 +473,136 @@ fn main() {
                 }
             }
         }
-        Commands::Loops { threshold } => {
-            println!("루프 탐지를 시작합니다.");
-            if let Some(t) = threshold {
-                println!("설정된 임계치: {}", t);
+        Commands::Loops {
+            session_id,
+            agent,
+            signal,
+            sort,
+            max_calls,
+            max_failures,
+            inflation,
+            ping_pong,
+        } => {
+            let conn = match db::init_db(&db_path) {
+                Ok(c) => c,
+                Err(err) => {
+                    eprintln!("데이터베이스 연결 실패: {}", err);
+                    std::process::exit(1);
+                }
+            };
+
+            // 1. DetectorConfig 생성
+            let mut config = detect::loops::DetectorConfig::default();
+            if let Some(mc) = max_calls {
+                config.max_repeated_calls = *mc;
             }
+            if let Some(mf) = max_failures {
+                config.max_repeated_failures = *mf;
+            }
+            if let Some(inf) = inflation {
+                config.token_inflation_threshold = *inf;
+            }
+            if let Some(pp) = ping_pong {
+                config.max_ping_pong_cycles = *pp;
+            }
+
+            // 2. 전체 세션 정보 가져오기
+            let all_sessions = match db::get_all_sessions(&conn) {
+                Ok(list) => list,
+                Err(err) => {
+                    eprintln!("세션 정보 조회 실패: {}", err);
+                    std::process::exit(1);
+                }
+            };
+
+            let mut rows = Vec::new();
+            let mut analyzed_sessions_count = 0;
+
+            for sess in &all_sessions {
+                // 세션 ID 필터
+                if let Some(sid_filter) = session_id {
+                    if sess.session_id != *sid_filter {
+                        continue;
+                    }
+                }
+
+                // 에이전트 필터
+                if let Some(agent_filter) = agent {
+                    if sess.agent_type != *agent_filter {
+                        continue;
+                    }
+                }
+
+                analyzed_sessions_count += 1;
+
+                // 세션별 메시지 및 도구 호출 조회
+                let messages = match db::get_messages_by_session(&conn, &sess.session_id) {
+                    Ok(msgs) => msgs,
+                    Err(err) => {
+                        eprintln!("세션 [{}] 메시지 조회 실패: {}", sess.session_id, err);
+                        continue;
+                    }
+                };
+
+                let tool_calls = match db::get_tool_calls_by_session(&conn, &sess.session_id) {
+                    Ok(tcs) => tcs,
+                    Err(err) => {
+                        eprintln!("세션 [{}] 도구 호출 조회 실패: {}", sess.session_id, err);
+                        continue;
+                    }
+                };
+
+                // 이상 징후 탐지
+                let detect_res = detect::loops::detect_session_anomalies(sess, &messages, &tool_calls, &config);
+
+                if detect_res.is_anomaly {
+                    for sig in detect_res.signals {
+                        // 시그널 타입 필터
+                        if let Some(sig_filter) = signal {
+                            if sig.signal_type != *sig_filter {
+                                continue;
+                            }
+                        }
+
+                        rows.push(LoopRow {
+                            session_id: sess.session_id.clone(),
+                            agent_type: sess.agent_type.clone(),
+                            started_at: sess.started_at.clone(),
+                            signal_type: sig.signal_type.clone(),
+                            description: sig.description.clone(),
+                            evidence: sig.evidence.clone(),
+                        });
+                    }
+                }
+            }
+
+            // 3. 정렬 적용
+            let sort_by = sort.as_deref().unwrap_or("started_at");
+            match sort_by {
+                "session_id" => rows.sort_by(|a, b| a.session_id.cmp(&b.session_id)),
+                "agent_type" => rows.sort_by(|a, b| a.agent_type.cmp(&b.agent_type)),
+                "started_at" | _ => rows.sort_by(|a, b| a.started_at.cmp(&b.started_at)),
+            }
+
+            // 4. 아스키 표 형태로 출력 (한국어 출력)
+            println!("\n================================================ 에이전트 루프 및 오작동 탐지 리포트 ================================================");
+            println!("| {:<20} | {:<12} | {:<18} | {:<55} | {:<30} |",
+                     "세션 ID", "에이전트", "이상 유형", "상세 설명", "증거 정보");
+            println!("-------------------------------------------------------------------------------------------------------------------------------------");
+
+            for row in &rows {
+                println!("| {:<20} | {:<12} | {:<18} | {:<55} | {:<30} |",
+                         row.session_id,
+                         row.agent_type,
+                         row.signal_type,
+                         row.description,
+                         row.evidence);
+            }
+            println!("-------------------------------------------------------------------------------------------------------------------------------------");
+            println!("| 총 분석 세션 수: {} 건 | 탐지된 이상 세션 수: {} 건 |",
+                     analyzed_sessions_count,
+                     rows.iter().map(|r| &r.session_id).collect::<std::collections::HashSet<_>>().len());
+            println!("=====================================================================================================================================");
         }
     }
 }

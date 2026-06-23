@@ -220,6 +220,36 @@ pub fn get_session(conn: &Connection, session_id: &str) -> Result<Option<Session
     }
 }
 
+/// 적재된 모든 세션 정보를 조회합니다.
+pub fn get_all_sessions(conn: &Connection) -> Result<Vec<Session>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT session_id, agent_type, agent_version, started_at, ended_at, cwd, model_id,
+                total_input_tokens, total_output_tokens, token_source
+         FROM sessions",
+    )?;
+
+    let sess_iter = stmt.query_map([], |row| {
+        Ok(Session::new(
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+            row.get(9)?,
+        ))
+    })?;
+
+    let mut sessions = Vec::new();
+    for sess in sess_iter {
+        sessions.push(sess?);
+    }
+    Ok(sessions)
+}
+
 /// 특정 세션의 메시지 리스트를 턴 인덱스 오름차순으로 조회합니다.
 pub fn get_messages_by_session(conn: &Connection, session_id: &str) -> Result<Vec<Message>, rusqlite::Error> {
     let mut stmt = conn.prepare(
@@ -549,6 +579,11 @@ mod tests {
             .expect("Session 조회 실패")
             .expect("Session 존재하지 않음");
         assert_eq!(sess, fetched_sess);
+
+        // SELECT ALL 검증
+        let all_sessions = get_all_sessions(&conn).expect("전체 Session 조회 실패");
+        assert_eq!(all_sessions.len(), 1);
+        assert_eq!(all_sessions[0], sess);
 
         // 2. Message 데이터 테스트
         let msg = Message::new(

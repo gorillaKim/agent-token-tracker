@@ -3,13 +3,13 @@
 //! ~/.claude/projects/ 아래에 생성되는 JSONL 세션 로그를 파싱하고 정규화합니다.
 //! 사용자의 한국어 문서화 규칙에 맞춰 주석이 작성되었습니다.
 
+use serde_json::Value;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use serde_json::Value;
 
-use crate::model::{Session, Message, Node, ToolCall};
 use super::{LogAdapter, NormalizedSession};
+use crate::model::{Message, Node, Session, ToolCall};
 
 pub struct ClaudeCodeAdapter;
 
@@ -23,7 +23,7 @@ impl LogAdapter for ClaudeCodeAdapter {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown_session");
-        
+
         let mut session_id = file_name.to_string();
         let mut agent_version = None;
         let mut started_at = "1970-01-01T00:00:00Z".to_string();
@@ -71,19 +71,34 @@ impl LogAdapter for ClaudeCodeAdapter {
                     "message" => {
                         // 메시지 및 블록 분석
                         if let Some(msg_obj) = log_val.get("message") {
-                            let role = msg_obj.get("role").and_then(|r| r.as_str()).unwrap_or("unknown");
-                            let timestamp = log_val.get("timestamp").and_then(|t| t.as_str()).unwrap_or(&started_at);
-                            
+                            let role = msg_obj
+                                .get("role")
+                                .and_then(|r| r.as_str())
+                                .unwrap_or("unknown");
+                            let timestamp = log_val
+                                .get("timestamp")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or(&started_at);
+
                             // 토큰 사용량(usage) 추출 (role == assistant 일 때 유효)
                             let mut input_tokens = 0;
                             let mut cache_read_tokens = 0;
                             let mut output_tokens = 0;
-                            
+
                             if let Some(usage) = msg_obj.get("usage") {
-                                input_tokens = usage.get("input_tokens").and_then(|i| i.as_u64()).unwrap_or(0);
-                                cache_read_tokens = usage.get("cache_read_input_tokens").and_then(|c| c.as_u64()).unwrap_or(0);
-                                output_tokens = usage.get("output_tokens").and_then(|o| o.as_u64()).unwrap_or(0);
-                                
+                                input_tokens = usage
+                                    .get("input_tokens")
+                                    .and_then(|i| i.as_u64())
+                                    .unwrap_or(0);
+                                cache_read_tokens = usage
+                                    .get("cache_read_input_tokens")
+                                    .and_then(|c| c.as_u64())
+                                    .unwrap_or(0);
+                                output_tokens = usage
+                                    .get("output_tokens")
+                                    .and_then(|o| o.as_u64())
+                                    .unwrap_or(0);
+
                                 // 누계 합산
                                 total_input_tokens += input_tokens;
                                 total_output_tokens += output_tokens;
@@ -109,9 +124,14 @@ impl LogAdapter for ClaudeCodeAdapter {
                             turn_index += 1;
 
                             // content 블록 파싱 (thinking, text, tool_use 등)
-                            if let Some(content_array) = msg_obj.get("content").and_then(|c| c.as_array()) {
+                            if let Some(content_array) =
+                                msg_obj.get("content").and_then(|c| c.as_array())
+                            {
                                 for block in content_array {
-                                    let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("unknown");
+                                    let block_type = block
+                                        .get("type")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("unknown");
                                     match block_type {
                                         "thinking" | "text" => {
                                             nodes.push(Node::new(
@@ -129,12 +149,17 @@ impl LogAdapter for ClaudeCodeAdapter {
                                                 timestamp.to_string(),
                                             ));
 
-                                            if let Some(tool_name) = block.get("name").and_then(|n| n.as_str()) {
-                                                let tool_input_val = block.get("input").unwrap_or(&Value::Null);
-                                                 
+                                            if let Some(tool_name) =
+                                                block.get("name").and_then(|n| n.as_str())
+                                            {
+                                                let tool_input_val =
+                                                    block.get("input").unwrap_or(&Value::Null);
+
                                                 // 정규화된 tool_input 획득 및 멱등 input_hash 산출
-                                                let normalized_input_str = super::normalize_tool_input(tool_input_val);
-                                                let input_hash = super::calculate_input_hash(tool_input_val);
+                                                let normalized_input_str =
+                                                    super::normalize_tool_input(tool_input_val);
+                                                let input_hash =
+                                                    super::calculate_input_hash(tool_input_val);
 
                                                 tool_calls.push(ToolCall::new(
                                                     session_id.clone(),
@@ -197,15 +222,15 @@ mod tests {
         // 임시 테스트용 JSONL 파일 생성 (std::env::temp_dir() 사용)
         let mut temp_path = std::env::temp_dir();
         temp_path.push("test_claude_code_session.jsonl");
-        
+
         let mut temp_file = File::create(&temp_path).expect("임시 파일 생성 실패");
-        
+
         let log_data = r#"{"type": "session_meta", "id": "session-xyz", "cwd": "/Users/test/dir", "timestamp": "2026-06-23T10:00:00Z", "cli_version": "0.2.1"}
 {"type": "message", "timestamp": "2026-06-23T10:01:00Z", "message": {"role": "user", "content": [{"type": "text", "text": "안녕"}]}}
 {"type": "message", "timestamp": "2026-06-23T10:01:05Z", "message": {"role": "assistant", "model": "claude-3-5-sonnet", "usage": {"input_tokens": 100, "cache_read_input_tokens": 40, "output_tokens": 50}, "content": [{"type": "thinking", "thinking": "사용자 질문을 분석합니다."}, {"type": "tool_use", "name": "view_file", "input": {"AbsolutePath": "/test.txt"}}]}}
 {"type": "session_end", "timestamp": "2026-06-23T10:02:00Z"}
 "#;
-        
+
         write!(temp_file, "{}", log_data).expect("임시 파일 쓰기 실패");
         // 파일 쓰기 스트림 닫기
         drop(temp_file);
@@ -223,7 +248,10 @@ mod tests {
         assert_eq!(result.session.agent_type, "claude_code");
         assert_eq!(result.session.cwd, "/Users/test/dir");
         assert_eq!(result.session.started_at, "2026-06-23T10:00:00Z");
-        assert_eq!(result.session.ended_at, Some("2026-06-23T10:02:00Z".to_string()));
+        assert_eq!(
+            result.session.ended_at,
+            Some("2026-06-23T10:02:00Z".to_string())
+        );
         assert_eq!(result.session.agent_version, Some("0.2.1".to_string()));
         assert_eq!(result.session.total_input_tokens, 100);
         assert_eq!(result.session.total_output_tokens, 50);
