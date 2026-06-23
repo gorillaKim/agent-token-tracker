@@ -2,9 +2,23 @@
 
 use serde::{Serialize, Deserialize};
 use rusqlite::Connection;
+use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter};
+use notify::{Watcher, RecursiveMode};
+
 use agent_token_tracker::model::Session;
 use agent_token_tracker::db;
+use agent_token_tracker::pricing;
 use agent_token_tracker::detect::loops::{detect_session_anomalies, DetectorConfig, LoopDetectionResult};
+use agent_token_tracker::adapters::{
+    LogAdapter,
+    claude_code::ClaudeCodeAdapter,
+    codex::CodexAdapter,
+    antigravity::AntigravityAdapter,
+};
 
 // ────────────────────────────────────────────────────────────
 // 프론트엔드 연동용 직렬화 구조체 정의
@@ -95,7 +109,6 @@ fn get_agent_summaries() -> Result<Vec<AgentSummary>, String> {
             }
             "antigravity" => {
                 agy_sum.session_count += 1;
-                // Antigravity는 토큰 실측 불가능하므로 0 유지
                 agy_sum.total_cost_usd += cost;
             }
             _ => {}
@@ -164,8 +177,190 @@ fn get_daily_costs() -> Result<Vec<DailyCost>, String> {
     Ok(daily_costs)
 }
 
+// ────────────────────────────────────────────────────────────
+// 파일 실시간 감시 (notify) 백엔드 로직 구현
+// ────────────────────────────────────────────────────────────
+
+fn process_watch_file(
+    file_path: &Path,
+    pricing_cache: &HashMap<String, agent_token_tracker::model::Pricing>,
+    db_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path_str = file_path.to_str().unwrap_or("");
+    let is_vscdb = path_str.contains("state.vscdb");
+    let has_vscdb_param = path_str.contains("state.vscdb?session_id=");
+
+    let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if ext != "jsonl" && !is_vscdb && !has_vscdb_param {
+        return Ok(());
+    }
+
+    let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let is_codex = file_name.starts_with("rollout-");
+    let is_antigravity = is_vscdb || has_vscdb_param;
+
+    let parsed_res = if is_antigravity {
+        let adapter = AntigravityAdapter;
+        adapter.parse_session(path_str)
+    } else if is_codex {
+        let adapter = CodexAdapter;
+        adapter.parse_session(path_str)
+    } else {
+        let adapter = ClaudeCodeAdapter;
+        adapter.parse_session(path_str)
+    };
+
+    let mut parsed_session = parsed_res?;
+
+    // 비용 계산
+    let model_id_opt = parsed_session.session.model_id.as_deref().unwrap_or("unknown");
+    let pricing_info = parsed_session.session.model_id.as_ref()
+        .and_then(|m_id| pricing_cache.get(m_id));
+
+    for msg in &mut parsed_session.messages {
+        if msg.role == "assistant" {
+            msg.cost_usd = pricing::calculate_cost_usd(
+                pricing_info,
+                msg.input_tokens,
+                msg.cache_read_input_tokens,
+                msg.output_tokens,
+            );
+        }
+    }
+
+    // DB 갱신 (기존 세션 CASCADE 삭제 후 재생성)
+    let conn = Connection::open(db_path)?;
+    let _ = conn.pragma_update(None, "foreign_keys", "ON");
+    let _ = conn.pragma_update(None, "journal_mode", "WAL");
+    let _ = conn.pragma_update(None, "busy_timeout", &5000);
+
+    db::delete_session(&conn, &parsed_session.session.session_id)?;
+    db::insert_session(&conn, &parsed_session.session)?;
+    for msg in &parsed_session.messages {
+        db::insert_message(&conn, msg)?;
+    }
+    for node in &parsed_session.nodes {
+        db::insert_node(&conn, node)?;
+    }
+    for tc in &parsed_session.tool_calls {
+        db::insert_tool_call(&conn, tc)?;
+    }
+
+    Ok(())
+}
+
+fn start_watch_loop(app_handle: AppHandle) -> Result<(), String> {
+    use std::sync::mpsc::channel;
+
+    let db_path = "../atk.db";
+    let watch_path = "../tests/fixtures";
+
+    let (tx, rx) = channel();
+    let mut watcher = notify::recommended_watcher(move |res| {
+        if let Ok(event) = res {
+            let _ = tx.send(event);
+        }
+    }).map_err(|e| format!("파일 감시자 생성 실패: {}", e))?;
+
+    let target_dir = Path::new(watch_path);
+    if !target_dir.exists() {
+        return Err(format!("감시 경로가 존재하지 않습니다: {}", watch_path));
+    }
+
+    watcher.watch(target_dir, RecursiveMode::Recursive)
+        .map_err(|e| format!("파일 감시 시작 실패: {}", e))?;
+
+    println!("[Watch] Tauri 백그라운드 파일 감시 시작: {}", watch_path);
+
+    let mut last_event_time = Instant::now();
+    let mut pending_files = HashSet::new();
+
+    loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(event) => {
+                for p in event.paths {
+                    if p.is_file() {
+                        pending_files.insert(p);
+                    }
+                }
+                last_event_time = Instant::now();
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if !pending_files.is_empty() && last_event_time.elapsed() >= Duration::from_millis(500) {
+                    println!("[Watch] 감시 대상 파일 수정 감지, 증분 갱신 및 UI 업데이트 중...");
+                    
+                    let conn = match Connection::open(db_path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("DB 연결 실패: {}", e);
+                            pending_files.clear();
+                            continue;
+                        }
+                    };
+
+                    let pricing_map = match db::get_all_pricings(&conn) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("Pricing 데이터 조회 실패: {}", e);
+                            pending_files.clear();
+                            continue;
+                        }
+                    };
+
+                    let mut updated_any = false;
+                    for file in pending_files.drain() {
+                        let path_str = file.to_str().unwrap_or("");
+                        let is_vscdb = path_str.contains("state.vscdb");
+                        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+                        
+                        if ext != "jsonl" && !is_vscdb {
+                            continue;
+                        }
+
+                        if is_vscdb {
+                            if let Ok(ids) = agent_token_tracker::adapters::antigravity::get_vscdb_session_ids(path_str) {
+                                for id in ids {
+                                    let virtual_path_str = format!("{}?session_id={}", path_str, id);
+                                    let virtual_path = PathBuf::from(virtual_path_str);
+                                    if let Err(e) = process_watch_file(&virtual_path, &pricing_map, db_path) {
+                                        eprintln!("vscdb 파일 적재 중 에러: {}", e);
+                                    } else {
+                                        updated_any = true;
+                                    }
+                                }
+                            }
+                        } else {
+                            if let Err(e) = process_watch_file(&file, &pricing_map, db_path) {
+                                eprintln!("JSONL 파일 적재 중 에러: {}", e);
+                            } else {
+                                updated_any = true;
+                            }
+                        }
+                    }
+
+                    if updated_any {
+                        println!("[Watch] 증분 갱신 완료. 프론트엔드로 db-updated 이벤트 전송!");
+                        if let Err(e) = app_handle.emit("db-updated", ()) {
+                            eprintln!("Tauri 이벤트 방출 실패: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     tauri::Builder::default()
+        .setup(|app| {
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                if let Err(e) = start_watch_loop(app_handle) {
+                    eprintln!("Watch Loop Error: {}", e);
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_active_sessions,
             get_agent_summaries,

@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 interface Session {
   session_id: string;
@@ -50,25 +51,36 @@ function App() {
 
   const chartRef = useRef<SVGSVGElement>(null);
 
-  useEffect(() => {
-    async function loadData() {
-      try {
-        const sessList = await invoke<Session[]>("get_active_sessions");
-        setSessions(sessList);
+  async function loadData() {
+    try {
+      const sessList = await invoke<Session[]>("get_active_sessions");
+      setSessions(sessList);
 
-        const sumList = await invoke<AgentSummary[]>("get_agent_summaries");
-        setSummaries(sumList);
+      const sumList = await invoke<AgentSummary[]>("get_agent_summaries");
+      setSummaries(sumList);
 
-        const anomalyList = await invoke<LoopDetectionResult[]>("get_loop_signals");
-        setAnomalies(anomalyList);
+      const anomalyList = await invoke<LoopDetectionResult[]>("get_loop_signals");
+      setAnomalies(anomalyList);
 
-        const costList = await invoke<DailyCost[]>("get_daily_costs");
-        setDailyCosts(costList);
-      } catch (err: any) {
-        setError(err.toString());
-      }
+      const costList = await invoke<DailyCost[]>("get_daily_costs");
+      setDailyCosts(costList);
+    } catch (err: any) {
+      setError(err.toString());
     }
+  }
+
+  useEffect(() => {
     loadData();
+
+    // db-updated 이벤트 리스닝 연동
+    const unlistenPromise = listen("db-updated", () => {
+      console.log("[Watch] DB 수정 감지! 데이터를 새로고침합니다.");
+      loadData();
+    });
+
+    return () => {
+      unlistenPromise.then((f) => f());
+    };
   }, []);
 
   // SVG Chart Dimensions
