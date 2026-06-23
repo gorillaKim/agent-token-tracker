@@ -19,6 +19,12 @@ pub struct AgentSummary {
     pub total_cost_usd: f64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DailyCost {
+    pub date: String,
+    pub total_cost: f64,
+}
+
 // ────────────────────────────────────────────────────────────
 // 헬퍼: 데이터베이스 커넥션 획득
 // ────────────────────────────────────────────────────────────
@@ -124,12 +130,47 @@ fn get_loop_signals() -> Result<Vec<LoopDetectionResult>, String> {
     Ok(anomalies)
 }
 
+/// 4. 최근 14일간의 일별 비용 집계
+#[tauri::command]
+fn get_daily_costs() -> Result<Vec<DailyCost>, String> {
+    let conn = get_db_conn()?;
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE dates(date) AS (
+            SELECT date('now', '-13 day')
+            UNION ALL
+            SELECT date(date, '+1 day') FROM dates WHERE date < date('now')
+         )
+         SELECT 
+            d.date, 
+            COALESCE(SUM(m.cost_usd), 0.0) as total_cost
+         FROM dates d
+         LEFT JOIN messages m ON date(m.created_at) = d.date
+         GROUP BY d.date
+         ORDER BY d.date ASC;"
+    ).map_err(|e| format!("SQL 쿼리 준비 에러: {}", e))?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(DailyCost {
+            date: row.get(0)?,
+            total_cost: row.get(1)?,
+        })
+    }).map_err(|e| format!("쿼리 실행 에러: {}", e))?;
+
+    let mut daily_costs = Vec::new();
+    for r in rows {
+        daily_costs.push(r.map_err(|e| format!("데이터 매핑 에러: {}", e))?);
+    }
+
+    Ok(daily_costs)
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_active_sessions,
             get_agent_summaries,
-            get_loop_signals
+            get_loop_signals,
+            get_daily_costs
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 앱 구동 중 에러 발생");
