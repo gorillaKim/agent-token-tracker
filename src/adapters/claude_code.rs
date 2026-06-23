@@ -6,7 +6,6 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use xxhash_rust::xxh3::xxh3_64;
 use serde_json::Value;
 
 use crate::model::{Session, Message, Node, ToolCall};
@@ -131,18 +130,16 @@ impl LogAdapter for ClaudeCodeAdapter {
                                             ));
 
                                             if let Some(tool_name) = block.get("name").and_then(|n| n.as_str()) {
-                                                let tool_input_val = block.get("input").cloned().unwrap_or(Value::Null);
-                                                let tool_input_str = serde_json::to_string(&tool_input_val).ok();
-                                                
-                                                // xxhash xxh3 기반 멱등 input_hash 산출
-                                                let hash_input = tool_input_str.as_deref().unwrap_or("{}");
-                                                let hash = xxh3_64(hash_input.as_bytes());
-                                                let input_hash = format!("{:x}", hash);
+                                                let tool_input_val = block.get("input").unwrap_or(&Value::Null);
+                                                 
+                                                // 정규화된 tool_input 획득 및 멱등 input_hash 산출
+                                                let normalized_input_str = super::normalize_tool_input(tool_input_val);
+                                                let input_hash = super::calculate_input_hash(tool_input_val);
 
                                                 tool_calls.push(ToolCall::new(
                                                     session_id.clone(),
                                                     tool_name.to_string(),
-                                                    tool_input_str,
+                                                    Some(normalized_input_str),
                                                     input_hash,
                                                     true,
                                                     false,
