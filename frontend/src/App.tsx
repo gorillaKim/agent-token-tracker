@@ -159,6 +159,7 @@ function App() {
   const [dailyCosts, setDailyCosts] = useState<DailyCost[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [syncLoading, setSyncLoading] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<string | null>(null);
 
   // Selected session and drawer details state
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -180,6 +181,7 @@ function App() {
 
   const handleSyncSessions = async () => {
     setSyncLoading(true);
+    setSyncStatus(null);
     try {
       const res = await invoke<{
         files_total: number;
@@ -188,16 +190,16 @@ function App() {
         sessions_failed: number;
       }>("sync_local_sessions");
       
-      alert(
-        `수동 증분 동기화 완료!\n` +
-        `- 총 발견 파일: ${res.files_total}개\n` +
-        `- 신규 적재 세션: ${res.sessions_inserted}개\n` +
-        `- 중복 스킵 세션: ${res.sessions_skipped}개\n` +
-        `- 실패한 파일: ${res.sessions_failed}개`
+      setSyncStatus(
+        `수동 증분 동기화 완료! ` +
+        `(총 발견: ${res.files_total}개, ` +
+        `신규 적재: ${res.sessions_inserted}개, ` +
+        `중복 스킵: ${res.sessions_skipped}개, ` +
+        `실패: ${res.sessions_failed}개)`
       );
       loadData();
     } catch (e: any) {
-      alert(`동기화 실패: ${e.toString()}`);
+      setSyncStatus(`동기화 실패: ${e.toString()}`);
     } finally {
       setSyncLoading(false);
     }
@@ -436,6 +438,41 @@ function App() {
                 </div>
               </div>
             </header>
+
+            {syncStatus && (
+              <div 
+                style={{ 
+                  background: syncStatus.includes("실패") ? "rgba(239, 68, 68, 0.15)" : "rgba(16, 185, 129, 0.15)",
+                  border: syncStatus.includes("실패") ? "1px solid rgba(239, 68, 68, 0.3)" : "1px solid rgba(16, 185, 129, 0.3)",
+                  color: syncStatus.includes("실패") ? "hsl(0, 100%, 75%)" : "hsl(150, 100%, 45%)",
+                  padding: "0.75rem 1.25rem",
+                  borderRadius: "8px",
+                  marginBottom: "1rem",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  fontSize: "0.9rem",
+                  fontWeight: "500",
+                  boxShadow: syncStatus.includes("실패") ? "0 0 10px rgba(239, 68, 68, 0.1)" : "0 0 10px rgba(16, 185, 129, 0.1)"
+                }}
+              >
+                <span>{syncStatus}</span>
+                <button 
+                  onClick={() => setSyncStatus(null)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: "inherit",
+                    cursor: "pointer",
+                    fontSize: "1.2rem",
+                    padding: "0 0.25rem",
+                    lineHeight: "1"
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            )}
 
             {error && <div style={{ color: "hsl(0, 100%, 65%)", marginBottom: "1rem", fontWeight: "600" }}>⚠️ 오류: {error}</div>}
 

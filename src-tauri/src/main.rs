@@ -698,10 +698,15 @@ pub struct SyncResult {
 
 #[tauri::command]
 async fn sync_local_sessions(app_handle: AppHandle) -> Result<SyncResult, String> {
+    println!("[Sync] sync_local_sessions command triggered!");
+    if let Ok(cwd) = std::env::current_dir() {
+        println!("[Sync] Current working directory: {:?}", cwd);
+    }
     let db_path = "../atk.db";
     
     // 1. 로드 설정 경로
     let config_path = get_config_path(&app_handle)?;
+    println!("[Sync] config_path: {:?}", config_path);
     let mut log_dir = "../tests/fixtures".to_string();
     if config_path.exists() {
         if let Ok(json) = std::fs::read_to_string(config_path) {
@@ -712,14 +717,17 @@ async fn sync_local_sessions(app_handle: AppHandle) -> Result<SyncResult, String
             }
         }
     }
+    println!("[Sync] Final log_dir: {}", log_dir);
     
     let target_dir = Path::new(&log_dir);
     if !target_dir.exists() || !target_dir.is_dir() {
+        println!("[Sync] Target directory does not exist: {}", log_dir);
         return Err(format!("로그 디렉토리가 존재하지 않거나 폴더가 아닙니다: {}", log_dir));
     }
     
     let mut files = Vec::new();
     collect_files_helper(target_dir, &mut files)?;
+    println!("[Sync] Collected {} files total", files.len());
     
     let conn = Connection::open(db_path)
         .map_err(|e| format!("DB 연결 실패: {}", e))?;
@@ -741,24 +749,30 @@ async fn sync_local_sessions(app_handle: AppHandle) -> Result<SyncResult, String
         if ext != "jsonl" && !is_vscdb {
             continue;
         }
+        println!("[Sync] Processing file: {}", path_str);
         
         if is_vscdb {
             if let Ok(ids) = agent_token_tracker::adapters::antigravity::get_vscdb_session_ids(path_str) {
+                println!("[Sync] vscdb session ids found: {:?}", ids);
                 for id in ids {
                     if db::get_session(&conn, &id).is_ok() {
+                        println!("[Sync] vscdb session already exists: {}", id);
                         result.sessions_skipped += 1;
                         continue;
                     }
                     
                     let virtual_path_str = format!("{}?session_id={}", path_str, id);
                     let virtual_path = PathBuf::from(virtual_path_str);
-                    if let Err(_) = process_watch_file(&virtual_path, &pricing_map, db_path) {
+                    if let Err(e) = process_watch_file(&virtual_path, &pricing_map, db_path) {
+                        println!("[Sync] vscdb insert failed for {}: {:?}", id, e);
                         result.sessions_failed += 1;
                     } else {
+                        println!("[Sync] vscdb insert success: {}", id);
                         result.sessions_inserted += 1;
                     }
                 }
             } else {
+                println!("[Sync] vscdb get ids failed for: {}", path_str);
                 result.sessions_failed += 1;
             }
         } else {
@@ -777,7 +791,9 @@ async fn sync_local_sessions(app_handle: AppHandle) -> Result<SyncResult, String
             match parsed_res {
                 Ok(mut parsed_session) => {
                     let session_id = &parsed_session.session.session_id;
+                    println!("[Sync] Parsed session_id: {}", session_id);
                     if db::get_session(&conn, session_id).is_ok() {
+                        println!("[Sync] Session already exists in DB: {}", session_id);
                         result.sessions_skipped += 1;
                         continue;
                     }
@@ -799,7 +815,7 @@ async fn sync_local_sessions(app_handle: AppHandle) -> Result<SyncResult, String
 
                     // DB Insert
                     if let Err(e) = db::insert_session(&conn, &parsed_session.session) {
-                        eprintln!("세션 insert 에러: {}", e);
+                        println!("[Sync] 세션 insert 에러 for {}: {}", session_id, e);
                         result.sessions_failed += 1;
                         continue;
                     }
@@ -812,10 +828,11 @@ async fn sync_local_sessions(app_handle: AppHandle) -> Result<SyncResult, String
                     for tc in &parsed_session.tool_calls {
                         let _ = db::insert_tool_call(&conn, tc);
                     }
-                    
+                    println!("[Sync] Successfully inserted session: {}", session_id);
                     result.sessions_inserted += 1;
                 }
-                Err(_) => {
+                Err(e) => {
+                    println!("[Sync] Parsing failed for {}: {:?}", path_str, e);
                     result.sessions_failed += 1;
                 }
             }
