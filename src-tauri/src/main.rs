@@ -673,6 +673,163 @@ fn validate_local_path(path: String) -> Result<bool, String> {
     Ok(p.exists() && p.is_dir())
 }
 
+fn collect_files_helper(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    if dir.is_dir() {
+        for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if path.is_dir() {
+                collect_files_helper(&path, files)?;
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SyncResult {
+    pub files_total: usize,
+    pub sessions_inserted: usize,
+    pub sessions_skipped: usize,
+    pub sessions_failed: usize,
+}
+
+#[tauri::command]
+async fn sync_local_sessions(app_handle: AppHandle) -> Result<SyncResult, String> {
+    let db_path = "../atk.db";
+    
+    // 1. 로드 설정 경로
+    let config_path = get_config_path(&app_handle)?;
+    let mut log_dir = "../tests/fixtures".to_string();
+    if config_path.exists() {
+        if let Ok(json) = std::fs::read_to_string(config_path) {
+            if let Ok(settings) = serde_json::from_str::<AppSettings>(&json) {
+                if !settings.log_dir.is_empty() {
+                    log_dir = settings.log_dir;
+                }
+            }
+        }
+    }
+    
+    let target_dir = Path::new(&log_dir);
+    if !target_dir.exists() || !target_dir.is_dir() {
+        return Err(format!("로그 디렉토리가 존재하지 않거나 폴더가 아닙니다: {}", log_dir));
+    }
+    
+    let mut files = Vec::new();
+    collect_files_helper(target_dir, &mut files)?;
+    
+    let conn = Connection::open(db_path)
+        .map_err(|e| format!("DB 연결 실패: {}", e))?;
+    let pricing_map = db::get_all_pricings(&conn)
+        .map_err(|e| format!("단가 로드 실패: {}", e))?;
+    
+    let mut result = SyncResult {
+        files_total: files.len(),
+        sessions_inserted: 0,
+        sessions_skipped: 0,
+        sessions_failed: 0,
+    };
+    
+    for file in files {
+        let path_str = file.to_str().unwrap_or("");
+        let is_vscdb = path_str.contains("state.vscdb");
+        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+        
+        if ext != "jsonl" && !is_vscdb {
+            continue;
+        }
+        
+        if is_vscdb {
+            if let Ok(ids) = agent_token_tracker::adapters::antigravity::get_vscdb_session_ids(path_str) {
+                for id in ids {
+                    if db::get_session(&conn, &id).is_ok() {
+                        result.sessions_skipped += 1;
+                        continue;
+                    }
+                    
+                    let virtual_path_str = format!("{}?session_id={}", path_str, id);
+                    let virtual_path = PathBuf::from(virtual_path_str);
+                    if let Err(_) = process_watch_file(&virtual_path, &pricing_map, db_path) {
+                        result.sessions_failed += 1;
+                    } else {
+                        result.sessions_inserted += 1;
+                    }
+                }
+            } else {
+                result.sessions_failed += 1;
+            }
+        } else {
+            // JSONL 파싱 및 중복 검사 후 적재
+            let file_name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let is_codex = file_name.starts_with("rollout-");
+            
+            let parsed_res = if is_codex {
+                let adapter = CodexAdapter;
+                adapter.parse_session(path_str)
+            } else {
+                let adapter = ClaudeCodeAdapter;
+                adapter.parse_session(path_str)
+            };
+            
+            match parsed_res {
+                Ok(mut parsed_session) => {
+                    let session_id = &parsed_session.session.session_id;
+                    if db::get_session(&conn, session_id).is_ok() {
+                        result.sessions_skipped += 1;
+                        continue;
+                    }
+                    
+                    // 비용 계산 및 적재
+                    let pricing_info = parsed_session.session.model_id.as_ref()
+                        .and_then(|m_id| pricing_map.get(m_id));
+
+                    for msg in &mut parsed_session.messages {
+                        if msg.role == "assistant" {
+                            msg.cost_usd = pricing::calculate_cost_usd(
+                                pricing_info,
+                                msg.input_tokens,
+                                msg.cache_read_input_tokens,
+                                msg.output_tokens,
+                            );
+                        }
+                    }
+
+                    // DB Insert
+                    if let Err(e) = db::insert_session(&conn, &parsed_session.session) {
+                        eprintln!("세션 insert 에러: {}", e);
+                        result.sessions_failed += 1;
+                        continue;
+                    }
+                    for msg in &parsed_session.messages {
+                        let _ = db::insert_message(&conn, msg);
+                    }
+                    for node in &parsed_session.nodes {
+                        let _ = db::insert_node(&conn, node);
+                    }
+                    for tc in &parsed_session.tool_calls {
+                        let _ = db::insert_tool_call(&conn, tc);
+                    }
+                    
+                    result.sessions_inserted += 1;
+                }
+                Err(_) => {
+                    result.sessions_failed += 1;
+                }
+            }
+        }
+    }
+    
+    if result.sessions_inserted > 0 {
+        update_tray_status(&app_handle);
+        let _ = app_handle.emit("db-updated", ());
+    }
+    
+    Ok(result)
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -731,7 +888,8 @@ fn main() {
             delete_api_key,
             get_api_keys_status,
             validate_stored_api_key,
-            validate_local_path
+            validate_local_path,
+            sync_local_sessions
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 앱 구동 중 에러 발생");

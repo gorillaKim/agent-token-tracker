@@ -158,6 +158,7 @@ function App() {
   const [anomalies, setAnomalies] = useState<LoopDetectionResult[]>([]);
   const [dailyCosts, setDailyCosts] = useState<DailyCost[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [syncLoading, setSyncLoading] = useState(false);
 
   // Selected session and drawer details state
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -176,6 +177,31 @@ function App() {
   }>({ x: 0, y: 0, visible: false, date: "", cost: 0 });
 
   const chartRef = useRef<SVGSVGElement>(null);
+
+  const handleSyncSessions = async () => {
+    setSyncLoading(true);
+    try {
+      const res = await invoke<{
+        files_total: number;
+        sessions_inserted: number;
+        sessions_skipped: number;
+        sessions_failed: number;
+      }>("sync_local_sessions");
+      
+      alert(
+        `수동 증분 동기화 완료!\n` +
+        `- 총 발견 파일: ${res.files_total}개\n` +
+        `- 신규 적재 세션: ${res.sessions_inserted}개\n` +
+        `- 중복 스킵 세션: ${res.sessions_skipped}개\n` +
+        `- 실패한 파일: ${res.sessions_failed}개`
+      );
+      loadData();
+    } catch (e: any) {
+      alert(`동기화 실패: ${e.toString()}`);
+    } finally {
+      setSyncLoading(false);
+    }
+  };
 
   async function loadData() {
     try {
@@ -396,9 +422,18 @@ function App() {
                   </span>
                 </div>
               </div>
-              <div className="pulse-badge">
-                <span className="pulse-dot"></span>
-                <span>로컬 감시 모드 작동 중</span>
+              <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
+                <button
+                  onClick={handleSyncSessions}
+                  disabled={syncLoading}
+                  className="btn-sync"
+                >
+                  <span>🔄</span> {syncLoading ? "동기화 중..." : "수동 증분 동기화"}
+                </button>
+                <div className="pulse-badge">
+                  <span className="pulse-dot"></span>
+                  <span>로컬 감시 작동 중</span>
+                </div>
               </div>
             </header>
 

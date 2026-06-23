@@ -951,3 +951,54 @@ body {
   100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
 }
 
+/* ────────────────────────────────────────────────────────────
+   이슈 #799: 수동 증분 동기화 버튼 (.btn-sync)
+   ──────────────────────────────────────────────────────────── */
+.btn-sync {
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.1), rgba(139, 92, 246, 0.1));
+  border: 1px solid rgba(6, 182, 212, 0.3);
+  color: var(--neon-blue);
+  padding: 0.5rem 1.2rem;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+  backdrop-filter: blur(8px);
+}
+
+.btn-sync:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.25), rgba(139, 92, 246, 0.25));
+  border-color: var(--neon-blue);
+  box-shadow: var(--neon-blue-glow);
+  color: #fff;
+  transform: translateY(-1px);
+}
+
+.btn-sync:hover:not(:disabled) span {
+  display: inline-block;
+  animation: rotate-sync 1.5s linear infinite;
+}
+
+.btn-sync:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn-sync:disabled {
+  background: rgba(255, 255, 255, 0.02);
+  border-color: rgba(255, 255, 255, 0.05);
+  color: hsl(215, 20%, 40%);
+  cursor: not-allowed;
+}
+
+@keyframes rotate-sync {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
