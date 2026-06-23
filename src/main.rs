@@ -85,6 +85,8 @@ enum Commands {
         #[arg(long, help = "핑퐁 반복 주기 임계치 [기본값: 3]")]
         ping_pong: Option<usize>,
     },
+    #[command(about = "Ratatui 기반 TUI 라이브 뷰를 실행합니다.")]
+    Tui,
 }
 
 /// 스캔 결과를 요약 보고하기 위한 구조체 (이슈 #683 정책 준수)
@@ -629,6 +631,12 @@ fn main() {
                      analyzed_sessions_count,
                      rows.iter().map(|r| &r.session_id).collect::<std::collections::HashSet<_>>().len());
             println!("=====================================================================================================================================");
+        }
+        Commands::Tui => {
+            if let Err(err) = tui::run_tui(&db_path) {
+                eprintln!("TUI 실행 오류: {}", err);
+                std::process::exit(1);
+            }
         }
     }
 }
