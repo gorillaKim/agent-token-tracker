@@ -94,6 +94,11 @@ enum Commands {
     },
     #[command(about = "Ratatui 기반 TUI 라이브 뷰를 실행합니다.")]
     Tui,
+    #[command(about = "FTS5를 통해 에이전트 대화 본문을 검색하고 컨텍스트를 출력합니다.")]
+    Search {
+        #[arg(help = "검색할 쿼리 문자열 (SQLite FTS5 매치 문법 지원)")]
+        query: String,
+    },
 }
 
 /// 스캔 결과를 요약 보고하기 위한 구조체 (이슈 #683 정책 준수)
@@ -662,6 +667,52 @@ fn main() {
         Commands::Tui => {
             if let Err(err) = tui::run_tui(&db_path) {
                 eprintln!("TUI 실행 오류: {}", err);
+                std::process::exit(1);
+            }
+        }
+        Commands::Search { query } => {
+            #[cfg(feature = "fts")]
+            {
+                let conn = match db::init_db(&db_path) {
+                    Ok(c) => c,
+                    Err(err) => {
+                        eprintln!("데이터베이스 연결 실패: {}", err);
+                        std::process::exit(1);
+                    }
+                };
+
+                match db::search_messages(&conn, query) {
+                    Ok(results) => {
+                        println!("\n================================================ 대화 본문 검색 결과 ================================================");
+                        println!("검색 쿼리: '{}'", query);
+                        println!("검색된 메시지 수: {} 건", results.len());
+                        println!("=====================================================================================================================");
+
+                        for r in &results {
+                            let total_tokens = r.total_input_tokens + r.total_output_tokens;
+                            println!("\n[세션 ID] {}", r.session_id);
+                            println!("  - 모델 ID: {} | 시작 시간: {}", r.model_id.as_deref().unwrap_or("unknown"), r.started_at);
+                            println!("  - 전체 토큰: {} (In: {}, Out: {}) | 세션 비용: ${:.6}", format_number(total_tokens), format_number(r.total_input_tokens), format_number(r.total_output_tokens), r.cost_usd);
+                            println!("  - 역할: {} (Turn Index: {})", r.role, r.turn_index);
+                            println!("  - 메시지 내용:");
+                            for line in r.content.lines() {
+                                println!("    > {}", line);
+                            }
+                            println!("---------------------------------------------------------------------------------------------------------------------");
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("대화 검색 실패: {}", err);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            #[cfg(not(feature = "fts"))]
+            {
+                let _ = query;
+                eprintln!("에러: 대화 검색 기능(FTS5)은 빌드 시 컴파일되지 않았습니다.");
+                eprintln!("도움을 받으려면 '--features fts' 플래그를 사용하여 빌드하여 주십시오.");
+                eprintln!("예시: cargo run --features fts -- search \"<query>\"");
                 std::process::exit(1);
             }
         }

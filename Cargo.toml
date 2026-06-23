@@ -18,3 +18,8 @@ rayon = "1.10"
 xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
 blake3 = "1.5"
 notify = "6.1.1"
+
+[features]
+default = []
+fts = []
+

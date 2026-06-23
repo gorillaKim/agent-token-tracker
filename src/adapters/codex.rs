@@ -90,6 +90,7 @@ impl LogAdapter for CodexAdapter {
                                     out_t,
                                     0.0,
                                     started_at.clone(),
+                                    None,
                                 );
                                 messages.push(msg);
                             }

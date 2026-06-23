@@ -109,6 +109,39 @@ impl LogAdapter for ClaudeCodeAdapter {
                                 model_id = Some(m_id.to_string());
                             }
 
+                            // content 블록 파싱하여 텍스트 결합
+                            let mut text_content = String::new();
+                            if let Some(content_array) = msg_obj.get("content").and_then(|c| c.as_array()) {
+                                for block in content_array {
+                                    let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("unknown");
+                                    match block_type {
+                                        "thinking" => {
+                                            if let Some(thinking_text) = block.get("thinking").and_then(|t| t.as_str()) {
+                                                if !text_content.is_empty() {
+                                                    text_content.push('\n');
+                                                }
+                                                text_content.push_str("[Thinking] ");
+                                                text_content.push_str(thinking_text);
+                                            }
+                                        }
+                                        "text" => {
+                                            if let Some(text_val) = block.get("text").and_then(|t| t.as_str()) {
+                                                if !text_content.is_empty() {
+                                                    text_content.push('\n');
+                                                }
+                                                text_content.push_str(text_val);
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            let msg_content_opt = if text_content.is_empty() {
+                                None
+                            } else {
+                                Some(text_content)
+                            };
+
                             // 턴 메시지 추가
                             let msg = Message::new(
                                 session_id.clone(),
@@ -119,6 +152,7 @@ impl LogAdapter for ClaudeCodeAdapter {
                                 output_tokens,
                                 0.0, // cost_usd는 추후 pricing 모듈에서 계산
                                 timestamp.to_string(),
+                                msg_content_opt,
                             );
                             messages.push(msg);
                             turn_index += 1;
@@ -261,10 +295,12 @@ mod tests {
         // 2. Message 데이터 검증
         assert_eq!(result.messages.len(), 2);
         assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[0].content, Some("안녕".to_string()));
         assert_eq!(result.messages[1].role, "assistant");
         assert_eq!(result.messages[1].input_tokens, 100);
         assert_eq!(result.messages[1].cache_read_input_tokens, 40);
         assert_eq!(result.messages[1].output_tokens, 50);
+        assert_eq!(result.messages[1].content, Some("[Thinking] 사용자 질문을 분석합니다.".to_string()));
 
         // 3. Node 데이터 검증
         assert_eq!(result.nodes.len(), 3); // user text, assistant thinking, assistant tool_use

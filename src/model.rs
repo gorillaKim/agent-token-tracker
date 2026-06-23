@@ -66,6 +66,7 @@ pub struct Message {
     pub output_tokens: u64,
     pub cost_usd: f64,
     pub created_at: String,
+    pub content: Option<String>,
 }
 
 impl Message {
@@ -78,6 +79,7 @@ impl Message {
         output_tokens: u64,
         cost_usd: f64,
         created_at: String,
+        content: Option<String>,
     ) -> Self {
         Self {
             id: None,
@@ -89,6 +91,7 @@ impl Message {
             output_tokens,
             cost_usd,
             created_at,
+            content,
         }
     }
 }

@@ -49,10 +49,60 @@ pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
             cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
             output_tokens INTEGER NOT NULL DEFAULT 0,
             cost_usd REAL NOT NULL DEFAULT 0.0,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            content TEXT
         );",
         [],
     )?;
+
+    // 멱등적으로 컬럼 추가 (ALTER TABLE 에러 무시)
+    conn.execute("ALTER TABLE messages ADD COLUMN content TEXT;", []).ok();
+
+    // SQLite FTS5 확장 기능 선택적 활성화
+    #[cfg(feature = "fts")]
+    {
+        // FTS5 가상 테이블 생성 (messages 테이블을 외부 콘텐츠로 하는 가상 테이블)
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS msg_fts USING fts5(
+                session_id UNINDEXED,
+                role,
+                content,
+                content='messages',
+                content_rowid='id'
+            );",
+            [],
+        )?;
+
+        // FTS5 동기화 트리거 생성
+        // INSERT 트리거
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS trg_msg_insert AFTER INSERT ON messages BEGIN
+                INSERT INTO msg_fts(rowid, session_id, role, content)
+                VALUES (new.id, new.session_id, new.role, new.content);
+            END;",
+            [],
+        )?;
+
+        // DELETE 트리거
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS trg_msg_delete AFTER DELETE ON messages BEGIN
+                INSERT INTO msg_fts(msg_fts, rowid, session_id, role, content)
+                VALUES ('delete', old.id, old.session_id, old.role, old.content);
+            END;",
+            [],
+        )?;
+
+        // UPDATE 트리거
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS trg_msg_update AFTER UPDATE ON messages BEGIN
+                INSERT INTO msg_fts(msg_fts, rowid, session_id, role, content)
+                VALUES ('delete', old.id, old.session_id, old.role, old.content);
+                INSERT INTO msg_fts(rowid, session_id, role, content)
+                VALUES (new.id, new.session_id, new.role, new.content);
+            END;",
+            [],
+        )?;
+    }
 
     // 3. nodes 테이블 생성
     conn.execute(
@@ -149,8 +199,8 @@ pub fn insert_message(conn: &Connection, msg: &Message) -> Result<(), rusqlite::
     conn.execute(
         "INSERT INTO messages (
             session_id, turn_index, role, input_tokens, cache_read_input_tokens,
-            output_tokens, cost_usd, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            output_tokens, cost_usd, created_at, content
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             msg.session_id,
             msg.turn_index,
@@ -159,7 +209,8 @@ pub fn insert_message(conn: &Connection, msg: &Message) -> Result<(), rusqlite::
             msg.cache_read_input_tokens,
             msg.output_tokens,
             msg.cost_usd,
-            msg.created_at
+            msg.created_at,
+            msg.content
         ],
     )?;
     Ok(())
@@ -264,7 +315,7 @@ pub fn get_all_sessions(conn: &Connection) -> Result<Vec<Session>, rusqlite::Err
 pub fn get_messages_by_session(conn: &Connection, session_id: &str) -> Result<Vec<Message>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT id, session_id, turn_index, role, input_tokens, cache_read_input_tokens,
-                output_tokens, cost_usd, created_at
+                output_tokens, cost_usd, created_at, content
          FROM messages WHERE session_id = ?1 ORDER BY turn_index ASC",
     )?;
 
@@ -278,6 +329,7 @@ pub fn get_messages_by_session(conn: &Connection, session_id: &str) -> Result<Ve
             row.get(6)?,
             row.get(7)?,
             row.get(8)?,
+            row.get(9)?,
         );
         msg.id = Some(row.get(0)?);
         Ok(msg)
@@ -607,6 +659,7 @@ mod tests {
             50,
             0.003,
             "2026-06-23T09:01:00Z".to_string(),
+            Some("안녕하세요".to_string()),
         );
         insert_message(&conn, &msg).expect("Message 삽입 실패");
         
@@ -690,6 +743,80 @@ mod tests {
 
         let deleted_tcs = get_tool_calls_by_session(&conn, "sess-uuid-1234").expect("ToolCall 조회 실패");
         assert!(deleted_tcs.is_empty());
+
+        // 8. FTS5 검색 및 트리거 동기화 테스트
+        #[cfg(feature = "fts")]
+        {
+            let test_sess = Session::new(
+                "sess-fts-test".to_string(),
+                "claude_code".to_string(),
+                None,
+                "2026-06-23T12:00:00Z".to_string(),
+                None,
+                "/Users/madup/fts".to_string(),
+                Some("claude-3-5-sonnet".to_string()),
+                100,
+                50,
+                "api".to_string(),
+                None,
+                None,
+            );
+            insert_session(&conn, &test_sess).expect("FTS 테스트 세션 삽입 실패");
+
+            let test_msg1 = Message::new(
+                "sess-fts-test".to_string(),
+                1,
+                "user".to_string(),
+                10,
+                0,
+                0,
+                0.0,
+                "2026-06-23T12:01:00Z".to_string(),
+                Some("중요한 대화 내용입니다. FTS5 검색을 테스트합니다.".to_string()),
+            );
+            let test_msg2 = Message::new(
+                "sess-fts-test".to_string(),
+                2,
+                "assistant".to_string(),
+                0,
+                0,
+                20,
+                0.0003,
+                "2026-06-23T12:01:10Z".to_string(),
+                Some("어시스턴트의 답변으로 view_file 호출이 완료되었습니다.".to_string()),
+            );
+            insert_message(&conn, &test_msg1).expect("FTS 테스트 메시지1 삽입 실패");
+            insert_message(&conn, &test_msg2).expect("FTS 테스트 메시지2 삽입 실패");
+
+            // FTS5 MATCH 검색 수행
+            let search_res = search_messages(&conn, "FTS5").expect("FTS 검색 실패");
+            assert_eq!(search_res.len(), 1);
+            assert_eq!(search_res[0].session_id, "sess-fts-test");
+            assert_eq!(search_res[0].content, "중요한 대화 내용입니다. FTS5 검색을 테스트합니다.");
+
+            let search_res_2 = search_messages(&conn, "view_file").expect("FTS 검색 실패");
+            assert_eq!(search_res_2.len(), 1);
+            assert_eq!(search_res_2[0].content, "어시스턴트의 답변으로 view_file 호출이 완료되었습니다.");
+
+            // UPDATE에 따른 트리거 동기화 검증
+            conn.execute(
+                "UPDATE messages SET content = '수정된 메시지 본문입니다.' WHERE id = ?1",
+                params![search_res_2[0].id],
+            ).expect("메시지 업데이트 실패");
+
+            let search_res_updated = search_messages(&conn, "수정된").expect("FTS 검색 실패");
+            assert_eq!(search_res_updated.len(), 1);
+            assert_eq!(search_res_updated[0].content, "수정된 메시지 본문입니다.");
+
+            // DELETE에 따른 트리거 동기화 검증
+            conn.execute(
+                "DELETE FROM messages WHERE id = ?1",
+                params![search_res_updated[0].id],
+            ).expect("메시지 삭제 실패");
+
+            let search_res_deleted = search_messages(&conn, "수정된").expect("FTS 검색 실패");
+            assert!(search_res_deleted.is_empty());
+        }
     }
 }
 
@@ -699,5 +826,55 @@ mod tests {
 pub fn delete_session(conn: &Connection, session_id: &str) -> Result<(), rusqlite::Error> {
     conn.execute("DELETE FROM sessions WHERE session_id = ?1", params![session_id])?;
     Ok(())
+}
+
+#[cfg(feature = "fts")]
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    pub id: i64,
+    pub session_id: String,
+    pub role: String,
+    pub content: String,
+    pub turn_index: u64,
+    pub started_at: String,
+    pub model_id: Option<String>,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub cost_usd: f64,
+}
+
+#[cfg(feature = "fts")]
+pub fn search_messages(conn: &Connection, query: &str) -> Result<Vec<SearchResult>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT m.id, m.session_id, m.role, COALESCE(m.content, ''), m.turn_index,
+                s.started_at, s.model_id, s.total_input_tokens, s.total_output_tokens,
+                COALESCE((SELECT SUM(cost_usd) FROM messages WHERE session_id = s.session_id), 0.0) as total_cost
+         FROM msg_fts f
+         JOIN messages m ON f.rowid = m.id
+         JOIN sessions s ON m.session_id = s.session_id
+         WHERE msg_fts MATCH ?1
+         ORDER BY s.started_at DESC, m.turn_index ASC"
+    )?;
+
+    let rows = stmt.query_map(params![query], |row| {
+        Ok(SearchResult {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            role: row.get(2)?,
+            content: row.get(3)?,
+            turn_index: row.get(4)?,
+            started_at: row.get(5)?,
+            model_id: row.get(6)?,
+            total_input_tokens: row.get(7)?,
+            total_output_tokens: row.get(8)?,
+            cost_usd: row.get(9)?,
+        })
+    })?;
+
+    let mut list = Vec::new();
+    for r in rows {
+        list.push(r?);
+    }
+    Ok(list)
 }
 
