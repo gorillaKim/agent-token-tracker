@@ -8,6 +8,7 @@ pub mod pricing;
 pub mod adapters;
 pub mod detect;
 pub mod tui;
+pub mod cross_check;
 
 use clap::{Parser, Subcommand};
 use rayon::prelude::*;
@@ -98,6 +99,23 @@ enum Commands {
     Search {
         #[arg(help = "검색할 쿼리 문자열 (SQLite FTS5 매치 문법 지원)")]
         query: String,
+    },
+    #[command(about = "ATK ↔ ccusage 교차검증 하니스: ccusage JSON과 ATK DB 토큰 합계를 대조합니다.")]
+    CrossCheck {
+        #[arg(long, help = "ccusage session --json 출력 파일 경로 (미지정 시 stdin에서 읽음)")]
+        ccusage_file: Option<String>,
+
+        #[arg(long, help = "조회 시작일 필터 (예: 2026-06-23)")]
+        since: Option<String>,
+
+        #[arg(long, default_value = "5.0", help = "output 토큰 허용오차율 (%) [기본: 5.0]")]
+        output_tolerance: f64,
+
+        #[arg(long, default_value = "10.0", help = "비용 허용오차율 (%) [기본: 10.0]")]
+        cost_tolerance: f64,
+
+        #[arg(long, help = "결과를 JSON 형식으로 출력합니다.")]
+        json: bool,
     },
 }
 
@@ -714,6 +732,76 @@ fn main() {
                 eprintln!("도움을 받으려면 '--features fts' 플래그를 사용하여 빌드하여 주십시오.");
                 eprintln!("예시: cargo run --features fts -- search \"<query>\"");
                 std::process::exit(1);
+            }
+        }
+        Commands::CrossCheck { ccusage_file, since, output_tolerance, cost_tolerance, json } => {
+            // 1. ccusage JSON 읽기 (파일 또는 stdin)
+            let raw = if let Some(path) = ccusage_file {
+                match std::fs::read_to_string(path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("ccusage 파일 읽기 실패: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // stdin에서 ccusage JSON 읽기
+                use std::io::Read;
+                let mut buf = String::new();
+                if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+                    eprintln!("stdin 읽기 실패: {}", e);
+                    std::process::exit(1);
+                }
+                buf
+            };
+
+            // 2. ccusage JSON 파싱
+            let ccusage_sessions = match cross_check::parse_ccusage_json(&raw) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("ccusage JSON 파싱 실패: {}", e);
+                    eprintln!("힌트: `npx ccusage session --json` 출력을 파이프로 전달하거나 --ccusage-file 옵션을 사용하세요.");
+                    std::process::exit(1);
+                }
+            };
+
+            // 3. ATK DB에서 세션 집계 조회
+            let conn = match db::init_db(&db_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("DB 연결 실패: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            let atk_sessions = match cross_check::get_atk_session_agg(&conn, since.as_deref()) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("ATK DB 조회 실패: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            // 4. 교차검증 수행
+            let tolerance = cross_check::Tolerance {
+                output_token_rate: *output_tolerance / 100.0,
+                cost_rate: *cost_tolerance / 100.0,
+            };
+            let report = cross_check::cross_check(&atk_sessions, &ccusage_sessions, &tolerance);
+
+            // 5. 결과 출력
+            if *json {
+                match serde_json::to_string_pretty(&report) {
+                    Ok(s) => println!("{}", s),
+                    Err(e) => eprintln!("JSON 직렬화 실패: {}", e),
+                }
+            } else {
+                cross_check::print_report(&report, &tolerance);
+            }
+
+            // 6. 허용오차 초과 시 비정상 종료 코드
+            if !report.output_within_tolerance || !report.cost_within_tolerance {
+                std::process::exit(2);
             }
         }
     }
