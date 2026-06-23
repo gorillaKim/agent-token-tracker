@@ -42,11 +42,20 @@ enum Commands {
     },
     #[command(about = "적재된 에이전트 세션의 토큰 사용량 및 비용 리포트를 출력합니다.")]
     Report {
-        #[arg(short, long, help = "특정 세션 ID 필터")]
+        #[arg(short, long, help = "특정 세션 ID 필터 (session 차원 전용)")]
         session_id: Option<String>,
 
-        #[arg(short, long, help = "상세 모드 활성화")]
-        detail: bool,
+        #[arg(short, long, help = "롤업 기준 차원 (session, agent, tool) [기본값: session]")]
+        dimension: Option<String>,
+
+        #[arg(long, help = "정렬 기준 (cost, tokens, count)")]
+        sort: Option<String>,
+
+        #[arg(short, long, help = "출력할 최대 행 수")]
+        limit: Option<usize>,
+
+        #[arg(long, help = "조회 시작일 필터 (예: 2026-06-23)")]
+        since: Option<String>,
     },
     #[command(about = "에이전트의 무한 루프 및 오작동 의심 세션을 탐지합니다.")]
     Loops {
@@ -263,12 +272,174 @@ fn main() {
                 }
             }
         }
-        Commands::Report { session_id, detail } => {
-            println!("리포트를 출력합니다.");
-            if let Some(sid) = session_id {
-                println!("세션 ID 필터: {}", sid);
+        Commands::Report {
+            session_id,
+            dimension,
+            sort,
+            limit,
+            since,
+        } => {
+            let dim = dimension.as_deref().unwrap_or("session");
+            let conn = match db::init_db(&db_path) {
+                Ok(c) => c,
+                Err(err) => {
+                    eprintln!("데이터베이스 연결 실패: {}", err);
+                    std::process::exit(1);
+                }
+            };
+
+            match dim {
+                "session" => {
+                    let report_list = match db::get_session_report(
+                        &conn,
+                        session_id.as_deref(),
+                        since.as_deref(),
+                        sort.as_deref(),
+                        *limit,
+                    ) {
+                        Ok(list) => list,
+                        Err(err) => {
+                            eprintln!("세션 리포트 조회 실패: {}", err);
+                            std::process::exit(1);
+                        }
+                    };
+
+                    println!("\n============================================= 세션별 토큰/비용 집계 리포트 =============================================");
+                    println!("| {:<20} | {:<10} | {:<20} | {:>10} | {:>10} | {:>12} | {:<20} |", 
+                             "세션 ID", "에이전트", "모델 ID", "입력 토큰", "출력 토큰", "비용 (USD)", "시작 시간");
+                    println!("-------------------------------------------------------------------------------------------------------------------------");
+                    
+                    let mut sum_input = 0;
+                    let mut sum_output = 0;
+                    let mut sum_cost = 0.0;
+
+                    for r in &report_list {
+                        let model_name = r.model_id.as_deref().unwrap_or("unknown");
+                        println!("| {:<20} | {:<10} | {:<20} | {:>10} | {:>10} | ${:>11.6} | {:<20} |",
+                                 r.session_id,
+                                 r.agent_type,
+                                 model_name,
+                                 format_number(r.total_input_tokens),
+                                 format_number(r.total_output_tokens),
+                                 r.total_cost_usd,
+                                 r.started_at);
+                        sum_input += r.total_input_tokens;
+                        sum_output += r.total_output_tokens;
+                        sum_cost += r.total_cost_usd;
+                    }
+                    println!("-------------------------------------------------------------------------------------------------------------------------");
+                    println!("| {:<20} | {:<10} | {:<20} | {:>10} | {:>10} | ${:>11.6} | {:<20} |",
+                             "합계 (Summary)", "", "",
+                             format_number(sum_input),
+                             format_number(sum_output),
+                             sum_cost,
+                             "");
+                    println!("=========================================================================================================================");
+                }
+                "agent" => {
+                    let report_list = match db::get_agent_report(
+                        &conn,
+                        since.as_deref(),
+                        sort.as_deref(),
+                        *limit,
+                    ) {
+                        Ok(list) => list,
+                        Err(err) => {
+                            eprintln!("에이전트 리포트 조회 실패: {}", err);
+                            std::process::exit(1);
+                        }
+                    };
+
+                    println!("\n================================ 에이전트별 집계 리포트 ================================");
+                    println!("| {:<10} | {:>10} | {:>12} | {:>12} | {:>14} |", 
+                             "에이전트", "총 세션 수", "총 입력 토큰", "총 출력 토큰", "총 비용 (USD)");
+                    println!("-----------------------------------------------------------------------------------------");
+                    
+                    let mut sum_sessions = 0;
+                    let mut sum_input = 0;
+                    let mut sum_output = 0;
+                    let mut sum_cost = 0.0;
+
+                    for r in &report_list {
+                        println!("| {:<10} | {:>10} | {:>12} | {:>12} | ${:>13.6} |",
+                                 r.agent_type,
+                                 r.session_count,
+                                 format_number(r.total_input_tokens),
+                                 format_number(r.total_output_tokens),
+                                 r.total_cost_usd);
+                        sum_sessions += r.session_count;
+                        sum_input += r.total_input_tokens;
+                        sum_output += r.total_output_tokens;
+                        sum_cost += r.total_cost_usd;
+                    }
+                    println!("-----------------------------------------------------------------------------------------");
+                    println!("| {:<10} | {:>10} | {:>12} | {:>12} | ${:>13.6} |",
+                             "합계",
+                             sum_sessions,
+                             format_number(sum_input),
+                             format_number(sum_output),
+                             sum_cost);
+                    println!("=========================================================================================");
+                }
+                "tool" => {
+                    let report_list = match db::get_tool_report(
+                        &conn,
+                        since.as_deref(),
+                        sort.as_deref(),
+                        *limit,
+                    ) {
+                        Ok(list) => list,
+                        Err(err) => {
+                            eprintln!("도구 리포트 조회 실패: {}", err);
+                            std::process::exit(1);
+                        }
+                    };
+
+                    println!("\n=================================== 도구별 호출/루프 집계 리포트 ===================================");
+                    println!("| {:<30} | {:>10} | {:>10} | {:>12} | {:>10} |", 
+                             "도구명", "총 호출 수", "성공 수", "루프 의심 수", "성공률 (%)");
+                    println!("-----------------------------------------------------------------------------------------------------");
+                    
+                    let mut sum_calls = 0;
+                    let mut sum_success = 0;
+                    let mut sum_loops = 0;
+
+                    for r in &report_list {
+                        let success_rate = if r.call_count > 0 {
+                            (r.success_count as f64) * 100.0 / (r.call_count as f64)
+                        } else {
+                            0.0
+                        };
+
+                        println!("| {:<30} | {:>10} | {:>10} | {:>12} | {:>9.1}% |",
+                                 r.tool_name,
+                                 format_number(r.call_count),
+                                 format_number(r.success_count),
+                                 format_number(r.loop_suspect_count),
+                                 success_rate);
+                        sum_calls += r.call_count;
+                        sum_success += r.success_count;
+                        sum_loops += r.loop_suspect_count;
+                    }
+                    println!("-----------------------------------------------------------------------------------------------------");
+                    let total_rate = if sum_calls > 0 {
+                        (sum_success as f64) * 100.0 / (sum_calls as f64)
+                    } else {
+                        0.0
+                    };
+                    println!("| {:<30} | {:>10} | {:>10} | {:>12} | {:>9.1}% |",
+                             "합계",
+                             format_number(sum_calls),
+                             format_number(sum_success),
+                             format_number(sum_loops),
+                             total_rate);
+                    println!("=====================================================================================================");
+                }
+                _ => {
+                    eprintln!("잘못된 차원입니다. 지원되는 차원: session, agent, tool");
+                    std::process::exit(1);
+                }
             }
-            println!("상세 모드: {}", detail);
         }
         Commands::Loops { threshold } => {
             println!("루프 탐지를 시작합니다.");
@@ -291,4 +462,19 @@ fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// 천 단위 마커(콤마)를 포함하는 숫자 포맷팅 헬퍼 함수
+fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    let mut count = 0;
+    for c in s.chars().rev() {
+        if count > 0 && count % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+        count += 1;
+    }
+    result.chars().rev().collect()
 }

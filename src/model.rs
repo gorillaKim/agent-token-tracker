@@ -175,3 +175,91 @@ impl Pricing {
         }
     }
 }
+
+/// 세션별 리포트 요약 구조체
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionReport {
+    pub session_id: String,
+    pub agent_type: String,
+    pub model_id: Option<String>,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub total_cost_usd: f64,
+    pub started_at: String,
+}
+
+impl SessionReport {
+    pub fn new(
+        session_id: String,
+        agent_type: String,
+        model_id: Option<String>,
+        total_input_tokens: u64,
+        total_output_tokens: u64,
+        total_cost_usd: f64,
+        started_at: String,
+    ) -> Self {
+        Self {
+            session_id,
+            agent_type,
+            model_id,
+            total_input_tokens,
+            total_output_tokens,
+            total_cost_usd,
+            started_at,
+        }
+    }
+}
+
+/// 에이전트별 리포트 요약 구조체
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentReport {
+    pub agent_type: String,
+    pub session_count: u64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub total_cost_usd: f64,
+}
+
+impl AgentReport {
+    pub fn new(
+        agent_type: String,
+        session_count: u64,
+        total_input_tokens: u64,
+        total_output_tokens: u64,
+        total_cost_usd: f64,
+    ) -> Self {
+        Self {
+            agent_type,
+            session_count,
+            total_input_tokens,
+            total_output_tokens,
+            total_cost_usd,
+        }
+    }
+}
+
+/// 도구별 리포트 요약 구조체
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolReport {
+    pub tool_name: String,
+    pub call_count: u64,
+    pub success_count: u64,
+    pub loop_suspect_count: u64,
+}
+
+impl ToolReport {
+    pub fn new(
+        tool_name: String,
+        call_count: u64,
+        success_count: u64,
+        loop_suspect_count: u64,
+    ) -> Self {
+        Self {
+            tool_name,
+            call_count,
+            success_count,
+            loop_suspect_count,
+        }
+    }
+}
+

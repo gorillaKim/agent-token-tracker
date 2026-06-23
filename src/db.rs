@@ -4,7 +4,7 @@
 //! 멱등하게(재실행 안전하게) 생성하는 마이그레이션을 구현합니다.
 
 use rusqlite::{Connection, params};
-use crate::model::{Session, Message, Node, ToolCall, Pricing};
+use crate::model::{Session, Message, Node, ToolCall, Pricing, SessionReport, AgentReport, ToolReport};
 
 /// 데이터베이스 커넥션을 초기화하고 필요한 스키마 테이블 및 인덱스를 생성합니다.
 pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
@@ -332,6 +332,189 @@ pub fn get_all_pricings(conn: &Connection) -> Result<std::collections::HashMap<S
     Ok(pricings)
 }
 
+/// 세션별 토큰 및 비용 정보를 조회하여 집계 리포트 목록을 반환합니다.
+pub fn get_session_report(
+    conn: &Connection,
+    session_id: Option<&str>,
+    since: Option<&str>,
+    sort: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<SessionReport>, rusqlite::Error> {
+    let mut query = "
+        SELECT s.session_id, s.agent_type, s.model_id, s.total_input_tokens, s.total_output_tokens,
+               COALESCE(mc.session_cost, 0.0) as total_cost, s.started_at
+        FROM sessions s
+        LEFT JOIN (
+            SELECT session_id, SUM(cost_usd) as session_cost
+            FROM messages
+            GROUP BY session_id
+        ) mc ON s.session_id = mc.session_id
+        WHERE 1=1
+    ".to_string();
+
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
+
+    if let Some(sid) = session_id {
+        query.push_str(" AND s.session_id = ? ");
+        params.push(rusqlite::types::Value::Text(sid.to_string()));
+    }
+
+    if let Some(date_str) = since {
+        query.push_str(" AND s.started_at >= ? ");
+        params.push(rusqlite::types::Value::Text(date_str.to_string()));
+    }
+
+    query.push_str(" GROUP BY s.session_id ");
+
+    match sort {
+        Some("cost") => query.push_str(" ORDER BY total_cost DESC "),
+        Some("tokens") => query.push_str(" ORDER BY (s.total_input_tokens + s.total_output_tokens) DESC "),
+        _ => query.push_str(" ORDER BY s.started_at DESC "),
+    }
+
+    if let Some(l) = limit {
+        query.push_str(" LIMIT ? ");
+        params.push(rusqlite::types::Value::Integer(l as i64));
+    }
+
+    let mut stmt = conn.prepare(&query)?;
+    let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+
+    let report_iter = stmt.query_map(&params_ref[..], |row| {
+        Ok(SessionReport::new(
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+        ))
+    })?;
+
+    let mut list = Vec::new();
+    for item in report_iter {
+        list.push(item?);
+    }
+    Ok(list)
+}
+
+/// 에이전트별 세션 수, 토큰 수 및 비용 정보를 조회하여 집계 리포트 목록을 반환합니다.
+pub fn get_agent_report(
+    conn: &Connection,
+    since: Option<&str>,
+    sort: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<AgentReport>, rusqlite::Error> {
+    let mut query = "
+        SELECT s.agent_type, COUNT(DISTINCT s.session_id) as session_count,
+               SUM(s.total_input_tokens) as total_input, SUM(s.total_output_tokens) as total_output,
+               COALESCE(SUM(mc.session_cost), 0.0) as total_cost
+        FROM sessions s
+        LEFT JOIN (
+            SELECT session_id, SUM(cost_usd) as session_cost
+            FROM messages
+            GROUP BY session_id
+        ) mc ON s.session_id = mc.session_id
+        WHERE 1=1
+    ".to_string();
+
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
+
+    if let Some(date_str) = since {
+        query.push_str(" AND s.started_at >= ? ");
+        params.push(rusqlite::types::Value::Text(date_str.to_string()));
+    }
+
+    query.push_str(" GROUP BY s.agent_type ");
+
+    match sort {
+        Some("cost") => query.push_str(" ORDER BY total_cost DESC "),
+        Some("tokens") => query.push_str(" ORDER BY (total_input + total_output) DESC "),
+        _ => query.push_str(" ORDER BY total_cost DESC "),
+    }
+
+    if let Some(l) = limit {
+        query.push_str(" LIMIT ? ");
+        params.push(rusqlite::types::Value::Integer(l as i64));
+    }
+
+    let mut stmt = conn.prepare(&query)?;
+    let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+
+    let report_iter = stmt.query_map(&params_ref[..], |row| {
+        Ok(AgentReport::new(
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+        ))
+    })?;
+
+    let mut list = Vec::new();
+    for item in report_iter {
+        list.push(item?);
+    }
+    Ok(list)
+}
+
+/// 도구 호출 횟수, 성공 여부 및 루프 의심 통계를 조회하여 집계 리포트 목록을 반환합니다.
+pub fn get_tool_report(
+    conn: &Connection,
+    since: Option<&str>,
+    sort: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<ToolReport>, rusqlite::Error> {
+    let mut query = "
+        SELECT tc.tool_name, COUNT(*) as call_count, SUM(tc.success) as success_count, SUM(tc.is_loop_suspect) as loop_suspect_count
+        FROM tool_calls tc
+        LEFT JOIN sessions s ON tc.session_id = s.session_id
+        WHERE 1=1
+    ".to_string();
+
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
+
+    if let Some(date_str) = since {
+        query.push_str(" AND s.started_at >= ? ");
+        params.push(rusqlite::types::Value::Text(date_str.to_string()));
+    }
+
+    query.push_str(" GROUP BY tc.tool_name ");
+
+    match sort {
+        Some("count") => query.push_str(" ORDER BY call_count DESC "),
+        Some("loop") => query.push_str(" ORDER BY loop_suspect_count DESC "),
+        _ => query.push_str(" ORDER BY call_count DESC "),
+    }
+
+    if let Some(l) = limit {
+        query.push_str(" LIMIT ? ");
+        params.push(rusqlite::types::Value::Integer(l as i64));
+    }
+
+    let mut stmt = conn.prepare(&query)?;
+    let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+
+    let report_iter = stmt.query_map(&params_ref[..], |row| {
+        let call_count_val: i64 = row.get(1)?;
+        let success_count_val: i64 = row.get(2)?;
+        let loop_suspect_count_val: i64 = row.get(3)?;
+        Ok(ToolReport::new(
+            row.get(0)?,
+            call_count_val as u64,
+            success_count_val as u64,
+            loop_suspect_count_val as u64,
+        ))
+    })?;
+
+    let mut list = Vec::new();
+    for item in report_iter {
+        list.push(item?);
+    }
+    Ok(list)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,5 +609,25 @@ mod tests {
         assert_eq!(sonnet.input_cost_per_million, 3.0);
         assert_eq!(sonnet.output_cost_per_million, 15.0);
         assert_eq!(sonnet.cached_input_cost_per_million, 0.3);
+
+        // 6. Report 롤업 집계 테스트
+        let sess_report = get_session_report(&conn, None, None, None, None).expect("SessionReport 조회 실패");
+        assert_eq!(sess_report.len(), 1);
+        assert_eq!(sess_report[0].session_id, "sess-uuid-1234");
+        assert_eq!(sess_report[0].total_input_tokens, 1500);
+        assert_eq!(sess_report[0].total_output_tokens, 800);
+        assert_eq!(sess_report[0].total_cost_usd, 0.003);
+
+        let agent_report = get_agent_report(&conn, None, None, None).expect("AgentReport 조회 실패");
+        assert_eq!(agent_report.len(), 1);
+        assert_eq!(agent_report[0].agent_type, "codex");
+        assert_eq!(agent_report[0].session_count, 1);
+        assert_eq!(agent_report[0].total_cost_usd, 0.003);
+
+        let tool_report = get_tool_report(&conn, None, None, None).expect("ToolReport 조회 실패");
+        assert_eq!(tool_report.len(), 1);
+        assert_eq!(tool_report[0].tool_name, "view_file");
+        assert_eq!(tool_report[0].call_count, 1);
+        assert_eq!(tool_report[0].success_count, 1);
     }
 }
