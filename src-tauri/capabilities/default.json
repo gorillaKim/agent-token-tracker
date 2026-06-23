@@ -1,0 +1,13 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for ATK Desktop",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize"
+  ]
+}

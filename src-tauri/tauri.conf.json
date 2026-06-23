@@ -1,0 +1,29 @@
+{
+  "productName": "Agent Token Tracker",
+  "version": "0.1.0",
+  "identifier": "com.atk.desktop",
+  "build": {
+    "beforeDevCommand": "npm run --prefix ../frontend dev",
+    "beforeBuildCommand": "npm run --prefix ../frontend build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../frontend/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent Token Tracker",
+        "width": 1000,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  }
+}

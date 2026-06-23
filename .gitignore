@@ -1,4 +1,7 @@
 /target
+src-tauri/target/
+frontend/node_modules/
+frontend/dist/
 *.db
 *.db-journal
 *.db-wal
