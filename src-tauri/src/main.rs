@@ -704,7 +704,7 @@ async fn sync_local_sessions(app_handle: AppHandle) -> Result<SyncResult, String
     }
     let db_path = "../atk.db";
     
-    // 1. 로드 설정 경로
+    // 1. 로드 설정 경로 및 기본 에이전트 경로들을 취합
     let config_path = get_config_path(&app_handle)?;
     println!("[Sync] config_path: {:?}", config_path);
     let mut log_dir = "../tests/fixtures".to_string();
@@ -719,14 +719,50 @@ async fn sync_local_sessions(app_handle: AppHandle) -> Result<SyncResult, String
     }
     println!("[Sync] Final log_dir: {}", log_dir);
     
-    let target_dir = Path::new(&log_dir);
-    if !target_dir.exists() || !target_dir.is_dir() {
-        println!("[Sync] Target directory does not exist: {}", log_dir);
-        return Err(format!("로그 디렉토리가 존재하지 않거나 폴더가 아닙니다: {}", log_dir));
+    let mut target_paths = Vec::new();
+    if !log_dir.is_empty() {
+        target_paths.push(PathBuf::from(&log_dir));
+    }
+    
+    // 기본 OS별 에이전트 경로 추가
+    let home = std::env::var("HOME").unwrap_or_default();
+    if !home.is_empty() {
+        // Claude Code 기본 경로
+        let claude_path = Path::new(&home).join(".claude").join("projects");
+        if claude_path.exists() && claude_path.is_dir() {
+            println!("[Sync] Added default Claude Code path: {:?}", claude_path);
+            target_paths.push(claude_path);
+        }
+        
+        // Codex 기본 경로
+        let codex_path = Path::new(&home).join(".codex").join("sessions");
+        if codex_path.exists() && codex_path.is_dir() {
+            println!("[Sync] Added default Codex path: {:?}", codex_path);
+            target_paths.push(codex_path);
+        }
+        
+        // Antigravity 기본 state.vscdb 경로 (macOS)
+        let vscdb_path = Path::new(&home)
+            .join("Library")
+            .join("Application Support")
+            .join("Code")
+            .join("User")
+            .join("globalStorage")
+            .join("state.vscdb");
+        if vscdb_path.exists() && vscdb_path.is_file() {
+            println!("[Sync] Added default Antigravity path: {:?}", vscdb_path);
+            target_paths.push(vscdb_path);
+        }
     }
     
     let mut files = Vec::new();
-    collect_files_helper(target_dir, &mut files)?;
+    for p in target_paths {
+        if p.is_file() {
+            files.push(p.clone());
+        } else if p.is_dir() {
+            let _ = collect_files_helper(&p, &mut files);
+        }
+    }
     println!("[Sync] Collected {} files total", files.len());
     
     let conn = Connection::open(db_path)
@@ -778,7 +814,7 @@ async fn sync_local_sessions(app_handle: AppHandle) -> Result<SyncResult, String
         } else {
             // JSONL 파싱 및 중복 검사 후 적재
             let file_name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let is_codex = file_name.starts_with("rollout-");
+            let is_codex = file_name.starts_with("rollout-") || file_name.contains("codex");
             
             let parsed_res = if is_codex {
                 let adapter = CodexAdapter;
