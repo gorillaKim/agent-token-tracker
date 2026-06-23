@@ -1,0 +1,6 @@
+{"type": "session_meta", "id": "anon-sess-cc-001", "cwd": "/anon/project", "timestamp": "2026-01-01T00:00:00Z", "cli_version": "1.2.0"}
+{"type": "message", "timestamp": "2026-01-01T00:01:00Z", "message": {"role": "user", "content": [{"type": "text", "text": "익명화된 사용자 입력 1"}]}}
+{"type": "message", "timestamp": "2026-01-01T00:01:05Z", "message": {"role": "assistant", "model": "claude-opus-4-5", "usage": {"input_tokens": 1200, "cache_read_input_tokens": 0, "output_tokens": 340}, "content": [{"type": "text", "text": "익명화된 AI 응답 1"}, {"type": "tool_use", "name": "read_file", "input": {"AbsolutePath": "/anon/path/file.txt"}}]}}
+{"type": "message", "timestamp": "2026-01-01T00:01:10Z", "message": {"role": "tool", "content": [{"type": "tool_result", "tool_use_id": "toolu_001", "content": "파일 내용"}]}}
+{"type": "message", "timestamp": "2026-01-01T00:01:15Z", "message": {"role": "assistant", "model": "claude-opus-4-5", "usage": {"input_tokens": 1500, "cache_read_input_tokens": 200, "output_tokens": 180}, "content": [{"type": "text", "text": "익명화된 AI 응답 2"}]}}
+{"type": "session_end", "timestamp": "2026-01-01T00:02:00Z"}

@@ -1,0 +1,7 @@
+{"type": "session_meta", "payload": {"id": "anon-sess-cdx-001", "timestamp": "2026-01-01T00:00:00Z", "cwd": "/anon/project", "cli_version": "0.3.0"}}
+{"type": "turn_context", "payload": {"model": "claude-opus-4-5"}}
+{"type": "task_started", "turn_id": "t1"}
+{"type": "token_count", "info": {"last_token_usage": {"input_tokens": 950, "cached_input_tokens": 0, "output_tokens": 280}, "total_token_usage": {"input_tokens": 950, "output_tokens": 280}}}
+{"type": "mcp_tool_call_end", "invocation": {"server": "anon_server", "tool": "anon_tool", "arguments": {"key": "anon_val"}}, "result": {"Ok": {"content": []}}}
+{"type": "patch_apply_end", "success": true}
+{"type": "session_end", "timestamp": "2026-01-01T00:01:30Z"}

@@ -1,0 +1,4 @@
+{"type": "session_meta", "id": "anon-sess-cc-002", "cwd": "/anon/project", "timestamp": "2026-01-01T00:00:00Z", "cli_version": "1.2.0"}
+{"type": "message", "timestamp": "2026-01-01T00:01:00Z", "message": {"role": "user", "content": [{"type": "text", "text": "익명화된 사용자 입력 1"}]}}
+{"type": "message", "timestamp": "2026-01-01T00:01:10Z", "message": {"role": "assistant", "model": "claude-opus-4-5", "usage": {"input_tokens": 2000, "cache_read_input_tokens": 1500, "output_tokens": 600}, "content": [{"type": "thinking", "thinking": "익명화된 사고과정 1"}, {"type": "text", "text": "익명화된 AI 응답 1"}, {"type": "tool_use", "name": "write_file", "input": {"TargetFile": "/anon/path/output.rs", "CodeContent": "fn main() {}"}}]}}
+{"type": "session_end", "timestamp": "2026-01-01T00:02:00Z"}
