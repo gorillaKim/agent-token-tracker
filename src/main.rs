@@ -89,6 +89,23 @@ fn main() {
                 println!("필터링할 에이전트 타입: {}", agent_type);
             }
 
+            // 1. 스캔 시작 전 단가 테이블 사전 캐싱 (O(1) 조회를 위해 HashMap 활용)
+            let conn_init = match db::init_db(&db_path) {
+                Ok(c) => c,
+                Err(err) => {
+                    eprintln!("데이터베이스 초기화 실패: {}", err);
+                    std::process::exit(1);
+                }
+            };
+            let pricing_map = match db::get_all_pricings(&conn_init) {
+                Ok(map) => map,
+                Err(err) => {
+                    eprintln!("단가 정보 조회 실패: {}", err);
+                    std::process::exit(1);
+                }
+            };
+            let pricing_map_shared = Arc::new(pricing_map);
+
             // 파일 목록 수집 (재귀 스캔)
             let mut files = Vec::new();
             if let Err(err) = collect_files(Path::new(path), &mut files) {
@@ -106,6 +123,7 @@ fn main() {
             // Rayon을 활용한 병렬 스캔 처리
             files.par_iter().for_each(|file_path| {
                 let accumulator = Arc::clone(&result_accumulator);
+                let pricing_cache = Arc::clone(&pricing_map_shared);
                 
                 // 파일 확장자 판별 (디스패치)
                 let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -115,7 +133,7 @@ fn main() {
 
                 // 1. 어댑터를 통해 파싱 수행
                 let adapter = ClaudeCodeAdapter;
-                let parsed_session: NormalizedSession = match adapter.parse_session(file_path.to_str().unwrap()) {
+                let mut parsed_session: NormalizedSession = match adapter.parse_session(file_path.to_str().unwrap()) {
                     Ok(sess) => sess,
                     Err(err) => {
                         let mut res = accumulator.lock().unwrap();
@@ -126,7 +144,35 @@ fn main() {
                     }
                 };
 
-                // 2. DB 적재 진행 (스레드별 개별 커넥션 확보)
+                // 2. cost_usd 계산 및 messages 채움
+                let model_id_opt = parsed_session.session.model_id.as_deref().unwrap_or("unknown");
+                let pricing_info = parsed_session.session.model_id.as_ref()
+                    .and_then(|m_id| pricing_cache.get(m_id));
+
+                // 미등록 모델 발견 시 경고 수집 및 fallback 정책 수행 (이슈 #683)
+                if pricing_info.is_none() && model_id_opt != "unknown" {
+                    let mut res = accumulator.lock().unwrap();
+                    let warning_msg = format!(
+                        "모델 단가 누락 경고: '{}' 모델의 단가 정보가 pricing 테이블에 없습니다. 기본 fallback 단가를 적용합니다.",
+                        model_id_opt
+                    );
+                    if !res.warnings.contains(&warning_msg) {
+                        res.warnings.push(warning_msg);
+                    }
+                }
+
+                for msg in &mut parsed_session.messages {
+                    if msg.role == "assistant" {
+                        msg.cost_usd = pricing::calculate_cost_usd(
+                            pricing_info,
+                            msg.input_tokens,
+                            msg.cache_read_input_tokens,
+                            msg.output_tokens,
+                        );
+                    }
+                }
+
+                // 3. DB 적재 진행 (스레드별 개별 커넥션 확보)
                 let conn = match db::init_db(&db_path_clone) {
                     Ok(c) => c,
                     Err(err) => {
@@ -151,7 +197,7 @@ fn main() {
                     return;
                 }
 
-                // 3. 정규화 묶음 데이터 DB 적재
+                // 4. 정규화 묶음 데이터 DB 적재
                 let mut success = true;
                 if let Err(err) = db::insert_session(&conn, &parsed_session.session) {
                     success = false;

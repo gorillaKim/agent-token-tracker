@@ -4,7 +4,7 @@
 //! 멱등하게(재실행 안전하게) 생성하는 마이그레이션을 구현합니다.
 
 use rusqlite::{Connection, params};
-use crate::model::{Session, Message, Node, ToolCall};
+use crate::model::{Session, Message, Node, ToolCall, Pricing};
 
 /// 데이터베이스 커넥션을 초기화하고 필요한 스키마 테이블 및 인덱스를 생성합니다.
 pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
@@ -98,6 +98,17 @@ pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_msg_session ON messages(session_id, turn_index);",
+        [],
+    )?;
+
+    // 7. pricing 테이블 기본 단가 시딩 (멱등)
+    conn.execute(
+        "INSERT OR IGNORE INTO pricing (model_id, provider, input_cost_per_million, output_cost_per_million, cached_input_cost_per_million, updated_at)
+         VALUES 
+         ('claude-3-5-sonnet', 'anthropic', 3.0, 15.0, 0.3, datetime('now')),
+         ('claude-3-opus', 'anthropic', 15.0, 75.0, 1.5, datetime('now')),
+         ('claude-3-haiku', 'anthropic', 0.25, 1.25, 0.03, datetime('now')),
+         ('gpt-4o', 'openai', 5.0, 15.0, 2.5, datetime('now'));",
         [],
     )?;
 
@@ -295,6 +306,32 @@ pub fn get_tool_calls_by_session(conn: &Connection, session_id: &str) -> Result<
     Ok(tool_calls)
 }
 
+/// 데이터베이스의 모든 모델별 단가 정보를 조회해 HashMap 형태로 반환합니다.
+pub fn get_all_pricings(conn: &Connection) -> Result<std::collections::HashMap<String, Pricing>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT model_id, provider, input_cost_per_million, output_cost_per_million, cached_input_cost_per_million, updated_at
+         FROM pricing",
+    )?;
+
+    let pricing_iter = stmt.query_map([], |row| {
+        Ok(Pricing::new(
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+        ))
+    })?;
+
+    let mut pricings = std::collections::HashMap::new();
+    for pricing in pricing_iter {
+        let p = pricing?;
+        pricings.insert(p.model_id.clone(), p);
+    }
+    Ok(pricings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,5 +415,16 @@ mod tests {
         assert_eq!(fetched_tcs.len(), 1);
         assert_eq!(fetched_tcs[0].tool_name, "view_file");
         assert!(fetched_tcs[0].success);
+
+        // 5. Pricing 데이터 테스트 (기본 시드 포함)
+        let pricings = get_all_pricings(&conn).expect("Pricing 조회 실패");
+        assert!(pricings.contains_key("claude-3-5-sonnet"));
+        assert!(pricings.contains_key("gpt-4o"));
+        
+        let sonnet = pricings.get("claude-3-5-sonnet").unwrap();
+        assert_eq!(sonnet.provider, "anthropic");
+        assert_eq!(sonnet.input_cost_per_million, 3.0);
+        assert_eq!(sonnet.output_cost_per_million, 15.0);
+        assert_eq!(sonnet.cached_input_cost_per_million, 0.3);
     }
 }
