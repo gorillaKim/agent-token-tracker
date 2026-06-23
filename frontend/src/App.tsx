@@ -145,6 +145,13 @@ function LoopDirectionViewer({ signals }: { signals: LoopSignal[] }) {
 }
 
 function App() {
+  const urlParams = new URLSearchParams(window.location.search);
+  const isTrayMode = urlParams.get("mode") === "tray";
+
+  if (isTrayMode) {
+    return <TrayPopoverView />;
+  }
+
   const [sessions, setSessions] = useState<Session[]>([]);
   const [summaries, setSummaries] = useState<AgentSummary[]>([]);
   const [anomalies, setAnomalies] = useState<LoopDetectionResult[]>([]);
@@ -795,6 +802,92 @@ function App() {
             세션을 선택하면 디버깅 패널이 활성화됩니다.
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function TrayPopoverView() {
+  const [summaries, setSummaries] = useState<AgentSummary[]>([]);
+  const [anomalies, setAnomalies] = useState<LoopDetectionResult[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const loadData = async () => {
+    try {
+      const sums = await invoke<AgentSummary[]>("get_agent_summaries");
+      const anoms = await invoke<LoopDetectionResult[]>("get_loop_signals");
+      setSummaries(sums);
+      setAnomalies(anoms);
+    } catch (e) {
+      console.error("데이터 로드 실패:", e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+    const unlistenPromise = listen("db-updated", () => {
+      loadData();
+    });
+    return () => {
+      unlistenPromise.then((fn) => fn());
+    };
+  }, []);
+
+  const totalCost = summaries.reduce((acc, curr) => acc + curr.total_cost_usd, 0);
+  const totalAnomalies = anomalies.length;
+
+  return (
+    <div className="tray-popover-container">
+      <div className="tray-popover-header">
+        <h4 className="tray-popover-title">에이전트 토큰 관측소</h4>
+        <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'hsl(190, 90%, 55%)' }}>
+          LIVE
+        </span>
+      </div>
+
+      {totalAnomalies > 0 ? (
+        <div className="tray-popover-banner">
+          <span>⚠️</span>
+          <span>{totalAnomalies}개의 오작동 세션 감지됨</span>
+        </div>
+      ) : (
+        <div className="tray-popover-banner-green">
+          <span>✓</span>
+          <span>모든 프로세스 정상 작동 중</span>
+        </div>
+      )}
+
+      <div className="tray-popover-list">
+        {loading ? (
+          <div style={{ color: 'hsl(215, 20%, 45%)', fontSize: '0.75rem', textAlign: 'center', padding: '2rem 0' }}>
+            로드 중...
+          </div>
+        ) : (
+          summaries.map((sum) => (
+            <div key={sum.agent_type} className="tray-popover-row">
+              <div>
+                <span className="tray-popover-agent-name">
+                  {sum.agent_type === "claude_code" ? "Claude Code" : sum.agent_type === "codex" ? "Codex" : "Antigravity"}
+                </span>
+                <div style={{ fontSize: '0.7rem', color: 'hsl(215, 20%, 50%)', marginTop: '0.1rem' }}>
+                  세션 {sum.session_count}개 | 토큰 {sum.total_input_tokens + sum.total_output_tokens}
+                </div>
+              </div>
+              <span className="tray-popover-agent-cost">
+                ${sum.total_cost_usd.toFixed(2)}
+              </span>
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="tray-popover-footer">
+        <span>오늘 누적 합계</span>
+        <span style={{ fontWeight: 800, color: 'var(--foreground)' }}>
+          ${totalCost.toFixed(2)} USD
+        </span>
       </div>
     </div>
   );

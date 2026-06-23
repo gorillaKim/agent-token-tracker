@@ -7,7 +7,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
-use tauri::tray::TrayIcon;
 use notify::{Watcher, RecursiveMode};
 
 use agent_token_tracker::model::Session;
@@ -480,11 +479,51 @@ fn update_tray_status(app_handle: &AppHandle) {
     }
 }
 
+fn toggle_tray_popover(app: &AppHandle, click_pos: tauri::PhysicalPosition<f64>) {
+    let window = match app.get_webview_window("tray-popover") {
+        Some(w) => w,
+        None => {
+            eprintln!("[Tray] tray-popover 윈도우를 찾을 수 없습니다.");
+            return;
+        }
+    };
+
+    let is_visible = window.is_visible().unwrap_or(false);
+    if is_visible {
+        let _ = window.hide();
+    } else {
+        // macOS 상단 메뉴바 아래에 맞춰 위치 계산
+        // 가로 중앙 맞춤: click_pos.x - (윈도우 너비 320 / 2)
+        // 세로 위치: click_pos.y + 10px 마진
+        let x = click_pos.x - 160.0;
+        let y = click_pos.y + 10.0;
+        
+        let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+            x: x as i32,
+            y: y as i32,
+        }));
+        
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let app_handle = app.handle().clone();
 
+            // 1. 트레이 팝오버 윈도우 획득 및 blur 이벤트 핸들링
+            if let Some(popover) = app.get_webview_window("tray-popover") {
+                let popover_clone = popover.clone();
+                popover.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Focused(false) = event {
+                        let _ = popover_clone.hide();
+                    }
+                });
+            }
+
+            // 2. 트레이 아이콘 초기 설정
             let icon_green_bytes = include_bytes!("../icons/icon_green.png");
             let initial_icon = tauri::image::Image::from_bytes(icon_green_bytes)
                 .expect("Green icon load failed");
@@ -493,13 +532,10 @@ fn main() {
                 .icon(initial_icon)
                 .title("$0.00")
                 .on_tray_icon_event(|tray: &tauri::tray::TrayIcon, event: tauri::tray::TrayIconEvent| {
-                    if let tauri::tray::TrayIconEvent::Click { button, .. } = event {
+                    if let tauri::tray::TrayIconEvent::Click { button, position, .. } = event {
                         if button == tauri::tray::MouseButton::Left {
                             let app = tray.app_handle();
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
+                            toggle_tray_popover(app, position);
                         }
                     }
                 })
