@@ -1,0 +1,8 @@
+{"type": "session_meta", "id": "loop-sess-cc-ping-pong", "cwd": "/anon/project", "timestamp": "2026-01-01T00:00:00Z", "cli_version": "1.2.0"}
+{"type": "message", "timestamp": "2026-01-01T00:01:00Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "tu-1", "name": "read_file", "input": {"path": "a.txt"}}], "usage": {"input_tokens": 100, "output_tokens": 50}}}
+{"type": "message", "timestamp": "2026-01-01T00:01:10Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "tu-2", "name": "write_to_file", "input": {"path": "b.txt"}}], "usage": {"input_tokens": 100, "output_tokens": 50}}}
+{"type": "message", "timestamp": "2026-01-01T00:01:20Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "tu-3", "name": "read_file", "input": {"path": "a.txt"}}], "usage": {"input_tokens": 100, "output_tokens": 50}}}
+{"type": "message", "timestamp": "2026-01-01T00:01:30Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "tu-4", "name": "write_to_file", "input": {"path": "b.txt"}}], "usage": {"input_tokens": 100, "output_tokens": 50}}}
+{"type": "message", "timestamp": "2026-01-01T00:01:40Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "tu-5", "name": "read_file", "input": {"path": "a.txt"}}], "usage": {"input_tokens": 100, "output_tokens": 50}}}
+{"type": "message", "timestamp": "2026-01-01T00:01:50Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "tu-6", "name": "write_to_file", "input": {"path": "b.txt"}}], "usage": {"input_tokens": 100, "output_tokens": 50}}}
+{"type": "session_end", "timestamp": "2026-01-01T00:02:00Z"}

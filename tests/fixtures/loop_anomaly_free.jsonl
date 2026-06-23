@@ -1,0 +1,10 @@
+{"type": "session_meta", "id": "loop-sess-cc-anomaly-free", "cwd": "/anon/project", "timestamp": "2026-01-01T00:00:00Z", "cli_version": "1.2.0"}
+{"type": "message", "timestamp": "2026-01-01T00:01:00Z", "message": {"role": "user", "content": [{"type": "text", "text": "find pattern in file"}]}}
+{"type": "message", "timestamp": "2026-01-01T00:01:10Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "tu-1", "name": "read_file", "input": {"AbsolutePath": "/anon/project/a.txt"}}], "usage": {"input_tokens": 1000, "output_tokens": 100}}}
+{"type": "message", "timestamp": "2026-01-01T00:01:20Z", "message": {"role": "tool", "content": [{"type": "text", "text": "content"}], "tool_use_id": "tu-1"}}
+{"type": "message", "timestamp": "2026-01-01T00:01:30Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "tu-2", "name": "grep_search", "input": {"Query": "TODO", "SearchPath": "/anon/project/a.txt"}}], "usage": {"input_tokens": 1200, "output_tokens": 120}}}
+{"type": "message", "timestamp": "2026-01-01T00:01:40Z", "message": {"role": "tool", "content": [{"type": "text", "text": "no matches"}], "tool_use_id": "tu-2"}}
+{"type": "message", "timestamp": "2026-01-01T00:01:50Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "tu-3", "name": "write_to_file", "input": {"TargetFile": "/anon/project/res.txt", "CodeContent": "Done"}}], "usage": {"input_tokens": 1500, "output_tokens": 150}}}
+{"type": "message", "timestamp": "2026-01-01T00:02:00Z", "message": {"role": "tool", "content": [{"type": "text", "text": "success"}], "tool_use_id": "tu-3"}}
+{"type": "message", "timestamp": "2026-01-01T00:02:10Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "I completed the search."}], "usage": {"input_tokens": 2000, "output_tokens": 200}}}
+{"type": "session_end", "timestamp": "2026-01-01T00:02:20Z"}

@@ -1,0 +1,12 @@
+{"type": "session_meta", "payload": {"id": "loop-sess-cdx-real-anonymized", "timestamp": "2026-06-23T12:00:00Z", "cwd": "/anon/project", "cli_version": "0.3.0"}}
+{"type": "turn_context", "payload": {"model": "claude-opus-4-5"}}
+{"type": "task_started", "turn_id": "t1"}
+{"type": "token_count", "info": {"last_token_usage": {"input_tokens": 60000, "cached_input_tokens": 0, "output_tokens": 1000}, "total_token_usage": {"input_tokens": 60000, "output_tokens": 1000}}}
+{"type": "mcp_tool_call_end", "invocation": {"server": "system", "tool": "view_file", "arguments": {"path": "/anon/project/src/lib.rs"}}, "result": {"Err": "file not found"}}
+{"type": "task_started", "turn_id": "t2"}
+{"type": "mcp_tool_call_end", "invocation": {"server": "system", "tool": "view_file", "arguments": {"path": "/anon/project/src/lib.rs"}}, "result": {"Err": "file not found"}}
+{"type": "task_started", "turn_id": "t3"}
+{"type": "mcp_tool_call_end", "invocation": {"server": "system", "tool": "view_file", "arguments": {"path": "/anon/project/src/lib.rs"}}, "result": {"Err": "file not found"}}
+{"type": "task_started", "turn_id": "t4"}
+{"type": "mcp_tool_call_end", "invocation": {"server": "system", "tool": "view_file", "arguments": {"path": "/anon/project/src/lib.rs"}}, "result": {"Err": "file not found"}}
+{"type": "session_end", "timestamp": "2026-06-23T12:02:00Z"}
