@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use notify::{Watcher, RecursiveMode};
+use keyring::Entry;
 
 use agent_token_tracker::model::Session;
 use agent_token_tracker::db;
@@ -522,6 +523,156 @@ fn focus_main_window(app_handle: AppHandle, session_id: Option<String>) -> Resul
     Ok(())
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AppSettings {
+    pub log_dir: String,
+}
+
+fn get_config_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut path = app.path().app_config_dir()
+        .map_err(|e| format!("설정 디렉토리 경로 획득 실패: {}", e))?;
+    std::fs::create_dir_all(&path)
+        .map_err(|e| format!("설정 디렉토리 생성 실패: {}", e))?;
+    path.push("config.json");
+    Ok(path)
+}
+
+#[tauri::command]
+fn save_settings(app_handle: AppHandle, log_dir: String) -> Result<(), String> {
+    let path = get_config_path(&app_handle)?;
+    let settings = AppSettings { log_dir };
+    let json = serde_json::to_string_pretty(&settings)
+        .map_err(|e| format!("JSON 직렬화 실패: {}", e))?;
+    std::fs::write(path, json)
+        .map_err(|e| format!("설정 파일 쓰기 실패: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_settings(app_handle: AppHandle) -> Result<AppSettings, String> {
+    let path = get_config_path(&app_handle)?;
+    if !path.exists() {
+        return Ok(AppSettings { log_dir: "".to_string() });
+    }
+    let json = std::fs::read_to_string(path)
+        .map_err(|e| format!("설정 파일 읽기 실패: {}", e))?;
+    let settings: AppSettings = serde_json::from_str(&json)
+        .map_err(|e| format!("JSON 역직렬화 실패: {}", e))?;
+    Ok(settings)
+}
+
+#[tauri::command]
+fn save_api_key(provider: String, api_key: String) -> Result<(), String> {
+    if provider != "anthropic" && provider != "openai" {
+        return Err("지원하지 않는 플랫폼입니다.".to_string());
+    }
+    let entry = Entry::new("agent-token-tracker", &provider)
+        .map_err(|e| format!("키체인 엔트리 생성 실패: {}", e))?;
+    entry.set_password(&api_key)
+        .map_err(|e| format!("API Key 저장 실패: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_api_key(provider: String) -> Result<(), String> {
+    if provider != "anthropic" && provider != "openai" {
+        return Err("지원하지 않는 플랫폼입니다.".to_string());
+    }
+    let entry = Entry::new("agent-token-tracker", &provider)
+        .map_err(|e| format!("키체인 엔트리 생성 실패: {}", e))?;
+    let _ = entry.delete_credential();
+    Ok(())
+}
+
+#[tauri::command]
+fn get_api_keys_status() -> Result<HashMap<String, bool>, String> {
+    let mut status = HashMap::new();
+    
+    let anthropic_entry = Entry::new("agent-token-tracker", "anthropic");
+    let has_anthropic = match anthropic_entry {
+        Ok(entry) => entry.get_password().is_ok(),
+        Err(_) => false,
+    };
+    status.insert("anthropic".to_string(), has_anthropic);
+
+    let openai_entry = Entry::new("agent-token-tracker", "openai");
+    let has_openai = match openai_entry {
+        Ok(entry) => entry.get_password().is_ok(),
+        Err(_) => false,
+    };
+    status.insert("openai".to_string(), has_openai);
+
+    Ok(status)
+}
+
+#[tauri::command]
+async fn validate_stored_api_key(provider: String) -> Result<bool, String> {
+    if provider != "anthropic" && provider != "openai" {
+        return Err("지원하지 않는 플랫폼입니다.".to_string());
+    }
+    
+    let entry = Entry::new("agent-token-tracker", &provider)
+        .map_err(|e| format!("키체인 조회 실패: {}", e))?;
+    
+    let api_key = match entry.get_password() {
+        Ok(k) => k,
+        Err(_) => return Ok(false),
+    };
+
+    let client = reqwest::Client::new();
+    
+    if provider == "anthropic" {
+        let response = client.post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&serde_json::json!({
+                "model": "claude-3-5-sonnet-20241022",
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "ping"}]
+            }))
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                if status == 401 {
+                    Ok(false)
+                } else {
+                    Ok(true)
+                }
+            }
+            Err(_) => Err("Anthropic API 서버에 접근할 수 없습니다.".to_string()),
+        }
+    } else {
+        let response = client.get("https://api.openai.com/v1/models")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                if status == 200 {
+                    Ok(true)
+                } else if status == 401 {
+                    Ok(false)
+                } else {
+                    Ok(false)
+                }
+            }
+            Err(_) => Err("OpenAI API 서버에 접근할 수 없습니다.".to_string()),
+        }
+    }
+}
+
+#[tauri::command]
+fn validate_local_path(path: String) -> Result<bool, String> {
+    let p = Path::new(&path);
+    Ok(p.exists() && p.is_dir())
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -573,7 +724,14 @@ fn main() {
             get_daily_costs,
             get_session_details,
             interrupt_agent,
-            focus_main_window
+            focus_main_window,
+            save_settings,
+            load_settings,
+            save_api_key,
+            delete_api_key,
+            get_api_keys_status,
+            validate_stored_api_key,
+            validate_local_path
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 앱 구동 중 에러 발생");

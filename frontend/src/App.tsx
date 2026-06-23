@@ -152,6 +152,7 @@ function App() {
     return <TrayPopoverView />;
   }
 
+  const [activeTab, setActiveTab] = useState<"dashboard" | "settings">("dashboard");
   const [sessions, setSessions] = useState<Session[]>([]);
   const [summaries, setSummaries] = useState<AgentSummary[]>([]);
   const [anomalies, setAnomalies] = useState<LoopDetectionResult[]>([]);
@@ -362,13 +363,13 @@ function App() {
           <span style={{ fontSize: "1.6rem" }}>⚡</span> ATK Monitor
         </div>
         <ul className="sidebar-menu">
-          <li className="menu-item active">
+          <li className={`menu-item ${activeTab === "dashboard" ? "active" : ""}`} onClick={() => setActiveTab("dashboard")}>
             <span>📊</span> 대시보드
           </li>
           <li className="menu-item">
             <span>🔍</span> 실시간 스캔
           </li>
-          <li className="menu-item">
+          <li className={`menu-item ${activeTab === "settings" ? "active" : ""}`} onClick={() => setActiveTab("settings")}>
             <span>⚙️</span> 환경 설정
           </li>
         </ul>
@@ -379,244 +380,250 @@ function App() {
 
       {/* Main Panel Content */}
       <main className="main-content">
-        {/* Top Status Bar */}
-        <header className="statusbar">
-          <div className="statusbar-metrics">
-            <div className="metric-item">
-              <span className="metric-label">총 누적 세션</span>
-              <span className="metric-value">{totalSessionsOverall} Sessions</span>
-            </div>
-            <div className="metric-item">
-              <span className="metric-label">총 누적 토큰 비용</span>
-              <span className="metric-value" style={{ color: "var(--neon-purple)" }}>
-                ${totalCostOverall.toFixed(4)} USD
-              </span>
-            </div>
-          </div>
-          <div className="pulse-badge">
-            <span className="pulse-dot"></span>
-            <span>로컬 감시 모드 작동 중</span>
-          </div>
-        </header>
-
-        {error && <div style={{ color: "hsl(0, 100%, 65%)", marginBottom: "1rem", fontWeight: "600" }}>⚠️ 오류: {error}</div>}
-
-        {/* 3대 에이전트 요약 카드 그리드 */}
-        <section className="cards-grid">
-          {summaries.map((s) => {
-            let iconClass = "icon-claude";
-            let displayName = "Claude Code";
-            let short = "CC";
-            if (s.agent_type === "codex") {
-              iconClass = "icon-codex";
-              displayName = "Codex";
-              short = "CD";
-            } else if (s.agent_type === "antigravity") {
-              iconClass = "icon-antigravity";
-              displayName = "Antigravity";
-              short = "AG";
-            }
-
-            return (
-              <div key={s.agent_type} className="agent-card glass">
-                <div className="agent-card-header">
-                  <h3 className="agent-name">{displayName}</h3>
-                  <div className={`agent-icon-wrapper ${iconClass}`}>{short}</div>
+        {activeTab === "dashboard" ? (
+          <>
+            {/* Top Status Bar */}
+            <header className="statusbar">
+              <div className="statusbar-metrics">
+                <div className="metric-item">
+                  <span className="metric-label">총 누적 세션</span>
+                  <span className="metric-value">{totalSessionsOverall} Sessions</span>
                 </div>
-                <div className="agent-stats">
-                  <div>
-                    <div className="stat-label">활성 세션</div>
-                    <div className="stat-val">{s.session_count} 건</div>
-                  </div>
-                  <div>
-                    <div className="stat-label">총 입/출력 토큰</div>
-                    <div className="stat-val">
-                      {s.total_input_tokens + s.total_output_tokens > 0 
-                        ? (s.total_input_tokens + s.total_output_tokens).toLocaleString()
-                        : "-"}
-                    </div>
-                  </div>
-                  <div className="agent-cost">
-                    <span className="stat-label">누적 비용</span>
-                    <span className="agent-cost-val">${s.total_cost_usd.toFixed(5)}</span>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </section>
-
-        {/* Spline Chart */}
-        <section className="chart-container glass">
-          <div className="chart-title-wrapper">
-            <h3 className="chart-title">최근 14일간 토큰 비용 추이 (USD)</h3>
-            <span style={{ fontSize: "0.8rem", color: "hsl(215, 20%, 55%)" }}>스플라인 차트</span>
-          </div>
-
-          {dailyCosts.length > 0 ? (
-            <div style={{ position: "relative" }}>
-              <svg
-                ref={chartRef}
-                viewBox={`0 0 ${chartWidth} ${chartHeight}`}
-                className="svg-chart"
-                onMouseMove={handleMouseMove}
-                onMouseLeave={handleMouseLeave}
-              >
-                <defs>
-                  <linearGradient id="chart-gradient" x1="0" y1="0" x2="1" y2="0">
-                    <stop offset="0%" stopColor="var(--neon-blue)" />
-                    <stop offset="100%" stopColor="var(--neon-purple)" />
-                  </linearGradient>
-                  <linearGradient id="area-gradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="var(--neon-purple)" stopOpacity="0.4" />
-                    <stop offset="100%" stopColor="var(--neon-purple)" stopOpacity="0" />
-                  </linearGradient>
-                </defs>
-
-                {/* Grid Lines */}
-                {[0, 0.25, 0.5, 0.75, 1].map((ratio, i) => {
-                  const y = paddingTop + ratio * contentHeight;
-                  return (
-                    <line
-                      key={i}
-                      x1={paddingLeft}
-                      y1={y}
-                      x2={chartWidth - paddingRight}
-                      y2={y}
-                      className="chart-grid-line"
-                    />
-                  );
-                })}
-
-                {/* Y Axis Labels */}
-                {[0, 0.5, 1].map((ratio, i) => {
-                  const y = paddingTop + ratio * contentHeight;
-                  const val = (maxCost * (1 - ratio)).toFixed(5);
-                  return (
-                    <text
-                      key={i}
-                      x={paddingLeft - 8}
-                      y={y + 3}
-                      textAnchor="end"
-                      className="chart-axis-text"
-                    >
-                      ${val}
-                    </text>
-                  );
-                })}
-
-                {/* X Axis Line */}
-                <line
-                  x1={paddingLeft}
-                  y1={chartHeight - paddingBottom}
-                  x2={chartWidth - paddingRight}
-                  y2={chartHeight - paddingBottom}
-                  className="chart-axis-line"
-                />
-
-                {/* X Axis Labels */}
-                {dailyCosts.map((d, i) => {
-                  if (i % 2 !== 0 && i !== dailyCosts.length - 1) return null;
-                  const x = paddingLeft + (i / (dailyCosts.length - 1)) * contentWidth;
-                  const dateStr = d.date.substring(5); // MM-DD
-                  return (
-                    <text
-                      key={i}
-                      x={x}
-                      y={chartHeight - paddingBottom + 16}
-                      textAnchor="middle"
-                      className="chart-axis-text"
-                    >
-                      {dateStr}
-                    </text>
-                  );
-                })}
-
-                {areaD && <path d={areaD} className="chart-area" />}
-                {pathD && <path d={pathD} className="chart-line" />}
-
-                {points.map((p, i) => (
-                  <circle
-                    key={i}
-                    cx={p.x}
-                    cy={p.y}
-                    r={3.5}
-                    className="chart-point"
-                  />
-                ))}
-              </svg>
-
-              {/* DOM Interactive Tooltip */}
-              <div
-                className="chart-tooltip"
-                style={{
-                  opacity: tooltip.visible ? 1 : 0,
-                  left: `${tooltip.x}px`,
-                  top: `${tooltip.y}px`,
-                }}
-              >
-                <div style={{ fontWeight: 600, color: "var(--neon-blue)" }}>{tooltip.date}</div>
-                <div style={{ marginTop: "2px" }}>비용: <span style={{ color: "#fff", fontWeight: 700 }}>${tooltip.cost.toFixed(5)}</span></div>
-              </div>
-            </div>
-          ) : (
-            <div style={{ padding: "3rem", textAlign: "center", color: "hsl(215, 20%, 50%)" }}>
-              차트 데이터를 불러오는 중이거나 최근 14일간의 토큰 비용 기록이 없습니다.
-            </div>
-          )}
-        </section>
-
-        {/* Bottom details column grid */}
-        <div className="bottom-sections">
-          {/* Active Sessions list */}
-          <section className="section-card glass">
-            <h4 className="section-header">활성 세션 현황</h4>
-            <div className="session-list">
-              {sessions.slice(0, 5).map((s) => (
-                <div
-                  key={s.session_id}
-                  className="session-item session-item-clickable"
-                  onClick={() => handleSelectSession(s.session_id)}
-                >
-                  <div className="session-meta">
-                    <span className="session-id">{s.session_id.substring(0, 16)}...</span>
-                    <span className="session-agent">{s.agent_type} • {s.cwd}</span>
-                  </div>
-                  <span className="session-tokens">
-                    {(s.total_input_tokens + s.total_output_tokens).toLocaleString()} Tokens
+                <div className="metric-item">
+                  <span className="metric-label">총 누적 토큰 비용</span>
+                  <span className="metric-value" style={{ color: "var(--neon-purple)" }}>
+                    ${totalCostOverall.toFixed(4)} USD
                   </span>
                 </div>
-              ))}
-              {sessions.length === 0 && (
-                <div style={{ color: "hsl(215, 20%, 40%)", textAlign: "center", padding: "1rem" }}>
-                  현재 활성화된 세션이 없습니다.
-                </div>
-              )}
-            </div>
-          </section>
+              </div>
+              <div className="pulse-badge">
+                <span className="pulse-dot"></span>
+                <span>로컬 감시 모드 작동 중</span>
+              </div>
+            </header>
 
-          {/* Anomalies list */}
-          <section className="section-card glass">
-            <h4 className="section-header">실시간 이상 징후 (Anomalies)</h4>
-            <div className="anomaly-list">
-              {anomalies.slice(0, 3).map((a) => (
-                <div
-                  key={a.session_id}
-                  className="anomaly-item anomaly-item-clickable"
-                  onClick={() => handleSelectSession(a.session_id)}
-                >
-                  <span className="anomaly-id">Session: {a.session_id.substring(0, 8)}...</span>
-                  <span className="anomaly-desc">오작동 시그널 {a.signals.length}개 검출됨</span>
+            {error && <div style={{ color: "hsl(0, 100%, 65%)", marginBottom: "1rem", fontWeight: "600" }}>⚠️ 오류: {error}</div>}
+
+            {/* 3대 에이전트 요약 카드 그리드 */}
+            <section className="cards-grid">
+              {summaries.map((s) => {
+                let iconClass = "icon-claude";
+                let displayName = "Claude Code";
+                let short = "CC";
+                if (s.agent_type === "codex") {
+                  iconClass = "icon-codex";
+                  displayName = "Codex";
+                  short = "CD";
+                } else if (s.agent_type === "antigravity") {
+                  iconClass = "icon-antigravity";
+                  displayName = "Antigravity";
+                  short = "AG";
+                }
+
+                return (
+                  <div key={s.agent_type} className="agent-card glass">
+                    <div className="agent-card-header">
+                      <h3 className="agent-name">{displayName}</h3>
+                      <div className={`agent-icon-wrapper ${iconClass}`}>{short}</div>
+                    </div>
+                    <div className="agent-stats">
+                      <div>
+                        <div className="stat-label">활성 세션</div>
+                        <div className="stat-val">{s.session_count} 건</div>
+                      </div>
+                      <div>
+                        <div className="stat-label">총 입/출력 토큰</div>
+                        <div className="stat-val">
+                          {s.total_input_tokens + s.total_output_tokens > 0 
+                            ? (s.total_input_tokens + s.total_output_tokens).toLocaleString()
+                            : "-"}
+                        </div>
+                      </div>
+                      <div className="agent-cost">
+                        <span className="stat-label">누적 비용</span>
+                        <span className="agent-cost-val">${s.total_cost_usd.toFixed(5)}</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </section>
+
+            {/* Spline Chart */}
+            <section className="chart-container glass">
+              <div className="chart-title-wrapper">
+                <h3 className="chart-title">최근 14일간 토큰 비용 추이 (USD)</h3>
+                <span style={{ fontSize: "0.8rem", color: "hsl(215, 20%, 55%)" }}>스플라인 차트</span>
+              </div>
+
+              {dailyCosts.length > 0 ? (
+                <div style={{ position: "relative" }}>
+                  <svg
+                    ref={chartRef}
+                    viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+                    className="svg-chart"
+                    onMouseMove={handleMouseMove}
+                    onMouseLeave={handleMouseLeave}
+                  >
+                    <defs>
+                      <linearGradient id="chart-gradient" x1="0" y1="0" x2="1" y2="0">
+                        <stop offset="0%" stopColor="var(--neon-blue)" />
+                        <stop offset="100%" stopColor="var(--neon-purple)" />
+                      </linearGradient>
+                      <linearGradient id="area-gradient" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="var(--neon-purple)" stopOpacity="0.4" />
+                        <stop offset="100%" stopColor="var(--neon-purple)" stopOpacity="0" />
+                      </linearGradient>
+                    </defs>
+
+                    {/* Grid Lines */}
+                    {[0, 0.25, 0.5, 0.75, 1].map((ratio, i) => {
+                      const y = paddingTop + ratio * contentHeight;
+                      return (
+                        <line
+                          key={i}
+                          x1={paddingLeft}
+                          y1={y}
+                          x2={chartWidth - paddingRight}
+                          y2={y}
+                          className="chart-grid-line"
+                        />
+                      );
+                    })}
+
+                    {/* Y Axis Labels */}
+                    {[0, 0.5, 1].map((ratio, i) => {
+                      const y = paddingTop + ratio * contentHeight;
+                      const val = (maxCost * (1 - ratio)).toFixed(5);
+                      return (
+                        <text
+                          key={i}
+                          x={paddingLeft - 8}
+                          y={y + 3}
+                          textAnchor="end"
+                          className="chart-axis-text"
+                        >
+                          ${val}
+                        </text>
+                      );
+                    })}
+
+                    {/* X Axis Line */}
+                    <line
+                      x1={paddingLeft}
+                      y1={chartHeight - paddingBottom}
+                      x2={chartWidth - paddingRight}
+                      y2={chartHeight - paddingBottom}
+                      className="chart-axis-line"
+                    />
+
+                    {/* X Axis Labels */}
+                    {dailyCosts.map((d, i) => {
+                      if (i % 2 !== 0 && i !== dailyCosts.length - 1) return null;
+                      const x = paddingLeft + (i / (dailyCosts.length - 1)) * contentWidth;
+                      const dateStr = d.date.substring(5); // MM-DD
+                      return (
+                        <text
+                          key={i}
+                          x={x}
+                          y={chartHeight - paddingBottom + 16}
+                          textAnchor="middle"
+                          className="chart-axis-text"
+                        >
+                          {dateStr}
+                        </text>
+                      );
+                    })}
+
+                    {areaD && <path d={areaD} className="chart-area" />}
+                    {pathD && <path d={pathD} className="chart-line" />}
+
+                    {points.map((p, i) => (
+                      <circle
+                        key={i}
+                        cx={p.x}
+                        cy={p.y}
+                        r={3.5}
+                        className="chart-point"
+                      />
+                    ))}
+                  </svg>
+
+                  {/* DOM Interactive Tooltip */}
+                  <div
+                    className="chart-tooltip"
+                    style={{
+                      opacity: tooltip.visible ? 1 : 0,
+                      left: `${tooltip.x}px`,
+                      top: `${tooltip.y}px`,
+                    }}
+                  >
+                    <div style={{ fontWeight: 600, color: "var(--neon-blue)" }}>{tooltip.date}</div>
+                    <div style={{ marginTop: "2px" }}>비용: <span style={{ color: "#fff", fontWeight: 700 }}>${tooltip.cost.toFixed(5)}</span></div>
+                  </div>
                 </div>
-              ))}
-              {anomalies.length === 0 && (
-                <div style={{ color: "hsl(150, 100%, 35%)", textAlign: "center", padding: "1rem" }}>
-                  지속 루프 및 토큰 폭팽 등의 오작동 세션이 없습니다.
+              ) : (
+                <div style={{ padding: "3rem", textAlign: "center", color: "hsl(215, 20%, 50%)" }}>
+                  차트 데이터를 불러오는 중이거나 최근 14일간의 토큰 비용 기록이 없습니다.
                 </div>
               )}
+            </section>
+
+            {/* Bottom details column grid */}
+            <div className="bottom-sections">
+              {/* Active Sessions list */}
+              <section className="section-card glass">
+                <h4 className="section-header">활성 세션 현황</h4>
+                <div className="session-list">
+                  {sessions.slice(0, 5).map((s) => (
+                    <div
+                      key={s.session_id}
+                      className="session-item session-item-clickable"
+                      onClick={() => handleSelectSession(s.session_id)}
+                    >
+                      <div className="session-meta">
+                        <span className="session-id">{s.session_id.substring(0, 16)}...</span>
+                        <span className="session-agent">{s.agent_type} • {s.cwd}</span>
+                      </div>
+                      <span className="session-tokens">
+                        {(s.total_input_tokens + s.total_output_tokens).toLocaleString()} Tokens
+                      </span>
+                    </div>
+                  ))}
+                  {sessions.length === 0 && (
+                    <div style={{ color: "hsl(215, 20%, 40%)", textAlign: "center", padding: "1rem" }}>
+                      현재 활성화된 세션이 없습니다.
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              {/* Anomalies list */}
+              <section className="section-card glass">
+                <h4 className="section-header">실시간 이상 징후 (Anomalies)</h4>
+                <div className="anomaly-list">
+                  {anomalies.slice(0, 3).map((a) => (
+                    <div
+                      key={a.session_id}
+                      className="anomaly-item anomaly-item-clickable"
+                      onClick={() => handleSelectSession(a.session_id)}
+                    >
+                      <span className="anomaly-id">Session: {a.session_id.substring(0, 8)}...</span>
+                      <span className="anomaly-desc">오작동 시그널 {a.signals.length}개 검출됨</span>
+                    </div>
+                  ))}
+                  {anomalies.length === 0 && (
+                    <div style={{ color: "hsl(150, 100%, 35%)", textAlign: "center", padding: "1rem" }}>
+                      지속 루프 및 토큰 폭팽 등의 오작동 세션이 없습니다.
+                    </div>
+                  )}
+                </div>
+              </section>
             </div>
-          </section>
-        </div>
+          </>
+        ) : (
+          <SettingsView />
+        )}
       </main>
 
       {/* ────────────────────────────────────────────────────────────
@@ -907,6 +914,246 @@ function TrayPopoverView() {
         <span style={{ fontWeight: 800, color: 'var(--foreground)' }}>
           ${totalCost.toFixed(2)} USD
         </span>
+      </div>
+    </div>
+  );
+}
+
+function SettingsView() {
+  const [settings, setSettings] = useState({ log_dir: "" });
+  const [keysStatus, setKeysStatus] = useState({ anthropic: false, openai: false });
+  const [anthropicKey, setAnthropicKey] = useState("");
+  const [openaiKey, setOpenAIKey] = useState("");
+  
+  const [anthropicValid, setAnthropicValid] = useState<boolean | null>(null);
+  const [openaiValid, setOpenAIValid] = useState<boolean | null>(null);
+  const [pathValid, setPathValid] = useState<boolean | null>(null);
+
+  const [diagnoseLoading, setDiagnoseLoading] = useState({
+    anthropic: false,
+    openai: false,
+    path: false,
+  });
+
+  const loadData = async () => {
+    try {
+      const s = await invoke<{ log_dir: string }>("load_settings");
+      setSettings(s);
+      
+      const k = await invoke<Record<string, boolean>>("get_api_keys_status");
+      setKeysStatus({
+        anthropic: k.anthropic || false,
+        openai: k.openai || false,
+      });
+
+      if (k.anthropic) {
+        diagnoseKey("anthropic");
+      }
+      if (k.openai) {
+        diagnoseKey("openai");
+      }
+      if (s.log_dir) {
+        diagnosePath(s.log_dir);
+      }
+    } catch (e) {
+      console.error("설정 로드 실패:", e);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  const diagnoseKey = async (provider: "anthropic" | "openai") => {
+    setDiagnoseLoading(prev => ({ ...prev, [provider]: true }));
+    try {
+      const isValid = await invoke<boolean>("validate_stored_api_key", { provider });
+      if (provider === "anthropic") {
+        setAnthropicValid(isValid);
+      } else {
+        setOpenAIValid(isValid);
+      }
+    } catch (e) {
+      console.error(`${provider} API 키 진단 실패:`, e);
+      if (provider === "anthropic") {
+        setAnthropicValid(false);
+      } else {
+        setOpenAIValid(false);
+      }
+    } finally {
+      setDiagnoseLoading(prev => ({ ...prev, [provider]: false }));
+    }
+  };
+
+  const diagnosePath = async (path: string) => {
+    setDiagnoseLoading(prev => ({ ...prev, path: true }));
+    try {
+      const isValid = await invoke<boolean>("validate_local_path", { path });
+      setPathValid(isValid);
+    } catch (e) {
+      console.error("로컬 경로 진단 실패:", e);
+      setPathValid(false);
+    } finally {
+      setDiagnoseLoading(prev => ({ ...prev, path: false }));
+    }
+  };
+
+  const handleSaveKey = async (provider: "anthropic" | "openai") => {
+    const key = provider === "anthropic" ? anthropicKey : openaiKey;
+    if (!key.trim()) return;
+    try {
+      await invoke("save_api_key", { provider, apiKey: key });
+      if (provider === "anthropic") {
+        setAnthropicKey("");
+      } else {
+        setOpenAIKey("");
+      }
+      alert(`${provider === "anthropic" ? "Anthropic" : "OpenAI"} API Key가 암호화되어 안전하게 보관되었습니다.`);
+      loadData();
+    } catch (e: any) {
+      alert(`API Key 저장 실패: ${e.toString()}`);
+    }
+  };
+
+  const handleDeleteKey = async (provider: "anthropic" | "openai") => {
+    try {
+      await invoke("delete_api_key", { provider });
+      alert(`${provider === "anthropic" ? "Anthropic" : "OpenAI"} API Key가 제거되었습니다.`);
+      if (provider === "anthropic") {
+        setAnthropicValid(null);
+      } else {
+        setOpenAIValid(null);
+      }
+      loadData();
+    } catch (e: any) {
+      alert(`API Key 제거 실패: ${e.toString()}`);
+    }
+  };
+
+  const handleSavePath = async () => {
+    try {
+      await invoke("save_settings", { logDir: settings.log_dir });
+      alert("로컬 로그 디렉토리 경로가 저장되었습니다.");
+      loadData();
+    } catch (e: any) {
+      alert(`경로 저장 실패: ${e.toString()}`);
+    }
+  };
+
+  return (
+    <div className="settings-container">
+      <h2 className="settings-title">⚙️ 환경 설정 (Settings)</h2>
+      
+      {/* API Credentials Card */}
+      <div className="settings-card glass">
+        <h3 className="card-title">🔑 에이전트 플랫폼 API 인증</h3>
+        <p className="card-desc">API Key는 OS의 보안 키체인(keyring) 내에 안전하게 암호화 보관되며, 설정 파일에 텍스트 형태로 노출되지 않습니다.</p>
+        
+        <div className="settings-form">
+          {/* Anthropic Key */}
+          <div className="form-group">
+            <div className="form-group-header">
+              <label>Anthropic API Key</label>
+              <div className="status-indicator">
+                {diagnoseLoading.anthropic ? (
+                  <span className="status-badge checking">진단 중...</span>
+                ) : keysStatus.anthropic ? (
+                  anthropicValid ? (
+                    <span className="status-badge active"><span className="pulse-dot-green"></span>연결됨 (Active)</span>
+                  ) : (
+                    <span className="status-badge inactive"><span className="pulse-dot-red"></span>인증 실패 (Invalid)</span>
+                  )
+                ) : (
+                  <span className="status-badge none">설정되지 않음</span>
+                )}
+              </div>
+            </div>
+            <div className="input-group">
+              <input
+                type="password"
+                placeholder={keysStatus.anthropic ? "••••••••••••••••••••••••" : "Anthropic API 키 입력 (sk-ant-...)"}
+                value={anthropicKey}
+                onChange={(e) => setAnthropicKey(e.target.value)}
+                className="settings-input"
+              />
+              <button onClick={() => handleSaveKey("anthropic")} className="btn btn-save" disabled={!anthropicKey.trim()}>저장</button>
+              {keysStatus.anthropic && (
+                <button onClick={() => handleDeleteKey("anthropic")} className="btn btn-delete">삭제</button>
+              )}
+            </div>
+          </div>
+
+          {/* OpenAI Key */}
+          <div className="form-group">
+            <div className="form-group-header">
+              <label>OpenAI API Key</label>
+              <div className="status-indicator">
+                {diagnoseLoading.openai ? (
+                  <span className="status-badge checking">진단 중...</span>
+                ) : keysStatus.openai ? (
+                  openaiValid ? (
+                    <span className="status-badge active"><span className="pulse-dot-green"></span>연결됨 (Active)</span>
+                  ) : (
+                    <span className="status-badge inactive"><span className="pulse-dot-red"></span>인증 실패 (Invalid)</span>
+                  )
+                ) : (
+                  <span className="status-badge none">설정되지 않음</span>
+                )}
+              </div>
+            </div>
+            <div className="input-group">
+              <input
+                type="password"
+                placeholder={keysStatus.openai ? "••••••••••••••••••••••••" : "OpenAI API 키 입력 (sk-...)"}
+                value={openaiKey}
+                onChange={(e) => setOpenAIKey(e.target.value)}
+                className="settings-input"
+              />
+              <button onClick={() => handleSaveKey("openai")} className="btn btn-save" disabled={!openaiKey.trim()}>저장</button>
+              {keysStatus.openai && (
+                <button onClick={() => handleDeleteKey("openai")} className="btn btn-delete">삭제</button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Directory Config Card */}
+      <div className="settings-card glass" style={{ marginTop: "1.5rem" }}>
+        <h3 className="card-title">📂 로그 감시 경로 설정</h3>
+        <p className="card-desc">AI 에이전트들의 로그 파일을 실시간으로 추적/감시할 로컬 디렉토리 경로를 지정합니다.</p>
+        
+        <div className="settings-form">
+          <div className="form-group">
+            <div className="form-group-header">
+              <label>로컬 로그 디렉토리 경로</label>
+              <div className="status-indicator">
+                {diagnoseLoading.path ? (
+                  <span className="status-badge checking">검사 중...</span>
+                ) : settings.log_dir ? (
+                  pathValid ? (
+                    <span className="status-badge active"><span className="pulse-dot-green"></span>경로 유효함</span>
+                  ) : (
+                    <span className="status-badge inactive"><span className="pulse-dot-red"></span>경로 오류 (존재하지 않음)</span>
+                  )
+                ) : (
+                  <span className="status-badge none">설정되지 않음</span>
+                )}
+              </div>
+            </div>
+            <div className="input-group">
+              <input
+                type="text"
+                placeholder="예: /Users/username/logs"
+                value={settings.log_dir}
+                onChange={(e) => setSettings({ log_dir: e.target.value })}
+                className="settings-input"
+                style={{ fontFamily: "monospace", fontSize: "0.8rem" }}
+              />
+              <button onClick={handleSavePath} className="btn btn-save" disabled={!settings.log_dir.trim()}>저장</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
