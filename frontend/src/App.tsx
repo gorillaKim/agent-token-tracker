@@ -203,8 +203,16 @@ function App() {
       loadData();
     });
 
+    // navigate-to-session 이벤트 리스닝 연동
+    const unlistenNavigate = listen<string>("navigate-to-session", (event) => {
+      const sessionId = event.payload;
+      console.log("[Router] 특정 세션 강제 라우팅 수신:", sessionId);
+      handleSelectSession(sessionId);
+    });
+
     return () => {
       unlistenPromise.then((f) => f());
+      unlistenNavigate.then((f) => f());
     };
   }, []);
 
@@ -838,6 +846,17 @@ function TrayPopoverView() {
   const totalCost = summaries.reduce((acc, curr) => acc + curr.total_cost_usd, 0);
   const totalAnomalies = anomalies.length;
 
+  const handleBannerClick = async () => {
+    if (anomalies.length > 0) {
+      const firstAnomalySessionId = anomalies[0].session_id;
+      try {
+        await invoke("focus_main_window", { sessionId: firstAnomalySessionId });
+      } catch (e) {
+        console.error("focus_main_window 호출 실패:", e);
+      }
+    }
+  };
+
   return (
     <div className="tray-popover-container">
       <div className="tray-popover-header">
@@ -848,7 +867,7 @@ function TrayPopoverView() {
       </div>
 
       {totalAnomalies > 0 ? (
-        <div className="tray-popover-banner">
+        <div className="tray-popover-banner" onClick={handleBannerClick} style={{ cursor: "pointer" }}>
           <span>⚠️</span>
           <span>{totalAnomalies}개의 오작동 세션 감지됨</span>
         </div>

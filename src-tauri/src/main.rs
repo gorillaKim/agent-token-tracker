@@ -508,6 +508,20 @@ fn toggle_tray_popover(app: &AppHandle, click_pos: tauri::PhysicalPosition<f64>)
     }
 }
 
+/// 7. 팝오버 클릭 시 메인 윈도우 활성화 및 라우팅 연동
+#[tauri::command]
+fn focus_main_window(app_handle: AppHandle, session_id: Option<String>) -> Result<(), String> {
+    if let Some(main_window) = app_handle.get_webview_window("main") {
+        let _ = main_window.show();
+        let _ = main_window.unminimize();
+        let _ = main_window.set_focus();
+        if let Some(id) = session_id {
+            let _ = app_handle.emit("navigate-to-session", id);
+        }
+    }
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -558,7 +572,8 @@ fn main() {
             get_loop_signals,
             get_daily_costs,
             get_session_details,
-            interrupt_agent
+            interrupt_agent,
+            focus_main_window
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 앱 구동 중 에러 발생");
