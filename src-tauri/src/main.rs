@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
+use tauri::tray::TrayIcon;
 use notify::{Watcher, RecursiveMode};
 
 use agent_token_tracker::model::Session;
@@ -256,12 +257,10 @@ fn process_watch_file(
 }
 
 fn start_watch_loop(app_handle: AppHandle) -> Result<(), String> {
-    use std::sync::mpsc::channel;
-
     let db_path = "../atk.db";
     let watch_path = "../tests/fixtures";
 
-    let (tx, rx) = channel();
+    let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |res| {
         if let Ok(event) = res {
             let _ = tx.send(event);
@@ -291,69 +290,76 @@ fn start_watch_loop(app_handle: AppHandle) -> Result<(), String> {
                 }
                 last_event_time = Instant::now();
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if !pending_files.is_empty() && last_event_time.elapsed() >= Duration::from_millis(500) {
-                    println!("[Watch] 감시 대상 파일 수정 감지, 증분 갱신 및 UI 업데이트 중...");
-                    
-                    let conn = match Connection::open(db_path) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            eprintln!("DB 연결 실패: {}", e);
-                            pending_files.clear();
-                            continue;
-                        }
-                    };
-
-                    let pricing_map = match db::get_all_pricings(&conn) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            eprintln!("Pricing 데이터 조회 실패: {}", e);
-                            pending_files.clear();
-                            continue;
-                        }
-                    };
-
-                    let mut updated_any = false;
-                    for file in pending_files.drain() {
-                        let path_str = file.to_str().unwrap_or("");
-                        let is_vscdb = path_str.contains("state.vscdb");
-                        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+            Err(e) => {
+                let err_str = format!("{:?}", e);
+                if err_str.contains("Timeout") {
+                    if !pending_files.is_empty() && last_event_time.elapsed() >= Duration::from_millis(500) {
+                        println!("[Watch] 감시 대상 파일 수정 감지, 증분 갱신 및 UI 업데이트 중...");
                         
-                        if ext != "jsonl" && !is_vscdb {
-                            continue;
-                        }
+                        let conn = match Connection::open(db_path) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                eprintln!("DB 연결 실패: {}", e);
+                                pending_files.clear();
+                                continue;
+                            }
+                        };
 
-                        if is_vscdb {
-                            if let Ok(ids) = agent_token_tracker::adapters::antigravity::get_vscdb_session_ids(path_str) {
-                                for id in ids {
-                                    let virtual_path_str = format!("{}?session_id={}", path_str, id);
-                                    let virtual_path = PathBuf::from(virtual_path_str);
-                                    if let Err(e) = process_watch_file(&virtual_path, &pricing_map, db_path) {
-                                        eprintln!("vscdb 파일 적재 중 에러: {}", e);
-                                    } else {
-                                        updated_any = true;
+                        let pricing_map = match db::get_all_pricings(&conn) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                eprintln!("Pricing 데이터 조회 실패: {}", e);
+                                pending_files.clear();
+                                continue;
+                            }
+                        };
+
+                        let mut updated_any = false;
+                        for file in pending_files.drain() {
+                            let path_str = file.to_str().unwrap_or("");
+                            let is_vscdb = path_str.contains("state.vscdb");
+                            let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+                            
+                            if ext != "jsonl" && !is_vscdb {
+                                continue;
+                            }
+
+                            if is_vscdb {
+                                if let Ok(ids) = agent_token_tracker::adapters::antigravity::get_vscdb_session_ids(path_str) {
+                                    for id in ids {
+                                        let virtual_path_str = format!("{}?session_id={}", path_str, id);
+                                        let virtual_path = PathBuf::from(virtual_path_str);
+                                        if let Err(e) = process_watch_file(&virtual_path, &pricing_map, db_path) {
+                                            eprintln!("vscdb 파일 적재 중 에러: {}", e);
+                                        } else {
+                                            updated_any = true;
+                                        }
                                     }
                                 }
-                            }
-                        } else {
-                            if let Err(e) = process_watch_file(&file, &pricing_map, db_path) {
-                                eprintln!("JSONL 파일 적재 중 에러: {}", e);
                             } else {
-                                updated_any = true;
+                                if let Err(e) = process_watch_file(&file, &pricing_map, db_path) {
+                                    eprintln!("JSONL 파일 적재 중 에러: {}", e);
+                                } else {
+                                    updated_any = true;
+                                }
+                            }
+                        }
+
+                        if updated_any {
+                            println!("[Watch] 증분 갱신 완료. 프론트엔드로 db-updated 이벤트 전송!");
+                            update_tray_status(&app_handle);
+                            if let Err(e) = app_handle.emit("db-updated", ()) {
+                                eprintln!("Tauri 이벤트 방출 실패: {}", e);
                             }
                         }
                     }
-
-                    if updated_any {
-                        println!("[Watch] 증분 갱신 완료. 프론트엔드로 db-updated 이벤트 전송!");
-                        if let Err(e) = app_handle.emit("db-updated", ()) {
-                            eprintln!("Tauri 이벤트 방출 실패: {}", e);
-                        }
-                    }
+                } else if err_str.contains("Disconnected") {
+                    break;
                 }
             }
         }
     }
+    Ok(())
 }
 
 /// 5. 세션 상세 정보 획득 (메시지 및 도구 호출 목록)
@@ -409,10 +415,100 @@ fn interrupt_agent(agent_type: String, _cwd: String) -> Result<String, String> {
     Ok(format!("{}개의 에이전트 프로세스(PID)를 강제 종료(Interrupt)했습니다.", killed_count))
 }
 
+fn get_today_cost_and_health(conn: &Connection) -> Result<(f64, bool), String> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(SUM(cost_usd), 0.0) FROM messages WHERE date(created_at) = date('now');"
+    ).map_err(|e| e.to_string())?;
+    
+    let today_cost: f64 = stmt.query_row([], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+
+    let sessions = db::get_all_sessions(conn)
+        .map_err(|e| format!("세션 로드 에러: {}", e))?;
+
+    let config = DetectorConfig::default();
+    let mut is_healthy = true;
+
+    for s in sessions {
+        let msgs = db::get_messages_by_session(conn, &s.session_id)
+            .unwrap_or_default();
+        let tool_calls = db::get_tool_calls_by_session(conn, &s.session_id)
+            .unwrap_or_default();
+
+        let detect_res = detect_session_anomalies(&s, &msgs, &tool_calls, &config);
+        if detect_res.is_anomaly {
+            is_healthy = false;
+            break;
+        }
+    }
+
+    Ok((today_cost, is_healthy))
+}
+
+fn update_tray_status(app_handle: &AppHandle) {
+    let tray = match app_handle.tray_by_id("main-tray") {
+        Some(t) => t,
+        None => {
+            eprintln!("[Tray] 트레이 아이콘을 찾을 수 없습니다.");
+            return;
+        }
+    };
+
+    let (cost, is_healthy) = match get_db_conn().and_then(|conn| get_today_cost_and_health(&conn)) {
+        Ok(res) => res,
+        Err(e) => {
+            eprintln!("[Tray] 데이터베이스 조회 실패: {}", e);
+            (0.0, true)
+        }
+    };
+
+    let title = format!("${:.2}", cost);
+    if let Err(e) = tray.set_title(Some(title)) {
+        eprintln!("[Tray] 타이틀 설정 실패: {}", e);
+    }
+
+    let icon_bytes = if is_healthy {
+        include_bytes!("../icons/icon_green.png") as &[u8]
+    } else {
+        include_bytes!("../icons/icon_red.png") as &[u8]
+    };
+
+    if let Ok(icon) = tauri::image::Image::from_bytes(icon_bytes) {
+        if let Err(e) = tray.set_icon(Some(icon)) {
+            eprintln!("[Tray] 아이콘 설정 실패: {}", e);
+        }
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let app_handle = app.handle().clone();
+
+            let icon_green_bytes = include_bytes!("../icons/icon_green.png");
+            let initial_icon = tauri::image::Image::from_bytes(icon_green_bytes)
+                .expect("Green icon load failed");
+
+            let _tray = tauri::tray::TrayIconBuilder::with_id("main-tray")
+                .icon(initial_icon)
+                .title("$0.00")
+                .on_tray_icon_event(|tray: &tauri::tray::TrayIcon, event: tauri::tray::TrayIconEvent| {
+                    if let tauri::tray::TrayIconEvent::Click { button, .. } = event {
+                        if button == tauri::tray::MouseButton::Left {
+                            let app = tray.app_handle();
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    }
+                })
+                .build(app)
+                .expect("TrayIcon 생성 실패");
+
+            // 초기 트레이 상태 갱신
+            update_tray_status(&app_handle);
+
             std::thread::spawn(move || {
                 if let Err(e) = start_watch_loop(app_handle) {
                     eprintln!("Watch Loop Error: {}", e);

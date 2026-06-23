@@ -310,12 +310,7 @@ function App() {
   // ────────────────────────────────────────────────────────────
   let costWasteVal = 0;
   if (sessionDetails) {
-    // 1. 실패 도구 호출 비용 합산
-    const failedCosts = sessionDetails.tool_calls
-      .filter((tc) => !tc.success)
-      .reduce((acc, tc) => acc + tc.cost_usd, 0);
-
-    // 2. 루핑(ping_pong 또는 repeated_call) 도구 호출 비용 합산
+    // 1. 루핑(ping_pong 또는 repeated_call) 도구 식별
     const loopingTools = new Set<string>();
     if (selectedAnomaly) {
       for (const s of selectedAnomaly.signals) {
@@ -334,10 +329,7 @@ function App() {
       }
     }
 
-    const loopingCosts = sessionDetails.tool_calls
-      .filter((tc) => loopingTools.has(tc.tool_name))
-      .reduce((acc, tc) => acc + tc.cost_usd, 0);
-
+    // 2. 낭비된 도구 호출(실패 또는 루프 대상)의 총 비용 합산
     const wasteToolCalls = sessionDetails.tool_calls.filter(
       (tc) => !tc.success || loopingTools.has(tc.tool_name)
     );
