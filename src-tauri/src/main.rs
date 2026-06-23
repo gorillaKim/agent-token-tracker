@@ -367,6 +367,48 @@ fn get_session_details(session_id: String) -> Result<SessionDetails, String> {
     Ok(SessionDetails { messages, tool_calls })
 }
 
+/// 6. 실행 중인 오작동 에이전트 프로세스 강제 중단
+#[tauri::command]
+fn interrupt_agent(agent_type: String, _cwd: String) -> Result<String, String> {
+    use std::process::Command as StdCommand;
+
+    let proc_pattern = match agent_type.as_str() {
+        "claude_code" => "claude-code",
+        "codex" => "codex",
+        "antigravity" => "antigravity",
+        _ => return Err("알 수 없는 에이전트 타입입니다.".to_string()),
+    };
+
+    println!("[Interrupt] 에이전트 프로세스 종료 시도: {}", proc_pattern);
+
+    // pgrep -f 패턴
+    let output = StdCommand::new("pgrep")
+        .args(["-f", proc_pattern])
+        .output()
+        .map_err(|e| format!("pgrep 실행 실패: {}", e))?;
+
+    let pids_str = String::from_utf8_lossy(&output.stdout);
+    let pids: Vec<&str> = pids_str.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+
+    if pids.is_empty() {
+        return Ok("실행 중인 관련 에이전트 프로세스가 없습니다.".to_string());
+    }
+
+    let mut killed_count = 0;
+    for pid in pids {
+        let kill_res = StdCommand::new("kill")
+            .args(["-9", pid])
+            .status();
+        if let Ok(status) = kill_res {
+            if status.success() {
+                killed_count += 1;
+            }
+        }
+    }
+
+    Ok(format!("{}개의 에이전트 프로세스(PID)를 강제 종료(Interrupt)했습니다.", killed_count))
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -383,7 +425,8 @@ fn main() {
             get_agent_summaries,
             get_loop_signals,
             get_daily_costs,
-            get_session_details
+            get_session_details,
+            interrupt_agent
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 앱 구동 중 에러 발생");
