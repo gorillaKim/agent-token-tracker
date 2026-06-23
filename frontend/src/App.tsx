@@ -22,15 +22,126 @@ interface AgentSummary {
   total_cost_usd: number;
 }
 
+interface LoopSignal {
+  signal_type: string;
+  description: string;
+  evidence: string;
+}
+
 interface LoopDetectionResult {
   session_id: string;
   is_anomaly: boolean;
-  signals: any[];
+  signals: LoopSignal[];
 }
 
 interface DailyCost {
   date: string;
   total_cost: number;
+}
+
+interface ToolCall {
+  id?: number;
+  session_id: string;
+  tool_name: string;
+  input_hash: string;
+  success: boolean;
+  cost_usd: number;
+  created_at: string;
+  tool_input: string;
+}
+
+interface SessionDetails {
+  messages: any[];
+  tool_calls: ToolCall[];
+}
+
+// ────────────────────────────────────────────────────────────
+// 이슈 #791: SVG 기반 루프 오작동 순환 디렉션 뷰어
+// ────────────────────────────────────────────────────────────
+function LoopDirectionViewer({ signals }: { signals: LoopSignal[] }) {
+  const pingPong = signals.find((s) => s.signal_type === "ping_pong");
+  const selfLoop = signals.find((s) => s.signal_type === "repeated_call");
+
+  if (pingPong) {
+    const evidence = pingPong.evidence;
+    const parts = evidence.split(",").map(p => p.trim());
+    let toolA = "Tool A";
+    let toolB = "Tool B";
+    let cycles = "3";
+    for (const part of parts) {
+      if (part.startsWith("tool_A=")) toolA = part.substring(7);
+      if (part.startsWith("tool_B=")) toolB = part.substring(7);
+      if (part.startsWith("cycles=")) cycles = part.substring(7);
+    }
+
+    return (
+      <div className="loop-viewer-container">
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.5rem" }}>
+          <span style={{ fontSize: "0.85rem", fontWeight: 700, color: "var(--neon-red)" }}>🔄 핑퐁 순환 흐름도</span>
+          <span className="badge-cycles">{cycles} Cycles</span>
+        </div>
+        <svg viewBox="0 0 400 140" className="loop-svg">
+          <defs>
+            <marker id="arrow-red-right" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+              <path d="M0,0 L6,3 L0,6 Z" fill="var(--neon-red)" />
+            </marker>
+            <marker id="arrow-red-left" markerWidth="6" markerHeight="6" refX="1" refY="3" orient="auto">
+              <path d="M6,0 L0,3 L6,6 Z" fill="var(--neon-red)" />
+            </marker>
+          </defs>
+          
+          {/* A -> B 위로 휘는 곡선 */}
+          <path d="M 130 55 Q 200 15 270 55" className="loop-line dash-flow-red" markerEnd="url(#arrow-red-right)" />
+          
+          {/* B -> A 아래로 휘는 곡선 */}
+          <path d="M 270 85 Q 200 125 130 85" className="loop-line dash-flow-red" markerEnd="url(#arrow-red-left)" />
+
+          {/* Node A */}
+          <circle cx="95" cy="70" r="30" className="loop-node-circle" />
+          <text x="95" y="74" textAnchor="middle" className="loop-node-text">{toolA}</text>
+
+          {/* Node B */}
+          <circle cx="305" cy="70" r="30" className="loop-node-circle" />
+          <text x="305" y="74" textAnchor="middle" className="loop-node-text">{toolB}</text>
+        </svg>
+      </div>
+    );
+  }
+
+  if (selfLoop) {
+    const evidence = selfLoop.evidence;
+    const parts = evidence.split(",").map(p => p.trim());
+    let toolName = "Tool";
+    let count = "3";
+    for (const part of parts) {
+      if (part.startsWith("tool_name=")) toolName = part.substring(10);
+      if (part.startsWith("count=")) count = part.substring(6);
+    }
+
+    return (
+      <div className="loop-viewer-container">
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.5rem" }}>
+          <span style={{ fontSize: "0.85rem", fontWeight: 700, color: "var(--neon-red)" }}>🔁 자가 순환 루프</span>
+          <span className="badge-cycles">{count} Reps</span>
+        </div>
+        <svg viewBox="0 0 400 140" className="loop-svg">
+          <defs>
+            <marker id="arrow-red-self" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+              <path d="M0,0 L6,3 L0,6 Z" fill="var(--neon-red)" />
+            </marker>
+          </defs>
+          
+          {/* Self feedback loop path */}
+          <path d="M 185 50 C 130 -10, 270 -10, 215 50" className="loop-line dash-flow-red" markerEnd="url(#arrow-red-self)" />
+
+          <circle cx="200" cy="80" r="30" className="loop-node-circle" />
+          <text x="200" y="84" textAnchor="middle" className="loop-node-text">{toolName}</text>
+        </svg>
+      </div>
+    );
+  }
+
+  return null;
 }
 
 function App() {
@@ -39,6 +150,11 @@ function App() {
   const [anomalies, setAnomalies] = useState<LoopDetectionResult[]>([]);
   const [dailyCosts, setDailyCosts] = useState<DailyCost[]>([]);
   const [error, setError] = useState<string | null>(null);
+
+  // Selected session and drawer details state
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [sessionDetails, setSessionDetails] = useState<SessionDetails | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
 
   // Tooltip state
   const [tooltip, setTooltip] = useState<{
@@ -83,6 +199,20 @@ function App() {
     };
   }, []);
 
+  const handleSelectSession = async (sessId: string) => {
+    setSelectedSessionId(sessId);
+    setDetailsLoading(true);
+    setSessionDetails(null);
+    try {
+      const details = await invoke<SessionDetails>("get_session_details", { sessionId: sessId });
+      setSessionDetails(details);
+    } catch (err: any) {
+      console.error("세션 상세 조회 실패:", err);
+    } finally {
+      setDetailsLoading(false);
+    }
+  };
+
   // SVG Chart Dimensions
   const chartWidth = 700;
   const chartHeight = 200;
@@ -94,17 +224,14 @@ function App() {
   const contentWidth = chartWidth - paddingLeft - paddingRight;
   const contentHeight = chartHeight - paddingTop - paddingBottom;
 
-  // Max cost for Y axis scaling (at least $0.001 to avoid divide by zero)
   const maxCost = Math.max(...dailyCosts.map((d) => d.total_cost), 0.001) * 1.15;
 
-  // Map dailyCosts to points
   const points = dailyCosts.map((d, index) => {
     const x = paddingLeft + (index / Math.max(dailyCosts.length - 1, 1)) * contentWidth;
     const y = paddingTop + contentHeight - (d.total_cost / maxCost) * contentHeight;
     return { x, y, date: d.date, cost: d.total_cost };
   });
 
-  // Calculate Cubic Bezier path
   let pathD = "";
   let areaD = "";
   if (points.length > 0) {
@@ -121,16 +248,13 @@ function App() {
     areaD = `${pathD} L ${points[points.length - 1].x} ${chartHeight - paddingBottom} L ${points[0].x} ${chartHeight - paddingBottom} Z`;
   }
 
-  // Handle Chart Hover / Tooltip
   const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
     if (!chartRef.current || points.length === 0) return;
     const rect = chartRef.current.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
 
-    // Convert mouseX to SVG coordinates
     const svgX = (mouseX / rect.width) * chartWidth;
     
-    // Find closest point
     let closestPoint = points[0];
     let minDist = Math.abs(points[0].x - svgX);
     for (let i = 1; i < points.length; i++) {
@@ -141,13 +265,12 @@ function App() {
       }
     }
 
-    // Set tooltip position in DOM coordinates relative to chart container
     const domX = (closestPoint.x / chartWidth) * rect.width;
     const domY = (closestPoint.y / chartHeight) * rect.height;
 
     setTooltip({
       x: domX,
-      y: domY - 10, // slightly above point
+      y: domY - 10,
       visible: true,
       date: closestPoint.date,
       cost: closestPoint.cost,
@@ -158,9 +281,11 @@ function App() {
     setTooltip((prev) => ({ ...prev, visible: false }));
   };
 
-  // Aggregated totals for status bar
   const totalCostOverall = summaries.reduce((acc, curr) => acc + curr.total_cost_usd, 0);
   const totalSessionsOverall = sessions.length;
+
+  const selectedSess = sessions.find((s) => s.session_id === selectedSessionId);
+  const selectedAnomaly = anomalies.find((a) => a.session_id === selectedSessionId);
 
   return (
     <div className="dashboard-container">
@@ -271,21 +396,14 @@ function App() {
                 onMouseLeave={handleMouseLeave}
               >
                 <defs>
-                  {/* Neon Line Gradient */}
                   <linearGradient id="chart-gradient" x1="0" y1="0" x2="1" y2="0">
                     <stop offset="0%" stopColor="var(--neon-blue)" />
                     <stop offset="100%" stopColor="var(--neon-purple)" />
                   </linearGradient>
-                  {/* Under Area Gradient */}
                   <linearGradient id="area-gradient" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor="var(--neon-purple)" stopOpacity="0.4" />
                     <stop offset="100%" stopColor="var(--neon-purple)" stopOpacity="0" />
                   </linearGradient>
-                  {/* Glow Filter */}
-                  <filter id="neon-glow" x="-20%" y="-20%" width="140%" height="140%">
-                    <feGaussianBlur stdDeviation="6" result="blur" />
-                    <feComposite in="SourceGraphic" in2="blur" operator="over" />
-                  </filter>
                 </defs>
 
                 {/* Grid Lines */}
@@ -320,7 +438,7 @@ function App() {
                   );
                 })}
 
-                {/* X Axis Axis line */}
+                {/* X Axis Line */}
                 <line
                   x1={paddingLeft}
                   y1={chartHeight - paddingBottom}
@@ -329,7 +447,7 @@ function App() {
                   className="chart-axis-line"
                 />
 
-                {/* X Axis Labels (every 2 days to fit) */}
+                {/* X Axis Labels */}
                 {dailyCosts.map((d, i) => {
                   if (i % 2 !== 0 && i !== dailyCosts.length - 1) return null;
                   const x = paddingLeft + (i / (dailyCosts.length - 1)) * contentWidth;
@@ -347,13 +465,9 @@ function App() {
                   );
                 })}
 
-                {/* Area under curve */}
                 {areaD && <path d={areaD} className="chart-area" />}
-
-                {/* Spline Curve Line */}
                 {pathD && <path d={pathD} className="chart-line" />}
 
-                {/* Point Circles */}
                 {points.map((p, i) => (
                   <circle
                     key={i}
@@ -392,7 +506,11 @@ function App() {
             <h4 className="section-header">활성 세션 현황</h4>
             <div className="session-list">
               {sessions.slice(0, 5).map((s) => (
-                <div key={s.session_id} className="session-item">
+                <div
+                  key={s.session_id}
+                  className="session-item session-item-clickable"
+                  onClick={() => handleSelectSession(s.session_id)}
+                >
                   <div className="session-meta">
                     <span className="session-id">{s.session_id.substring(0, 16)}...</span>
                     <span className="session-agent">{s.agent_type} • {s.cwd}</span>
@@ -415,7 +533,11 @@ function App() {
             <h4 className="section-header">실시간 이상 징후 (Anomalies)</h4>
             <div className="anomaly-list">
               {anomalies.slice(0, 3).map((a) => (
-                <div key={a.session_id} className="anomaly-item">
+                <div
+                  key={a.session_id}
+                  className="anomaly-item anomaly-item-clickable"
+                  onClick={() => handleSelectSession(a.session_id)}
+                >
                   <span className="anomaly-id">Session: {a.session_id.substring(0, 8)}...</span>
                   <span className="anomaly-desc">오작동 시그널 {a.signals.length}개 검출됨</span>
                 </div>
@@ -429,6 +551,120 @@ function App() {
           </section>
         </div>
       </main>
+
+      {/* ────────────────────────────────────────────────────────────
+         이슈 #791: 우측 세션 상세 정보 사이드 드로어 패널
+         ──────────────────────────────────────────────────────────── */}
+      <div
+        className={`drawer-overlay ${selectedSessionId ? "open" : ""}`}
+        onClick={() => setSelectedSessionId(null)}
+      />
+      <div className={`drawer ${selectedSessionId ? "open" : ""}`}>
+        <button className="drawer-close-btn" onClick={() => setSelectedSessionId(null)}>✕</button>
+        {selectedSess ? (
+          <>
+            <h3 className="drawer-title">세션 상세 디버거</h3>
+            <div className="drawer-subtitle">{selectedSess.session_id}</div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", marginBottom: "1.5rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem" }}>
+                <span style={{ color: "hsl(215, 20%, 55%)" }}>에이전트 타입</span>
+                <span style={{ fontWeight: 600 }}>{selectedSess.agent_type}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem" }}>
+                <span style={{ color: "hsl(215, 20%, 55%)" }}>작업 경로 (CWD)</span>
+                <span style={{ fontWeight: 600, fontFamily: "monospace", fontSize: "0.75rem" }}>{selectedSess.cwd}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem" }}>
+                <span style={{ color: "hsl(215, 20%, 55%)" }}>사용 모델 ID</span>
+                <span style={{ fontWeight: 600 }}>{selectedSess.model_id || "알 수 없음"}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem" }}>
+                <span style={{ color: "hsl(215, 20%, 55%)" }}>누적 토큰 사용</span>
+                <span style={{ fontWeight: 600, color: "var(--neon-blue)" }}>
+                  {(selectedSess.total_input_tokens + selectedSess.total_output_tokens).toLocaleString()} Tokens
+                </span>
+              </div>
+            </div>
+
+            {/* 이상 징후 시각화 컴포넌트 임베드 */}
+            {selectedAnomaly && (
+              <div style={{ marginBottom: "1.5rem" }}>
+                <h4 style={{ fontSize: "1rem", color: "var(--neon-red)", marginBottom: "0.5rem" }}>🚨 감지된 이상 징후 분석</h4>
+                <div style={{ fontSize: "0.8rem", color: "hsl(215, 20%, 80%)", marginBottom: "1rem" }}>
+                  {selectedAnomaly.signals.map((s, idx) => (
+                    <div key={idx} style={{ marginBottom: "0.5rem", padding: "0.5rem", background: "rgba(239,68,68,0.05)", borderRadius: "6px", border: "1px solid rgba(239,68,68,0.15)" }}>
+                      {s.description}
+                    </div>
+                  ))}
+                </div>
+                <LoopDirectionViewer signals={selectedAnomaly.signals} />
+              </div>
+            )}
+
+            {/* 도구 호출 상세 기록 (비동기 데이터) */}
+            {detailsLoading ? (
+              <div style={{ textAlign: "center", padding: "2rem", color: "hsl(215, 20%, 50%)" }}>
+                세션의 도구 호출 및 상세 히스토리 조회 중...
+              </div>
+            ) : sessionDetails ? (
+              <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
+                <h4 style={{ fontSize: "1rem", borderBottom: "1px solid var(--card-border)", paddingBottom: "0.5rem", marginBottom: "0.75rem" }}>
+                  도구 호출 타임라인 ({sessionDetails.tool_calls.length}건)
+                </h4>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem", overflowY: "auto", flex: 1, paddingRight: "4px" }}>
+                  {sessionDetails.tool_calls.map((tc, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        padding: "0.75rem",
+                        background: "rgba(255, 255, 255, 0.02)",
+                        borderRadius: "8px",
+                        border: "1px solid rgba(255, 255, 255, 0.04)",
+                        fontSize: "0.8rem",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.25rem" }}>
+                        <span style={{ fontWeight: 700, color: tc.success ? "var(--neon-blue)" : "var(--neon-red)" }}>
+                          {tc.tool_name}
+                        </span>
+                        <span style={{ fontSize: "0.7rem", color: "hsl(215, 20%, 50%)" }}>
+                          {tc.created_at.substring(11, 19)}
+                        </span>
+                      </div>
+                      <div
+                        style={{
+                          fontFamily: "monospace",
+                          fontSize: "0.72rem",
+                          color: "hsl(215, 20%, 75%)",
+                          background: "rgba(0, 0, 0, 0.2)",
+                          padding: "0.4rem",
+                          borderRadius: "4px",
+                          overflowX: "auto",
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-all",
+                          maxHeight: "80px",
+                        }}
+                      >
+                        {tc.tool_input}
+                      </div>
+                    </div>
+                  ))}
+                  {sessionDetails.tool_calls.length === 0 && (
+                    <div style={{ color: "hsl(215, 20%, 40%)", textAlign: "center", padding: "2rem" }}>
+                      이 세션에서 호출된 도구 이력이 없습니다.
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <div style={{ color: "hsl(215, 20%, 40%)", textAlign: "center", padding: "5rem 0" }}>
+            세션을 선택하면 디버깅 패널이 활성화됩니다.
+          </div>
+        )}
+      </div>
     </div>
   );
 }

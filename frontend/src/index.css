@@ -476,3 +476,174 @@ body {
   font-size: 0.75rem;
   color: hsl(215, 20%, 75%);
 }
+
+/* ────────────────────────────────────────────────────────────
+   이슈 #791 루프 시각화 및 드로어(Drawer) 스타일
+   ──────────────────────────────────────────────────────────── */
+
+:root {
+  --neon-red: hsl(354, 90%, 55%);
+  --neon-red-glow: 0 0 15px hsla(354, 90%, 55%, 0.4);
+}
+
+.session-item-clickable {
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.session-item-clickable:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(139, 92, 246, 0.3);
+  transform: translateX(4px);
+}
+
+.anomaly-item-clickable {
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.anomaly-item-clickable:hover {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: rgba(239, 68, 68, 0.4);
+  transform: translateX(4px);
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.15);
+}
+
+/* Side Drawer Panel */
+.drawer-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(4, 6, 12, 0.6);
+  backdrop-filter: blur(4px);
+  z-index: 90;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+
+.drawer-overlay.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 480px;
+  height: 100vh;
+  background: rgba(10, 15, 30, 0.85);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border-left: 1px solid var(--card-border);
+  box-shadow: -10px 0 40px rgba(0, 0, 0, 0.6);
+  transform: translateX(100%);
+  transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+  z-index: 100;
+  padding: 2.5rem 2rem;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.drawer.open {
+  transform: translateX(0);
+}
+
+.drawer-close-btn {
+  position: absolute;
+  top: 1.5rem;
+  right: 1.5rem;
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  cursor: pointer;
+  color: hsl(215, 20%, 60%);
+  transition: color 0.2s ease;
+}
+
+.drawer-close-btn:hover {
+  color: var(--foreground);
+}
+
+.drawer-title {
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.35rem;
+  font-weight: 800;
+  margin-top: 0;
+  margin-bottom: 0.5rem;
+  color: var(--foreground);
+}
+
+.drawer-subtitle {
+  font-size: 0.8rem;
+  color: hsl(215, 20%, 55%);
+  margin-bottom: 2rem;
+}
+
+/* Loop Viewer SVG Canvas */
+.loop-viewer-container {
+  margin-top: 1rem;
+  margin-bottom: 2rem;
+  padding: 1.25rem;
+  border-radius: 12px;
+  background: rgba(239, 68, 68, 0.02);
+  border: 1px solid rgba(239, 68, 68, 0.08);
+}
+
+.loop-svg {
+  width: 100%;
+  height: 180px;
+  overflow: visible;
+}
+
+.loop-node-circle {
+  fill: rgba(20, 24, 38, 0.85);
+  stroke: var(--neon-red);
+  stroke-width: 2.5;
+  filter: drop-shadow(0 0 6px rgba(239, 68, 68, 0.3));
+}
+
+.loop-node-text {
+  fill: var(--foreground);
+  font-size: 11px;
+  font-weight: 700;
+  font-family: 'Outfit', sans-serif;
+}
+
+.loop-line {
+  fill: none;
+  stroke: var(--neon-red);
+  stroke-width: 3;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 5px rgba(239, 68, 68, 0.5));
+}
+
+@keyframes dash-flow {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+
+.dash-flow-red {
+  stroke-dasharray: 6, 4;
+  animation: dash-flow 1s linear infinite;
+}
+
+.badge-cycles {
+  display: inline-block;
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: hsl(0, 100%, 75%);
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  font-family: 'Outfit', sans-serif;
+  text-shadow: var(--neon-red-glow);
+}
+

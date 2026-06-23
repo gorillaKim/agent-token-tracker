@@ -39,6 +39,12 @@ pub struct DailyCost {
     pub total_cost: f64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionDetails {
+    pub messages: Vec<agent_token_tracker::model::Message>,
+    pub tool_calls: Vec<agent_token_tracker::model::ToolCall>,
+}
+
 // ────────────────────────────────────────────────────────────
 // 헬퍼: 데이터베이스 커넥션 획득
 // ────────────────────────────────────────────────────────────
@@ -350,6 +356,17 @@ fn start_watch_loop(app_handle: AppHandle) -> Result<(), String> {
     }
 }
 
+/// 5. 세션 상세 정보 획득 (메시지 및 도구 호출 목록)
+#[tauri::command]
+fn get_session_details(session_id: String) -> Result<SessionDetails, String> {
+    let conn = get_db_conn()?;
+    let messages = db::get_messages_by_session(&conn, &session_id)
+        .map_err(|e| format!("메시지 조회 실패: {}", e))?;
+    let tool_calls = db::get_tool_calls_by_session(&conn, &session_id)
+        .map_err(|e| format!("도구 호출 조회 실패: {}", e))?;
+    Ok(SessionDetails { messages, tool_calls })
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -365,7 +382,8 @@ fn main() {
             get_active_sessions,
             get_agent_summaries,
             get_loop_signals,
-            get_daily_costs
+            get_daily_costs,
+            get_session_details
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 앱 구동 중 에러 발생");
