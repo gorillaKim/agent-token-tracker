@@ -874,8 +874,8 @@ fn process_single_file(
     }
 
     let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let is_codex = file_name.starts_with("rollout-") || agent_filter == Some("codex");
-    let is_antigravity = is_vscdb || has_vscdb_param || agent_filter == Some("antigravity");
+    let is_codex = file_name.starts_with("rollout-") || file_name.contains("codex") || agent_filter == Some("codex");
+    let is_antigravity = is_vscdb || has_vscdb_param || file_name.contains("antigravity") || agent_filter == Some("antigravity");
 
     let parsed_res = if is_antigravity {
         let adapter = AntigravityAdapter;

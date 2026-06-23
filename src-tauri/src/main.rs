@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use notify::{Watcher, RecursiveMode};
@@ -38,6 +38,12 @@ pub struct AgentSummary {
 pub struct DailyCost {
     pub date: String,
     pub total_cost: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DailyTokenUsage {
+    pub date: String,
+    pub total_tokens: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -116,6 +122,8 @@ fn get_agent_summaries() -> Result<Vec<AgentSummary>, String> {
             }
             "antigravity" => {
                 agy_sum.session_count += 1;
+                agy_sum.total_input_tokens += s.total_input_tokens;
+                agy_sum.total_output_tokens += s.total_output_tokens;
                 agy_sum.total_cost_usd += cost;
             }
             _ => {}
@@ -184,6 +192,40 @@ fn get_daily_costs() -> Result<Vec<DailyCost>, String> {
     Ok(daily_costs)
 }
 
+/// 최근 14일간의 일별 토큰 사용량 집계
+#[tauri::command]
+fn get_daily_token_usage() -> Result<Vec<DailyTokenUsage>, String> {
+    let conn = get_db_conn()?;
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE dates(date) AS (
+            SELECT date('now', '-13 day')
+            UNION ALL
+            SELECT date(date, '+1 day') FROM dates WHERE date < date('now')
+         )
+         SELECT 
+            d.date, 
+            COALESCE(SUM(s.total_input_tokens + s.total_output_tokens), 0) as total_tokens
+         FROM dates d
+         LEFT JOIN sessions s ON date(s.started_at) = d.date
+         GROUP BY d.date
+         ORDER BY d.date ASC;"
+    ).map_err(|e| format!("SQL 쿼리 준비 에러: {}", e))?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(DailyTokenUsage {
+            date: row.get(0)?,
+            total_tokens: row.get(1)?,
+        })
+    }).map_err(|e| format!("쿼리 실행 에러: {}", e))?;
+
+    let mut daily_tokens = Vec::new();
+    for r in rows {
+        daily_tokens.push(r.map_err(|e| format!("데이터 매핑 에러: {}", e))?);
+    }
+
+    Ok(daily_tokens)
+}
+
 // ────────────────────────────────────────────────────────────
 // 파일 실시간 감시 (notify) 백엔드 로직 구현
 // ────────────────────────────────────────────────────────────
@@ -220,7 +262,7 @@ fn process_watch_file(
     let mut parsed_session = parsed_res?;
 
     // 비용 계산
-    let model_id_opt = parsed_session.session.model_id.as_deref().unwrap_or("unknown");
+    let _model_id_opt = parsed_session.session.model_id.as_deref().unwrap_or("unknown");
     let pricing_info = parsed_session.session.model_id.as_ref()
         .and_then(|m_id| pricing_cache.get(m_id));
 
@@ -523,9 +565,21 @@ fn focus_main_window(app_handle: AppHandle, session_id: Option<String>) -> Resul
     Ok(())
 }
 
+fn default_token_limit() -> u64 {
+    50_000_000
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppSettings {
     pub log_dir: String,
+    #[serde(default = "default_token_limit")]
+    pub token_limit: u64,
+    #[serde(default = "default_token_limit")]
+    pub token_limit_claude: u64,
+    #[serde(default = "default_token_limit")]
+    pub token_limit_codex: u64,
+    #[serde(default = "default_token_limit")]
+    pub token_limit_antigravity: u64,
 }
 
 fn get_config_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -538,9 +592,22 @@ fn get_config_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-fn save_settings(app_handle: AppHandle, log_dir: String) -> Result<(), String> {
+fn save_settings(
+    app_handle: AppHandle,
+    log_dir: String,
+    token_limit: u64,
+    token_limit_claude: u64,
+    token_limit_codex: u64,
+    token_limit_antigravity: u64,
+) -> Result<(), String> {
     let path = get_config_path(&app_handle)?;
-    let settings = AppSettings { log_dir };
+    let settings = AppSettings {
+        log_dir,
+        token_limit,
+        token_limit_claude,
+        token_limit_codex,
+        token_limit_antigravity,
+    };
     let json = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("JSON 직렬화 실패: {}", e))?;
     std::fs::write(path, json)
@@ -552,7 +619,13 @@ fn save_settings(app_handle: AppHandle, log_dir: String) -> Result<(), String> {
 fn load_settings(app_handle: AppHandle) -> Result<AppSettings, String> {
     let path = get_config_path(&app_handle)?;
     if !path.exists() {
-        return Ok(AppSettings { log_dir: "".to_string() });
+        return Ok(AppSettings {
+            log_dir: "".to_string(),
+            token_limit: 50_000_000,
+            token_limit_claude: 50_000_000,
+            token_limit_codex: 50_000_000,
+            token_limit_antigravity: 50_000_000,
+        });
     }
     let json = std::fs::read_to_string(path)
         .map_err(|e| format!("설정 파일 읽기 실패: {}", e))?;
@@ -791,7 +864,7 @@ async fn sync_local_sessions(app_handle: AppHandle) -> Result<SyncResult, String
             if let Ok(ids) = agent_token_tracker::adapters::antigravity::get_vscdb_session_ids(path_str) {
                 println!("[Sync] vscdb session ids found: {:?}", ids);
                 for id in ids {
-                    if db::get_session(&conn, &id).is_ok() {
+                    if matches!(db::get_session(&conn, &id), Ok(Some(_))) {
                         println!("[Sync] vscdb session already exists: {}", id);
                         result.sessions_skipped += 1;
                         continue;
@@ -828,7 +901,7 @@ async fn sync_local_sessions(app_handle: AppHandle) -> Result<SyncResult, String
                 Ok(mut parsed_session) => {
                     let session_id = &parsed_session.session.session_id;
                     println!("[Sync] Parsed session_id: {}", session_id);
-                    if db::get_session(&conn, session_id).is_ok() {
+                    if matches!(db::get_session(&conn, session_id), Ok(Some(_))) {
                         println!("[Sync] Session already exists in DB: {}", session_id);
                         result.sessions_skipped += 1;
                         continue;
@@ -883,6 +956,169 @@ async fn sync_local_sessions(app_handle: AppHandle) -> Result<SyncResult, String
     Ok(result)
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HourlyTokenUsage {
+    pub hour: String,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TokenUsageBreakdown {
+    pub models: Vec<ModelTokenUsage>,
+    pub plugins: Vec<PluginTokenUsage>,
+    pub skills: Vec<SkillTokenUsage>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ModelTokenUsage {
+    pub model_id: String,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PluginTokenUsage {
+    pub plugin_name: String,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SkillTokenUsage {
+    pub skill_name: String,
+    pub total_tokens: u64,
+}
+
+#[tauri::command]
+fn get_hourly_token_usage() -> Result<Vec<HourlyTokenUsage>, String> {
+    let conn = get_db_conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(substr(started_at, 12, 2), '00') as hour, SUM(total_input_tokens + total_output_tokens) as tokens
+         FROM sessions
+         GROUP BY hour
+         ORDER BY hour ASC"
+    ).map_err(|e| e.to_string())?;
+    
+    let rows = stmt.query_map([], |row| {
+        Ok(HourlyTokenUsage {
+            hour: row.get(0)?,
+            total_tokens: row.get(1)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    
+    let mut result = Vec::new();
+    for r in rows {
+        if let Ok(item) = r {
+            result.push(item);
+        }
+    }
+    
+    let mut hourly_map = std::collections::HashMap::new();
+    for item in result {
+        hourly_map.insert(item.hour.clone(), item.total_tokens);
+    }
+    
+    let mut interpolated = Vec::new();
+    for h in 0..24 {
+        let hour_str = format!("{:02}", h);
+        let total_tokens = *hourly_map.get(&hour_str).unwrap_or(&0);
+        interpolated.push(HourlyTokenUsage {
+            hour: hour_str,
+            total_tokens,
+        });
+    }
+    
+    Ok(interpolated)
+}
+
+#[tauri::command]
+fn get_token_usage_breakdown() -> Result<TokenUsageBreakdown, String> {
+    let conn = get_db_conn()?;
+    
+    let mut stmt_model = conn.prepare(
+        "SELECT COALESCE(model_id, 'unknown') as model, SUM(total_input_tokens + total_output_tokens) as tokens
+         FROM sessions
+         GROUP BY model
+         ORDER BY tokens DESC"
+    ).map_err(|e| e.to_string())?;
+    
+    let model_rows = stmt_model.query_map([], |row| {
+        Ok(ModelTokenUsage {
+            model_id: row.get(0)?,
+            total_tokens: row.get(1)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    
+    let mut models = Vec::new();
+    for m in model_rows {
+        if let Ok(item) = m {
+            models.push(item);
+        }
+    }
+    
+    let mut stmt_sess = conn.prepare("SELECT session_id, total_input_tokens, total_output_tokens FROM sessions")
+        .map_err(|e| e.to_string())?;
+    let sess_rows = stmt_sess.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)? + row.get::<_, u64>(2)?))
+    }).map_err(|e| e.to_string())?;
+    
+    let mut sess_map = std::collections::HashMap::new();
+    for r in sess_rows {
+        if let Ok((id, tokens)) = r {
+            sess_map.insert(id, tokens);
+        }
+    }
+    
+    let mut stmt_tools = conn.prepare("SELECT session_id, tool_name FROM tool_calls")
+        .map_err(|e| e.to_string())?;
+    let tool_rows = stmt_tools.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }).map_err(|e| e.to_string())?;
+    
+    let mut skill_tokens = std::collections::HashMap::new();
+    let mut plugin_tokens = std::collections::HashMap::new();
+    
+    for r in tool_rows {
+        if let Ok((sess_id, tool_name)) = r {
+            if let Some(&tokens) = sess_map.get(&sess_id) {
+                *skill_tokens.entry(tool_name.clone()).or_insert(0) += tokens;
+                
+                let plugin_name = if tool_name.starts_with("mcp_doxus_") || tool_name.contains("doxus") {
+                    "doxus".to_string()
+                } else if tool_name.starts_with("mcp_engram_") || tool_name.contains("engram") {
+                    "engram".to_string()
+                } else if tool_name.starts_with("mcp_playwright_") || tool_name.contains("playwright") {
+                    "playwright".to_string()
+                } else if tool_name.contains("android-cli") || tool_name.contains("android") {
+                    "android-cli".to_string()
+                } else if tool_name.contains("chrome-extensions") || tool_name.contains("chrome") {
+                    "chrome-extensions".to_string()
+                } else {
+                    "other".to_string()
+                };
+                *plugin_tokens.entry(plugin_name).or_insert(0) += tokens;
+            }
+        }
+    }
+    
+    let mut skills: Vec<SkillTokenUsage> = skill_tokens.into_iter().map(|(k, v)| SkillTokenUsage {
+        skill_name: k,
+        total_tokens: v,
+    }).collect();
+    skills.sort_by(|a, b| b.total_tokens.cmp(&a.total_tokens));
+    skills.truncate(10);
+    
+    let mut plugins: Vec<PluginTokenUsage> = plugin_tokens.into_iter().map(|(k, v)| PluginTokenUsage {
+        plugin_name: k,
+        total_tokens: v,
+    }).collect();
+    plugins.sort_by(|a, b| b.total_tokens.cmp(&a.total_tokens));
+    
+    Ok(TokenUsageBreakdown {
+        models,
+        plugins,
+        skills,
+    })
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -932,6 +1168,7 @@ fn main() {
             get_agent_summaries,
             get_loop_signals,
             get_daily_costs,
+            get_daily_token_usage,
             get_session_details,
             interrupt_agent,
             focus_main_window,
@@ -942,7 +1179,9 @@ fn main() {
             get_api_keys_status,
             validate_stored_api_key,
             validate_local_path,
-            sync_local_sessions
+            sync_local_sessions,
+            get_hourly_token_usage,
+            get_token_usage_breakdown
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 앱 구동 중 에러 발생");

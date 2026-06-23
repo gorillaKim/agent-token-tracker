@@ -34,9 +34,40 @@ interface LoopDetectionResult {
   signals: LoopSignal[];
 }
 
-interface DailyCost {
+// interface DailyCost {
+//   date: string;
+//   total_cost: number;
+// }
+
+interface DailyTokenUsage {
   date: string;
-  total_cost: number;
+  total_tokens: number;
+}
+
+interface HourlyTokenUsage {
+  hour: string;
+  total_tokens: number;
+}
+
+interface ModelTokenUsage {
+  model_id: string;
+  total_tokens: number;
+}
+
+interface PluginTokenUsage {
+  plugin_name: string;
+  total_tokens: number;
+}
+
+interface SkillTokenUsage {
+  skill_name: string;
+  total_tokens: number;
+}
+
+interface TokenUsageBreakdown {
+  models: ModelTokenUsage[];
+  plugins: PluginTokenUsage[];
+  skills: SkillTokenUsage[];
 }
 
 interface ToolCall {
@@ -156,7 +187,17 @@ function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [summaries, setSummaries] = useState<AgentSummary[]>([]);
   const [anomalies, setAnomalies] = useState<LoopDetectionResult[]>([]);
-  const [dailyCosts, setDailyCosts] = useState<DailyCost[]>([]);
+  // const [dailyCosts, setDailyCosts] = useState<DailyCost[]>([]);
+  const [dailyTokenUsage, setDailyTokenUsage] = useState<DailyTokenUsage[]>([]);
+  const [hourlyTokenUsage, setHourlyTokenUsage] = useState<HourlyTokenUsage[]>([]);
+  const [tokenBreakdown, setTokenBreakdown] = useState<TokenUsageBreakdown>({
+    models: [],
+    plugins: [],
+    skills: [],
+  });
+  const [tokenLimitClaude, setTokenLimitClaude] = useState<number>(50000000);
+  const [tokenLimitCodex, setTokenLimitCodex] = useState<number>(50000000);
+  const [chartViewMode, setChartViewMode] = useState<"daily" | "hourly">("daily");
   const [error, setError] = useState<string | null>(null);
   const [syncLoading, setSyncLoading] = useState(false);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
@@ -174,8 +215,8 @@ function App() {
     y: number;
     visible: boolean;
     date: string;
-    cost: number;
-  }>({ x: 0, y: 0, visible: false, date: "", cost: 0 });
+    value: number;
+  }>({ x: 0, y: 0, visible: false, date: "", value: 0 });
 
   const chartRef = useRef<SVGSVGElement>(null);
 
@@ -216,8 +257,21 @@ function App() {
       const anomalyList = await invoke<LoopDetectionResult[]>("get_loop_signals");
       setAnomalies(anomalyList);
 
-      const costList = await invoke<DailyCost[]>("get_daily_costs");
-      setDailyCosts(costList);
+      // const costList = await invoke<DailyCost[]>("get_daily_costs");
+      // setDailyCosts(costList);
+
+      const dailyTokens = await invoke<DailyTokenUsage[]>("get_daily_token_usage");
+      setDailyTokenUsage(dailyTokens);
+
+      const hourlyTokens = await invoke<HourlyTokenUsage[]>("get_hourly_token_usage");
+      setHourlyTokenUsage(hourlyTokens);
+
+      const breakdown = await invoke<TokenUsageBreakdown>("get_token_usage_breakdown");
+      setTokenBreakdown(breakdown);
+
+      const s = await invoke<{ log_dir: string, token_limit_claude: number, token_limit_codex: number }>("load_settings");
+      setTokenLimitClaude(s.token_limit_claude);
+      setTokenLimitCodex(s.token_limit_codex);
     } catch (err: any) {
       setError(err.toString());
     }
@@ -286,12 +340,26 @@ function App() {
   const contentWidth = chartWidth - paddingLeft - paddingRight;
   const contentHeight = chartHeight - paddingTop - paddingBottom;
 
-  const maxCost = Math.max(...dailyCosts.map((d) => d.total_cost), 0.001) * 1.15;
+  const formatTokens = (val: number): string => {
+    if (val >= 1_000_000) {
+      return `${(val / 1_000_000).toFixed(1)}M`;
+    }
+    if (val >= 1_000) {
+      return `${(val / 1_000).toFixed(1)}K`;
+    }
+    return val.toString();
+  };
 
-  const points = dailyCosts.map((d, index) => {
-    const x = paddingLeft + (index / Math.max(dailyCosts.length - 1, 1)) * contentWidth;
-    const y = paddingTop + contentHeight - (d.total_cost / maxCost) * contentHeight;
-    return { x, y, date: d.date, cost: d.total_cost };
+  const chartData = chartViewMode === "daily" 
+    ? dailyTokenUsage.map(d => ({ date: d.date, value: d.total_tokens }))
+    : hourlyTokenUsage.map(d => ({ date: `${d.hour}:00`, value: d.total_tokens }));
+
+  const maxValue = Math.max(...chartData.map((d) => d.value), 1000) * 1.15;
+
+  const points = chartData.map((d, index) => {
+    const x = paddingLeft + (index / Math.max(chartData.length - 1, 1)) * contentWidth;
+    const y = paddingTop + contentHeight - (d.value / maxValue) * contentHeight;
+    return { x, y, date: d.date, value: d.value };
   });
 
   let pathD = "";
@@ -335,7 +403,7 @@ function App() {
       y: domY - 10,
       visible: true,
       date: closestPoint.date,
-      cost: closestPoint.cost,
+      value: closestPoint.value,
     });
   };
 
@@ -343,15 +411,28 @@ function App() {
     setTooltip((prev) => ({ ...prev, visible: false }));
   };
 
-  const totalCostOverall = summaries.reduce((acc, curr) => acc + curr.total_cost_usd, 0);
+  // const totalCostOverall = summaries.reduce((acc, curr) => acc + curr.total_cost_usd, 0);
   const totalSessionsOverall = sessions.length;
 
   const selectedSess = sessions.find((s) => s.session_id === selectedSessionId);
   const selectedAnomaly = anomalies.find((a) => a.session_id === selectedSessionId);
 
-  // ────────────────────────────────────────────────────────────
-  // 이슈 #792: 낭비 비용(Cost Waste) 계산
-  // ────────────────────────────────────────────────────────────
+  const totalTokensOverall = summaries.reduce((acc, curr) => acc + curr.total_input_tokens + curr.total_output_tokens, 0);
+
+  const claudeSummary = summaries.find(s => s.agent_type === "claude_code");
+  const claudeTokens = claudeSummary ? (claudeSummary.total_input_tokens + claudeSummary.total_output_tokens) : 0;
+  const claudeRemaining = Math.max(0, tokenLimitClaude - claudeTokens);
+  const claudeUsagePct = Math.min(100, (claudeTokens / Math.max(1, tokenLimitClaude)) * 100);
+
+  const codexSummary = summaries.find(s => s.agent_type === "codex");
+  const codexTokens = codexSummary ? (codexSummary.total_input_tokens + codexSummary.total_output_tokens) : 0;
+  const codexRemaining = Math.max(0, tokenLimitCodex - codexTokens);
+  const codexUsagePct = Math.min(100, (codexTokens / Math.max(1, tokenLimitCodex)) * 100);
+
+  const maxModelTokens = Math.max(...tokenBreakdown.models.map(m => m.total_tokens), 1);
+  const maxPluginTokens = Math.max(...tokenBreakdown.plugins.map(p => p.total_tokens), 1);
+  const maxSkillTokens = Math.max(...tokenBreakdown.skills.map(s => s.total_tokens), 1);
+
   let costWasteVal = 0;
   if (sessionDetails) {
     // 1. 루핑(ping_pong 또는 repeated_call) 도구 식별
@@ -411,30 +492,89 @@ function App() {
         {activeTab === "dashboard" ? (
           <>
             {/* Top Status Bar */}
-            <header className="statusbar">
-              <div className="statusbar-metrics">
-                <div className="metric-item">
-                  <span className="metric-label">총 누적 세션</span>
-                  <span className="metric-value">{totalSessionsOverall} Sessions</span>
+            <header className="statusbar" style={{ display: "flex", flexDirection: "column", alignItems: "stretch", gap: "1rem", height: "auto", padding: "1.25rem 1.5rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
+                <div className="statusbar-metrics" style={{ gap: "2rem", display: "flex" }}>
+                  <div className="metric-item">
+                    <span className="metric-label">총 누적 세션</span>
+                    <span className="metric-value">{totalSessionsOverall} Sessions</span>
+                  </div>
+                  <div className="metric-item">
+                    <span className="metric-label">총 사용 토큰</span>
+                    <span className="metric-value" style={{ color: "var(--neon-blue)" }}>
+                      {totalTokensOverall.toLocaleString()} Tokens
+                    </span>
+                  </div>
+                  <div className="metric-item">
+                    <span className="metric-label">Claude 잔여 예산</span>
+                    <span className="metric-value" style={{ color: claudeRemaining > 1_000_000 ? "var(--neon-blue)" : "var(--neon-red)" }}>
+                      {claudeRemaining.toLocaleString()} / {tokenLimitClaude.toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="metric-item">
+                    <span className="metric-label">Codex 잔여 예산</span>
+                    <span className="metric-value" style={{ color: codexRemaining > 1_000_000 ? "var(--neon-blue)" : "var(--neon-red)" }}>
+                      {codexRemaining.toLocaleString()} / {tokenLimitCodex.toLocaleString()}
+                    </span>
+                  </div>
                 </div>
-                <div className="metric-item">
-                  <span className="metric-label">총 누적 토큰 비용</span>
-                  <span className="metric-value" style={{ color: "var(--neon-purple)" }}>
-                    ${totalCostOverall.toFixed(4)} USD
-                  </span>
+                
+                <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
+                  <button
+                    onClick={handleSyncSessions}
+                    disabled={syncLoading}
+                    className="btn-sync"
+                  >
+                    <span>🔄</span> {syncLoading ? "동기화 중..." : "수동 증분 동기화"}
+                  </button>
+                  <div className="pulse-badge">
+                    <span className="pulse-dot"></span>
+                    <span>로컬 감시 작동 중</span>
+                  </div>
                 </div>
               </div>
-              <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
-                <button
-                  onClick={handleSyncSessions}
-                  disabled={syncLoading}
-                  className="btn-sync"
-                >
-                  <span>🔄</span> {syncLoading ? "동기화 중..." : "수동 증분 동기화"}
-                </button>
-                <div className="pulse-badge">
-                  <span className="pulse-dot"></span>
-                  <span>로컬 감시 작동 중</span>
+
+              {/* 토큰 사용량 게이지 바 (Claude) */}
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem", marginTop: "0.25rem" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "hsl(215, 20%, 65%)", fontWeight: "600" }}>
+                  <span>Claude Code 예산 소진율 (Limit Usage)</span>
+                  <span>{claudeUsagePct.toFixed(2)}% ({claudeTokens.toLocaleString()} / {tokenLimitClaude.toLocaleString()})</span>
+                </div>
+                <div style={{ height: "8px", background: "rgba(255,255,255,0.05)", borderRadius: "4px", overflow: "hidden", border: "1px solid rgba(255,255,255,0.08)", position: "relative" }}>
+                  <div 
+                    style={{ 
+                      height: "100%", 
+                      width: `${claudeUsagePct}%`, 
+                      background: claudeUsagePct > 90 
+                        ? "linear-gradient(90deg, var(--neon-red), #ff6b6b)"
+                        : "linear-gradient(90deg, var(--neon-blue), var(--neon-purple))",
+                      borderRadius: "4px",
+                      transition: "width 0.5s ease-out",
+                      boxShadow: "0 0 8px rgba(0, 242, 254, 0.4)"
+                    }} 
+                  />
+                </div>
+              </div>
+
+              {/* 토큰 사용량 게이지 바 (Codex) */}
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem", marginTop: "0.5rem" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "hsl(215, 20%, 65%)", fontWeight: "600" }}>
+                  <span>OpenAI Codex 예산 소진율 (Limit Usage)</span>
+                  <span>{codexUsagePct.toFixed(2)}% ({codexTokens.toLocaleString()} / {tokenLimitCodex.toLocaleString()})</span>
+                </div>
+                <div style={{ height: "8px", background: "rgba(255,255,255,0.05)", borderRadius: "4px", overflow: "hidden", border: "1px solid rgba(255,255,255,0.08)", position: "relative" }}>
+                  <div 
+                    style={{ 
+                      height: "100%", 
+                      width: `${codexUsagePct}%`, 
+                      background: codexUsagePct > 90 
+                        ? "linear-gradient(90deg, var(--neon-red), #ff6b6b)"
+                        : "linear-gradient(90deg, var(--neon-purple), #9b51e0)",
+                      borderRadius: "4px",
+                      transition: "width 0.5s ease-out",
+                      boxShadow: "0 0 8px rgba(155, 81, 224, 0.4)"
+                    }} 
+                  />
                 </div>
               </div>
             </header>
@@ -522,13 +662,52 @@ function App() {
             </section>
 
             {/* Spline Chart */}
-            <section className="chart-container glass">
-              <div className="chart-title-wrapper">
-                <h3 className="chart-title">최근 14일간 토큰 비용 추이 (USD)</h3>
-                <span style={{ fontSize: "0.8rem", color: "hsl(215, 20%, 55%)" }}>스플라인 차트</span>
+            <section className="chart-container glass" style={{ marginTop: "1.5rem", marginBottom: "1.5rem" }}>
+              <div className="chart-title-wrapper" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+                <div>
+                  <h3 className="chart-title" style={{ fontSize: "1.1rem", fontWeight: "700" }}>
+                    {chartViewMode === "daily" ? "일자별 토큰 사용량 추이" : "시간대별 토큰 사용량 추이"}
+                  </h3>
+                  <span style={{ fontSize: "0.8rem", color: "hsl(215, 20%, 55%)" }}>최근 에이전트 토큰 누적 흐름</span>
+                </div>
+                
+                <div style={{ display: "flex", gap: "2px", background: "rgba(255,255,255,0.03)", padding: "2px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.08)" }}>
+                  <button 
+                    onClick={() => setChartViewMode("daily")} 
+                    style={{ 
+                      padding: "0.35rem 0.75rem", 
+                      fontSize: "0.8rem", 
+                      fontWeight: 600, 
+                      borderRadius: "6px", 
+                      border: "none", 
+                      cursor: "pointer", 
+                      background: chartViewMode === "daily" ? "var(--neon-blue)" : "transparent",
+                      color: chartViewMode === "daily" ? "#0a0c10" : "hsl(215, 20%, 65%)",
+                      transition: "all 0.2s ease" 
+                    }}
+                  >
+                    일자별
+                  </button>
+                  <button 
+                    onClick={() => setChartViewMode("hourly")} 
+                    style={{ 
+                      padding: "0.35rem 0.75rem", 
+                      fontSize: "0.8rem", 
+                      fontWeight: 600, 
+                      borderRadius: "6px", 
+                      border: "none", 
+                      cursor: "pointer", 
+                      background: chartViewMode === "hourly" ? "var(--neon-blue)" : "transparent",
+                      color: chartViewMode === "hourly" ? "#0a0c10" : "hsl(215, 20%, 65%)",
+                      transition: "all 0.2s ease" 
+                    }}
+                  >
+                    시간대별
+                  </button>
+                </div>
               </div>
 
-              {dailyCosts.length > 0 ? (
+              {chartData.length > 0 ? (
                 <div style={{ position: "relative" }}>
                   <svg
                     ref={chartRef}
@@ -566,7 +745,7 @@ function App() {
                     {/* Y Axis Labels */}
                     {[0, 0.5, 1].map((ratio, i) => {
                       const y = paddingTop + ratio * contentHeight;
-                      const val = (maxCost * (1 - ratio)).toFixed(5);
+                      const val = maxValue * (1 - ratio);
                       return (
                         <text
                           key={i}
@@ -575,7 +754,7 @@ function App() {
                           textAnchor="end"
                           className="chart-axis-text"
                         >
-                          ${val}
+                          {formatTokens(val)}
                         </text>
                       );
                     })}
@@ -590,10 +769,12 @@ function App() {
                     />
 
                     {/* X Axis Labels */}
-                    {dailyCosts.map((d, i) => {
-                      if (i % 2 !== 0 && i !== dailyCosts.length - 1) return null;
-                      const x = paddingLeft + (i / (dailyCosts.length - 1)) * contentWidth;
-                      const dateStr = d.date.substring(5); // MM-DD
+                    {chartData.map((d, i) => {
+                      if (i % 2 !== 0 && i !== chartData.length - 1) return null;
+                      const x = paddingLeft + (i / Math.max(chartData.length - 1, 1)) * contentWidth;
+                      const label = chartViewMode === "daily" 
+                        ? (d.date.length > 5 ? d.date.substring(5) : d.date)
+                        : d.date;
                       return (
                         <text
                           key={i}
@@ -602,20 +783,23 @@ function App() {
                           textAnchor="middle"
                           className="chart-axis-text"
                         >
-                          {dateStr}
+                          {label}
                         </text>
                       );
                     })}
 
-                    {areaD && <path d={areaD} className="chart-area" />}
-                    {pathD && <path d={pathD} className="chart-line" />}
+                    {areaD && <path d={areaD} fill="url(#area-gradient)" style={{ opacity: 0.15 }} />}
+                    {pathD && <path d={pathD} fill="none" stroke="url(#chart-gradient)" strokeWidth="3" />}
 
                     {points.map((p, i) => (
                       <circle
                         key={i}
                         cx={p.x}
                         cy={p.y}
-                        r={3.5}
+                        r={4}
+                        fill={chartViewMode === "daily" ? "var(--neon-blue)" : "var(--neon-purple)"}
+                        stroke="#0a0c10"
+                        strokeWidth="2"
                         className="chart-point"
                       />
                     ))}
@@ -625,20 +809,120 @@ function App() {
                   <div
                     className="chart-tooltip"
                     style={{
+                      position: "absolute",
+                      pointerEvents: "none",
+                      background: "rgba(10, 12, 16, 0.95)",
+                      border: "1px solid var(--neon-blue)",
+                      borderRadius: "6px",
+                      padding: "0.5rem 0.75rem",
+                      fontSize: "0.75rem",
+                      boxShadow: "0 0 10px rgba(0, 242, 254, 0.2)",
                       opacity: tooltip.visible ? 1 : 0,
                       left: `${tooltip.x}px`,
                       top: `${tooltip.y}px`,
+                      transform: "translate(-50%, -100%)",
+                      transition: "opacity 0.2s ease, left 0.1s ease, top 0.1s ease",
+                      zIndex: 100
                     }}
                   >
                     <div style={{ fontWeight: 600, color: "var(--neon-blue)" }}>{tooltip.date}</div>
-                    <div style={{ marginTop: "2px" }}>비용: <span style={{ color: "#fff", fontWeight: 700 }}>${tooltip.cost.toFixed(5)}</span></div>
+                    <div style={{ marginTop: "2px", color: "#fff" }}>
+                      사용량: <span style={{ fontWeight: 700 }}>{tooltip.value.toLocaleString()} Tokens</span>
+                    </div>
                   </div>
                 </div>
               ) : (
                 <div style={{ padding: "3rem", textAlign: "center", color: "hsl(215, 20%, 50%)" }}>
-                  차트 데이터를 불러오는 중이거나 최근 14일간의 토큰 비용 기록이 없습니다.
+                  차트 데이터를 불러오는 중이거나 토큰 기록이 없습니다.
                 </div>
               )}
+            </section>
+
+            {/* Token Breakdown Rank Cards */}
+            <section className="breakdown-grid" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "1.5rem", marginBottom: "1.5rem" }}>
+              {/* Models Breakdown */}
+              <div className="breakdown-card glass" style={{ padding: "1.25rem" }}>
+                <h4 style={{ fontSize: "1rem", fontWeight: "700", marginBottom: "1rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <span>🤖</span> 모델별 사용량
+                </h4>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+                  {tokenBreakdown.models.map((m) => {
+                    const pct = (m.total_tokens / maxModelTokens) * 100;
+                    return (
+                      <div key={m.model_id} style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8rem" }}>
+                          <span style={{ fontWeight: "600", color: "hsl(215, 20%, 85%)" }}>{m.model_id}</span>
+                          <span style={{ color: "var(--neon-blue)", fontWeight: "700" }}>{m.total_tokens.toLocaleString()}</span>
+                        </div>
+                        <div style={{ height: "6px", background: "rgba(255,255,255,0.03)", borderRadius: "3px", overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${pct}%`, background: "var(--neon-blue)", borderRadius: "3px" }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {tokenBreakdown.models.length === 0 && (
+                    <div style={{ color: "hsl(215, 20%, 40%)", fontSize: "0.8rem", textAlign: "center", padding: "1rem" }}>
+                      집계된 모델별 데이터가 없습니다.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Plugins Breakdown */}
+              <div className="breakdown-card glass" style={{ padding: "1.25rem" }}>
+                <h4 style={{ fontSize: "1rem", fontWeight: "700", marginBottom: "1rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <span>🔌</span> 플러그인별 사용량
+                </h4>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+                  {tokenBreakdown.plugins.map((p) => {
+                    const pct = (p.total_tokens / maxPluginTokens) * 100;
+                    return (
+                      <div key={p.plugin_name} style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8rem" }}>
+                          <span style={{ fontWeight: "600", color: "hsl(215, 20%, 85%)" }}>{p.plugin_name || "기본 (Core)"}</span>
+                          <span style={{ color: "var(--neon-purple)", fontWeight: "700" }}>{p.total_tokens.toLocaleString()}</span>
+                        </div>
+                        <div style={{ height: "6px", background: "rgba(255,255,255,0.03)", borderRadius: "3px", overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${pct}%`, background: "var(--neon-purple)", borderRadius: "3px" }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {tokenBreakdown.plugins.length === 0 && (
+                    <div style={{ color: "hsl(215, 20%, 40%)", fontSize: "0.8rem", textAlign: "center", padding: "1rem" }}>
+                      집계된 플러그인별 데이터가 없습니다.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Skills Breakdown */}
+              <div className="breakdown-card glass" style={{ padding: "1.25rem" }}>
+                <h4 style={{ fontSize: "1rem", fontWeight: "700", marginBottom: "1rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <span>🛠️</span> 스킬(도구)별 사용량
+                </h4>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", maxHeight: "250px", overflowY: "auto", paddingRight: "4px" }}>
+                  {tokenBreakdown.skills.map((s) => {
+                    const pct = (s.total_tokens / maxSkillTokens) * 100;
+                    return (
+                      <div key={s.skill_name} style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8rem" }}>
+                          <span style={{ fontWeight: "600", color: "hsl(215, 20%, 85%)" }}>{s.skill_name}</span>
+                          <span style={{ color: "var(--neon-green)", fontWeight: "700" }}>{s.total_tokens.toLocaleString()}</span>
+                        </div>
+                        <div style={{ height: "6px", background: "rgba(255,255,255,0.03)", borderRadius: "3px", overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${pct}%`, background: "var(--neon-green)", borderRadius: "3px" }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {tokenBreakdown.skills.length === 0 && (
+                    <div style={{ color: "hsl(215, 20%, 40%)", fontSize: "0.8rem", textAlign: "center", padding: "1rem" }}>
+                      집계된 스킬별 데이터가 없습니다.
+                    </div>
+                  )}
+                </div>
+              </div>
             </section>
 
             {/* Bottom details column grid */}
@@ -992,7 +1276,12 @@ function TrayPopoverView() {
 }
 
 function SettingsView() {
-  const [settings, setSettings] = useState({ log_dir: "" });
+  const [settings, setSettings] = useState({ 
+    log_dir: "", 
+    token_limit: 50000000,
+    token_limit_claude: 50000000,
+    token_limit_codex: 50000000
+  });
   const [keysStatus, setKeysStatus] = useState({ anthropic: false, openai: false });
   const [anthropicKey, setAnthropicKey] = useState("");
   const [openaiKey, setOpenAIKey] = useState("");
@@ -1009,7 +1298,12 @@ function SettingsView() {
 
   const loadData = async () => {
     try {
-      const s = await invoke<{ log_dir: string }>("load_settings");
+      const s = await invoke<{ 
+        log_dir: string, 
+        token_limit: number,
+        token_limit_claude: number,
+        token_limit_codex: number
+      }>("load_settings");
       setSettings(s);
       
       const k = await invoke<Record<string, boolean>>("get_api_keys_status");
@@ -1102,13 +1396,20 @@ function SettingsView() {
     }
   };
 
-  const handleSavePath = async () => {
+  const handleSaveSettings = async (updates: Partial<typeof settings>) => {
+    const newSettings = { ...settings, ...updates };
     try {
-      await invoke("save_settings", { logDir: settings.log_dir });
-      alert("로컬 로그 디렉토리 경로가 저장되었습니다.");
+      await invoke("save_settings", { 
+        logDir: newSettings.log_dir, 
+        tokenLimit: Number(newSettings.token_limit),
+        tokenLimitClaude: Number(newSettings.token_limit_claude),
+        tokenLimitCodex: Number(newSettings.token_limit_codex),
+        tokenLimitAntigravity: 50000000 
+      });
+      alert("설정이 성공적으로 저장되었습니다.");
       loadData();
     } catch (e: any) {
-      alert(`경로 저장 실패: ${e.toString()}`);
+      alert(`설정 저장 실패: ${e.toString()}`);
     }
   };
 
@@ -1218,11 +1519,67 @@ function SettingsView() {
                 type="text"
                 placeholder="예: /Users/username/logs"
                 value={settings.log_dir}
-                onChange={(e) => setSettings({ log_dir: e.target.value })}
+                onChange={(e) => setSettings(prev => ({ ...prev, log_dir: e.target.value }))}
                 className="settings-input"
                 style={{ fontFamily: "monospace", fontSize: "0.8rem" }}
               />
-              <button onClick={handleSavePath} className="btn btn-save" disabled={!settings.log_dir.trim()}>저장</button>
+              <button onClick={() => handleSaveSettings({ log_dir: settings.log_dir })} className="btn btn-save" disabled={!settings.log_dir.trim()}>저장</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Token Budget Limit Config Card */}
+      <div className="settings-card glass" style={{ marginTop: "1.5rem" }}>
+        <h3 className="card-title">📊 에이전트별 토큰 예산 한도 설정</h3>
+        <p className="card-desc">대시보드 상단 게이지 바와 연동되어 에이전트별 토큰 예산 한도 및 실시간 소진율을 관리합니다.</p>
+        
+        <div className="settings-form" style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+          {/* Claude Code Limit */}
+          <div className="form-group">
+            <div className="form-group-header">
+              <label>Claude Code 토큰 한도</label>
+            </div>
+            <div className="input-group">
+              <input
+                type="number"
+                placeholder="예: 50000000"
+                value={settings.token_limit_claude}
+                onChange={(e) => setSettings(prev => ({ ...prev, token_limit_claude: Number(e.target.value) }))}
+                className="settings-input"
+                style={{ fontSize: "0.85rem" }}
+              />
+              <button 
+                onClick={() => handleSaveSettings({ token_limit_claude: settings.token_limit_claude })} 
+                className="btn btn-save" 
+                disabled={settings.token_limit_claude <= 0}
+              >
+                저장
+              </button>
+            </div>
+          </div>
+
+          {/* OpenAI Codex Limit */}
+          <div className="form-group">
+            <div className="form-group-header">
+              <label>OpenAI Codex 토큰 한도</label>
+            </div>
+            <div className="input-group">
+              <input
+                type="number"
+                placeholder="예: 50000000"
+                value={settings.token_limit_codex}
+                onChange={(e) => setSettings(prev => ({ ...prev, token_limit_codex: Number(e.target.value) }))}
+                className="settings-input"
+                style={{ fontSize: "0.85rem" }}
+              />
+              <button 
+                onClick={() => handleSaveSettings({ token_limit_codex: settings.token_limit_codex })} 
+                className="btn btn-save" 
+                disabled={settings.token_limit_codex <= 0}
+              >
+                저장
+              </button>
             </div>
           </div>
         </div>

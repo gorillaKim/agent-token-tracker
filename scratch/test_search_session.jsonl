@@ -1,0 +1,4 @@
+{"type": "session_meta", "id": "session-search-test", "cwd": "/Users/test/dir", "timestamp": "2026-06-23T10:00:00Z", "cli_version": "0.2.1"}
+{"type": "message", "timestamp": "2026-06-23T10:01:00Z", "message": {"role": "user", "content": [{"type": "text", "text": "안녕, 오늘 날씨 어때?"}]}}
+{"type": "message", "timestamp": "2026-06-23T10:01:05Z", "message": {"role": "assistant", "model": "claude-3-5-sonnet", "usage": {"input_tokens": 100, "cache_read_input_tokens": 40, "output_tokens": 50}, "content": [{"type": "thinking", "thinking": "사용자가 오늘 날씨를 묻고 있습니다."}, {"type": "text", "text": "안녕하세요! 오늘은 맑고 선선한 날씨입니다. 어떤 도움이 필요하신가요?"}]}}
+{"type": "session_end", "timestamp": "2026-06-23T10:02:00Z"}
