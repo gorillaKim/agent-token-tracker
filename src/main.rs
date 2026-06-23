@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use adapters::{LogAdapter, NormalizedSession};
 use adapters::claude_code::ClaudeCodeAdapter;
 use adapters::codex::CodexAdapter;
+use adapters::antigravity::AntigravityAdapter;
 
 #[derive(Parser)]
 #[command(name = "agent-token-tracker")]
@@ -158,31 +159,39 @@ fn main() {
             let files_total = files.len();
             println!("총 {}개의 대상 파일을 발견했습니다.", files_total);
 
-            // 스레드 안전한 결과 카운트 데이터 구조
+            // 스레드 안전한 결과 카운트 데이터 구조 및 DB 쓰기 락
             let result_accumulator = Arc::new(Mutex::new(ScanResult::default()));
+            let db_write_lock = Arc::new(Mutex::new(()));
             let db_path_clone = db_path.clone();
 
             // Rayon을 활용한 병렬 스캔 처리
             files.par_iter().for_each(|file_path| {
                 let accumulator = Arc::clone(&result_accumulator);
                 let pricing_cache = Arc::clone(&pricing_map_shared);
+                let db_write_lock = Arc::clone(&db_write_lock);
                 
                 // 파일 확장자 판별 (디스패치)
+                let path_str = file_path.to_str().unwrap_or("");
+                let is_vscdb = path_str.contains("state.vscdb");
                 let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if ext != "jsonl" {
-                    return; // jsonl 이외의 파일은 조용히 스킵
+                if ext != "jsonl" && !is_vscdb {
+                    return; // jsonl 및 vscdb 이외의 파일은 조용히 스킵
                 }
 
                 // 1. 어댑터를 통해 파싱 수행
                 let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 let is_codex = file_name.starts_with("rollout-") || agent.as_deref() == Some("codex");
+                let is_antigravity = is_vscdb || agent.as_deref() == Some("antigravity");
 
-                let parsed_res = if is_codex {
+                let parsed_res = if is_antigravity {
+                    let adapter = AntigravityAdapter;
+                    adapter.parse_session(path_str)
+                } else if is_codex {
                     let adapter = CodexAdapter;
-                    adapter.parse_session(file_path.to_str().unwrap())
+                    adapter.parse_session(path_str)
                 } else {
                     let adapter = ClaudeCodeAdapter;
-                    adapter.parse_session(file_path.to_str().unwrap())
+                    adapter.parse_session(path_str)
                 };
 
                 let mut parsed_session: NormalizedSession = match parsed_res {
@@ -224,9 +233,15 @@ fn main() {
                     }
                 }
 
-                // 3. DB 적재 진행 (스레드별 개별 커넥션 확보)
-                let conn = match db::init_db(&db_path_clone) {
-                    Ok(c) => c,
+                // 3. DB 적재 진행 (스레드별 개별 커넥션 확보 및 Mutex를 통한 직렬 쓰기 보장)
+                let _write_guard = db_write_lock.lock().unwrap();
+                let conn = match rusqlite::Connection::open(&db_path_clone) {
+                    Ok(c) => {
+                        let _ = c.pragma_update(None, "foreign_keys", "ON");
+                        let _ = c.pragma_update(None, "journal_mode", "WAL");
+                        let _ = c.pragma_update(None, "busy_timeout", &5000);
+                        c
+                    }
                     Err(err) => {
                         let mut res = accumulator.lock().unwrap();
                         res.sessions_failed += 1;
@@ -621,7 +636,24 @@ fn main() {
 /// 경로를 순회하며 파일 목록을 재귀적으로 수집하는 헬퍼 함수
 fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
     if path.is_file() {
-        files.push(path.to_path_buf());
+        let path_str = path.to_str().unwrap_or("");
+        if path_str.ends_with("state.vscdb") {
+            // state.vscdb 내의 세션 ID 목록을 조회해 가상 경로로 변형해 인입
+            match adapters::antigravity::get_vscdb_session_ids(path_str) {
+                Ok(ids) => {
+                    for id in ids {
+                        let virtual_path = format!("{}?session_id={}", path_str, id);
+                        files.push(PathBuf::from(virtual_path));
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Error loading vscdb session IDs: {:?}", err);
+                    files.push(path.to_path_buf());
+                }
+            }
+        } else {
+            files.push(path.to_path_buf());
+        }
     } else if path.is_dir() {
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;
