@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use adapters::{LogAdapter, NormalizedSession};
 use adapters::claude_code::ClaudeCodeAdapter;
+use adapters::codex::CodexAdapter;
 
 #[derive(Parser)]
 #[command(name = "agent-token-tracker")]
@@ -173,8 +174,18 @@ fn main() {
                 }
 
                 // 1. 어댑터를 통해 파싱 수행
-                let adapter = ClaudeCodeAdapter;
-                let mut parsed_session: NormalizedSession = match adapter.parse_session(file_path.to_str().unwrap()) {
+                let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let is_codex = file_name.starts_with("rollout-") || agent.as_deref() == Some("codex");
+
+                let parsed_res = if is_codex {
+                    let adapter = CodexAdapter;
+                    adapter.parse_session(file_path.to_str().unwrap())
+                } else {
+                    let adapter = ClaudeCodeAdapter;
+                    adapter.parse_session(file_path.to_str().unwrap())
+                };
+
+                let mut parsed_session: NormalizedSession = match parsed_res {
                     Ok(sess) => sess,
                     Err(err) => {
                         let mut res = accumulator.lock().unwrap();

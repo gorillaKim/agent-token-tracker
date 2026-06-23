@@ -201,6 +201,8 @@ impl LogAdapter for ClaudeCodeAdapter {
             total_input_tokens,
             total_output_tokens,
             "api".to_string(), // Claude Code는 실측 토큰 제공
+            None,
+            None,
         );
 
         Ok(NormalizedSession {

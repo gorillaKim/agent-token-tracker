@@ -227,6 +227,8 @@ mod tests {
             input_tokens,
             0,
             "api".to_string(),
+            None,
+            None,
         )
     }
 

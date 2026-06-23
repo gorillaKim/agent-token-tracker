@@ -34,6 +34,10 @@ pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
         [],
     )?;
 
+    // 멱등적으로 컬럼 추가 (ALTER TABLE 에러 무시)
+    conn.execute("ALTER TABLE sessions ADD COLUMN session_name TEXT;", []).ok();
+    conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;", []).ok();
+
     // 2. messages 테이블 생성
     conn.execute(
         "CREATE TABLE IF NOT EXISTS messages (
@@ -120,8 +124,8 @@ pub fn insert_session(conn: &Connection, session: &Session) -> Result<(), rusqli
     conn.execute(
         "INSERT OR IGNORE INTO sessions (
             session_id, agent_type, agent_version, started_at, ended_at, cwd, model_id,
-            total_input_tokens, total_output_tokens, token_source
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            total_input_tokens, total_output_tokens, token_source, session_name, parent_session_id
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             session.session_id,
             session.agent_type,
@@ -132,7 +136,9 @@ pub fn insert_session(conn: &Connection, session: &Session) -> Result<(), rusqli
             session.model_id,
             session.total_input_tokens,
             session.total_output_tokens,
-            session.token_source
+            session.token_source,
+            session.session_name,
+            session.parent_session_id
         ],
     )?;
     Ok(())
@@ -196,7 +202,7 @@ pub fn insert_tool_call(conn: &Connection, tc: &ToolCall) -> Result<(), rusqlite
 pub fn get_session(conn: &Connection, session_id: &str) -> Result<Option<Session>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT session_id, agent_type, agent_version, started_at, ended_at, cwd, model_id,
-                total_input_tokens, total_output_tokens, token_source
+                total_input_tokens, total_output_tokens, token_source, session_name, parent_session_id
          FROM sessions WHERE session_id = ?1",
     )?;
 
@@ -214,6 +220,8 @@ pub fn get_session(conn: &Connection, session_id: &str) -> Result<Option<Session
             row.get(7)?,
             row.get(8)?,
             row.get(9)?,
+            row.get(10)?,
+            row.get(11)?,
         )))
     } else {
         Ok(None)
@@ -224,7 +232,7 @@ pub fn get_session(conn: &Connection, session_id: &str) -> Result<Option<Session
 pub fn get_all_sessions(conn: &Connection) -> Result<Vec<Session>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT session_id, agent_type, agent_version, started_at, ended_at, cwd, model_id,
-                total_input_tokens, total_output_tokens, token_source
+                total_input_tokens, total_output_tokens, token_source, session_name, parent_session_id
          FROM sessions",
     )?;
 
@@ -240,6 +248,8 @@ pub fn get_all_sessions(conn: &Connection) -> Result<Vec<Session>, rusqlite::Err
             row.get(7)?,
             row.get(8)?,
             row.get(9)?,
+            row.get(10)?,
+            row.get(11)?,
         ))
     })?;
 
@@ -566,6 +576,8 @@ mod tests {
             1500,
             800,
             "api".to_string(),
+            Some("테스트 세션".to_string()),
+            Some("parent-uuid-5678".to_string()),
         );
 
         // INSERT 검증

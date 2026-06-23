@@ -18,6 +18,8 @@ pub struct Session {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub token_source: String, // "api" | "unavailable" | "parse_error" | "db_locked" | "permission_denied"
+    pub session_name: Option<String>,
+    pub parent_session_id: Option<String>,
 }
 
 impl Session {
@@ -32,6 +34,8 @@ impl Session {
         total_input_tokens: u64,
         total_output_tokens: u64,
         token_source: String,
+        session_name: Option<String>,
+        parent_session_id: Option<String>,
     ) -> Self {
         Self {
             session_id,
@@ -44,6 +48,8 @@ impl Session {
             total_input_tokens,
             total_output_tokens,
             token_source,
+            session_name,
+            parent_session_id,
         }
     }
 }
