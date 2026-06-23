@@ -14,7 +14,8 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use adapters::{LogAdapter, NormalizedSession};
+use std::time::{Duration, Instant};
+use adapters::LogAdapter;
 use adapters::claude_code::ClaudeCodeAdapter;
 use adapters::codex::CodexAdapter;
 use adapters::antigravity::AntigravityAdapter;
@@ -41,6 +42,12 @@ enum Commands {
         
         #[arg(short, long, help = "특정 에이전트 타입 필터 (예: codex, antigravity)")]
         agent: Option<String>,
+
+        #[arg(short, long, help = "파일 변경을 감시하여 실시간으로 증분 적재합니다.")]
+        watch: bool,
+
+        #[arg(long, help = "단일 파일에 대해 훅 트리거 모드로 멱등 적재합니다 (전체 스캔 스킵).")]
+        hook: bool,
     },
     #[command(about = "적재된 에이전트 세션의 토큰 사용량 및 비용 리포트를 출력합니다.")]
     Report {
@@ -128,7 +135,7 @@ fn main() {
     }
 
     match &cli.command {
-        Commands::Scan { path, agent } => {
+        Commands::Scan { path, agent, watch, hook } => {
             println!("스캔을 시작합니다. 대상 경로: {}", path);
             if let Some(agent_type) = agent {
                 println!("필터링할 에이전트 타입: {}", agent_type);
@@ -150,185 +157,205 @@ fn main() {
                 }
             };
             let pricing_map_shared = Arc::new(pricing_map);
-
-            // 파일 목록 수집 (재귀 스캔)
-            let mut files = Vec::new();
-            if let Err(err) = collect_files(Path::new(path), &mut files) {
-                eprintln!("파일 목록 수집 중 오류 발생: {}", err);
-                std::process::exit(1);
-            }
-
-            let files_total = files.len();
-            println!("총 {}개의 대상 파일을 발견했습니다.", files_total);
-
-            // 스레드 안전한 결과 카운트 데이터 구조 및 DB 쓰기 락
-            let result_accumulator = Arc::new(Mutex::new(ScanResult::default()));
             let db_write_lock = Arc::new(Mutex::new(()));
-            let db_path_clone = db_path.clone();
 
-            // Rayon을 활용한 병렬 스캔 처리
-            files.par_iter().for_each(|file_path| {
-                let accumulator = Arc::clone(&result_accumulator);
-                let pricing_cache = Arc::clone(&pricing_map_shared);
-                let db_write_lock = Arc::clone(&db_write_lock);
+            if *hook {
+                // 단일 훅 트리거 최적화 경로: 전체 수집을 스킵하고 단일 지정 경로 즉시 멱등 적재
+                let file_path = Path::new(path);
+                println!("[Hook Trigger] 단일 파일에 대한 즉시 멱등 적재를 구동합니다: {}", file_path.display());
+                match process_single_file(
+                    file_path,
+                    agent.as_deref(),
+                    &pricing_map_shared,
+                    &db_path,
+                    &db_write_lock,
+                    true, // force_update
+                ) {
+                    Ok(_) => println!("[Hook Trigger] 성공적으로 적재 완료되었습니다."),
+                    Err(err) => {
+                        eprintln!("[Hook Trigger] 적재 실패: {}", err);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // 일반 스캔 모드 또는 파일 감시 모드
+                let mut files = Vec::new();
+                if let Err(err) = collect_files(Path::new(path), &mut files) {
+                    eprintln!("파일 목록 수집 중 오류 발생: {}", err);
+                    std::process::exit(1);
+                }
+
+                let files_total = files.len();
+                println!("총 {}개의 대상 파일을 발견했습니다.", files_total);
+
+                let result_accumulator = Arc::new(Mutex::new(ScanResult::default()));
+                let db_path_clone = db_path.clone();
+
+                // Rayon을 활용한 병렬 스캔 처리
+                files.par_iter().for_each(|file_path| {
+                    let accumulator = Arc::clone(&result_accumulator);
+                    let pricing_cache = Arc::clone(&pricing_map_shared);
+                    let db_write_lock = Arc::clone(&db_write_lock);
+
+                    match process_single_file(
+                        file_path,
+                        agent.as_deref(),
+                        &pricing_cache,
+                        &db_path_clone,
+                        &db_write_lock,
+                        false, // force_update (일반 최초 스캔은 기존 데이터 중복 시 스킵)
+                    ) {
+                        Ok(_) => {
+                            let mut res = accumulator.lock().unwrap();
+                            res.sessions_inserted += 1;
+                            res.sessions_scanned += 1;
+                        }
+                        Err(err) => {
+                            let mut res = accumulator.lock().unwrap();
+                            // 이미 존재하는 세션(already_exists) 스킵인 경우
+                            let err_str = err.to_string();
+                            if err_str.contains("already_exists") {
+                                res.sessions_skipped += 1;
+                                *res.skip_reasons.entry("already_exists".to_string()).or_insert(0) += 1;
+                            } else {
+                                res.sessions_failed += 1;
+                                res.warnings.push(format!("파일 파싱 실패 [{}]: {}", file_path.display(), err));
+                                *res.skip_reasons.entry("parse_error".to_string()).or_insert(0) += 1;
+                            }
+                            res.sessions_scanned += 1;
+                        }
+                    }
+                });
+
+                // 최종 결과 요약 출력
+                let final_result = result_accumulator.lock().unwrap();
+                println!("\n=== 스캔 결과 요약 ===");
+                println!("총 발견된 파일 수: {}개", files_total);
+                println!("성공적으로 적재된 세션 수: {}개", final_result.sessions_inserted);
+                println!("스킵(중복 등)된 세션 수: {}개", final_result.sessions_skipped);
+                println!("실패한 세션 수: {}개", final_result.sessions_failed);
                 
-                // 파일 확장자 판별 (디스패치)
-                let path_str = file_path.to_str().unwrap_or("");
-                let is_vscdb = path_str.contains("state.vscdb");
-                let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if ext != "jsonl" && !is_vscdb {
-                    return; // jsonl 및 vscdb 이외의 파일은 조용히 스킵
-                }
-
-                // 1. 어댑터를 통해 파싱 수행
-                let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let is_codex = file_name.starts_with("rollout-") || agent.as_deref() == Some("codex");
-                let is_antigravity = is_vscdb || agent.as_deref() == Some("antigravity");
-
-                let parsed_res = if is_antigravity {
-                    let adapter = AntigravityAdapter;
-                    adapter.parse_session(path_str)
-                } else if is_codex {
-                    let adapter = CodexAdapter;
-                    adapter.parse_session(path_str)
-                } else {
-                    let adapter = ClaudeCodeAdapter;
-                    adapter.parse_session(path_str)
-                };
-
-                let mut parsed_session: NormalizedSession = match parsed_res {
-                    Ok(sess) => sess,
-                    Err(err) => {
-                        let mut res = accumulator.lock().unwrap();
-                        res.sessions_failed += 1;
-                        res.warnings.push(format!("파일 파싱 실패 [{}]: {}", file_path.display(), err));
-                        *res.skip_reasons.entry("parse_error".to_string()).or_insert(0) += 1;
-                        return;
-                    }
-                };
-
-                // 2. cost_usd 계산 및 messages 채움
-                let model_id_opt = parsed_session.session.model_id.as_deref().unwrap_or("unknown");
-                let pricing_info = parsed_session.session.model_id.as_ref()
-                    .and_then(|m_id| pricing_cache.get(m_id));
-
-                // 미등록 모델 발견 시 경고 수집 및 fallback 정책 수행 (이슈 #683)
-                if pricing_info.is_none() && model_id_opt != "unknown" {
-                    let mut res = accumulator.lock().unwrap();
-                    let warning_msg = format!(
-                        "모델 단가 누락 경고: '{}' 모델의 단가 정보가 pricing 테이블에 없습니다. 기본 fallback 단가를 적용합니다.",
-                        model_id_opt
-                    );
-                    if !res.warnings.contains(&warning_msg) {
-                        res.warnings.push(warning_msg);
+                if !final_result.skip_reasons.is_empty() {
+                    println!("세션 스킵/실패 세부 사유:");
+                    for (reason, count) in &final_result.skip_reasons {
+                        println!("  - {}: {}건", reason, count);
                     }
                 }
 
-                for msg in &mut parsed_session.messages {
-                    if msg.role == "assistant" {
-                        msg.cost_usd = pricing::calculate_cost_usd(
-                            pricing_info,
-                            msg.input_tokens,
-                            msg.cache_read_input_tokens,
-                            msg.output_tokens,
-                        );
+                if !final_result.warnings.is_empty() {
+                    println!("\n⚠️ 경고 및 오류 이력 (최대 10건):");
+                    let limit = final_result.warnings.len().min(10);
+                    for i in 0..limit {
+                        println!("  - {}", final_result.warnings[i]);
+                    }
+                    if final_result.warnings.len() > 10 {
+                        println!("  ... 그 외 {}건의 경고가 더 있습니다.", final_result.warnings.len() - 10);
                     }
                 }
 
-                // 3. DB 적재 진행 (스레드별 개별 커넥션 확보 및 Mutex를 통한 직렬 쓰기 보장)
-                let _write_guard = db_write_lock.lock().unwrap();
-                let conn = match rusqlite::Connection::open(&db_path_clone) {
-                    Ok(c) => {
-                        let _ = c.pragma_update(None, "foreign_keys", "ON");
-                        let _ = c.pragma_update(None, "journal_mode", "WAL");
-                        let _ = c.pragma_update(None, "busy_timeout", &5000);
-                        c
+                // 파일 감시 모드가 활성화된 경우
+                if *watch {
+                    use notify::{Watcher, RecursiveMode};
+                    use std::sync::mpsc::channel;
+
+                    let (tx, rx) = channel();
+                    let mut watcher = match notify::recommended_watcher(move |res| {
+                        if let Ok(event) = res {
+                            let _ = tx.send(event);
+                        }
+                    }) {
+                        Ok(w) => w,
+                        Err(err) => {
+                            eprintln!("파일 감시자 생성 실패: {}", err);
+                            std::process::exit(1);
+                        }
+                    };
+
+                    let watch_path = Path::new(path);
+                    let target_dir = if watch_path.is_file() {
+                        watch_path.parent().unwrap_or(watch_path)
+                    } else {
+                        watch_path
+                    };
+
+                    if let Err(err) = watcher.watch(target_dir, RecursiveMode::Recursive) {
+                        eprintln!("파일 감시 시작 실패 [{}]: {}", target_dir.display(), err);
+                        std::process::exit(1);
                     }
-                    Err(err) => {
-                        let mut res = accumulator.lock().unwrap();
-                        res.sessions_failed += 1;
-                        res.warnings.push(format!("데이터베이스 연결 실패 [{}]: {}", file_path.display(), err));
-                        *res.skip_reasons.entry("db_locked".to_string()).or_insert(0) += 1;
-                        return;
-                    }
-                };
 
-                // 멱등성 검사: 이미 존재하는 세션인지 확인
-                let exists = match db::get_session(&conn, &parsed_session.session.session_id) {
-                    Ok(opt) => opt.is_some(),
-                    Err(_) => false,
-                };
+                    println!("\n[Watch] 파일 감시 모드가 활성화되었습니다 (감시 경로: {}).", target_dir.display());
+                    println!("[Watch] 파일 변경 감지 시 500ms 디바운스 후 실시간 멱등 증분 적재를 실행합니다. (Q/Ctrl+C로 종료)");
 
-                if exists {
-                    let mut res = accumulator.lock().unwrap();
-                    res.sessions_skipped += 1;
-                    *res.skip_reasons.entry("already_exists".to_string()).or_insert(0) += 1;
-                    return;
-                }
+                    let mut last_event_time = Instant::now();
+                    let mut pending_files = std::collections::HashSet::new();
 
-                // 4. 정규화 묶음 데이터 DB 적재
-                let mut success = true;
-                if let Err(err) = db::insert_session(&conn, &parsed_session.session) {
-                    success = false;
-                    let mut res = accumulator.lock().unwrap();
-                    res.warnings.push(format!("세션 DB 적재 실패 [{}]: {}", file_path.display(), err));
-                }
+                    loop {
+                        match rx.recv_timeout(Duration::from_millis(100)) {
+                            Ok(event) => {
+                                for p in event.paths {
+                                    if p.is_file() {
+                                        pending_files.insert(p);
+                                    }
+                                }
+                                last_event_time = Instant::now();
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                if !pending_files.is_empty() && last_event_time.elapsed() >= Duration::from_millis(500) {
+                                    println!("\n[Watch] 변경 사항 감지! 증분 적재를 시작합니다...");
+                                    for file in pending_files.drain() {
+                                        let path_str = file.to_str().unwrap_or("");
+                                        let is_vscdb = path_str.contains("state.vscdb");
+                                        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+                                        
+                                        if ext != "jsonl" && !is_vscdb {
+                                            continue; // 유효 파일만
+                                        }
 
-                if success {
-                    for msg in &parsed_session.messages {
-                        if let Err(err) = db::insert_message(&conn, msg) {
-                            let mut res = accumulator.lock().unwrap();
-                            res.warnings.push(format!("메시지 DB 적재 실패 [{}]: {}", file_path.display(), err));
+                                        if is_vscdb {
+                                            // state.vscdb 변경 시 세션 ID 목록을 새로 뽑아 가상 경로로 변형해 순차 처리
+                                            match adapters::antigravity::get_vscdb_session_ids(path_str) {
+                                                Ok(ids) => {
+                                                    for id in ids {
+                                                        let virtual_path_str = format!("{}?session_id={}", path_str, id);
+                                                        let virtual_path = PathBuf::from(virtual_path_str);
+                                                        match process_single_file(
+                                                            &virtual_path,
+                                                            agent.as_deref(),
+                                                            &pricing_map_shared,
+                                                            &db_path,
+                                                            &db_write_lock,
+                                                            true, // force_update
+                                                        ) {
+                                                            Ok(_) => println!("  - 성공적으로 적재(vscdb 세션): {}", id),
+                                                            Err(err) => eprintln!("  - 적재 실패 [vscdb 세션 {}]: {}", id, err),
+                                                        }
+                                                    }
+                                                }
+                                                Err(err) => eprintln!("  - vscdb 세션 ID 목록 갱신 실패: {:?}", err),
+                                            }
+                                        } else {
+                                            match process_single_file(
+                                                &file,
+                                                agent.as_deref(),
+                                                &pricing_map_shared,
+                                                &db_path,
+                                                &db_write_lock,
+                                                true, // force_update
+                                            ) {
+                                                Ok(_) => println!("  - 성공적으로 적재: {}", file.display()),
+                                                Err(err) => eprintln!("  - 적재 실패 [{}]: {}", file.display(), err),
+                                            }
+                                        }
+                                    }
+                                    println!("[Watch] 증분 적재가 완료되었습니다. 대기 중...");
+                                }
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                eprintln!("감시 채널이 끊어졌습니다.");
+                                break;
+                            }
                         }
                     }
-                    for node in &parsed_session.nodes {
-                        if let Err(err) = db::insert_node(&conn, node) {
-                            let mut res = accumulator.lock().unwrap();
-                            res.warnings.push(format!("노드 DB 적재 실패 [{}]: {}", file_path.display(), err));
-                        }
-                    }
-                    for tc in &parsed_session.tool_calls {
-                        if let Err(err) = db::insert_tool_call(&conn, tc) {
-                            let mut res = accumulator.lock().unwrap();
-                            res.warnings.push(format!("도구 호출 DB 적재 실패 [{}]: {}", file_path.display(), err));
-                        }
-                    }
-
-                    let mut res = accumulator.lock().unwrap();
-                    res.sessions_inserted += 1;
-                } else {
-                    let mut res = accumulator.lock().unwrap();
-                    res.sessions_failed += 1;
-                    *res.skip_reasons.entry("db_insert_error".to_string()).or_insert(0) += 1;
-                }
-
-                let mut res = accumulator.lock().unwrap();
-                res.sessions_scanned += 1;
-            });
-
-            // 최종 결과 요약 출력
-            let final_result = result_accumulator.lock().unwrap();
-            println!("\n=== 스캔 결과 요약 ===");
-            println!("총 발견된 파일 수: {}개", files_total);
-            println!("성공적으로 적재된 세션 수: {}개", final_result.sessions_inserted);
-            println!("스킵(중복 등)된 세션 수: {}개", final_result.sessions_skipped);
-            println!("실패한 세션 수: {}개", final_result.sessions_failed);
-            
-            if !final_result.skip_reasons.is_empty() {
-                println!("세션 스킵/실패 세부 사유:");
-                for (reason, count) in &final_result.skip_reasons {
-                    println!("  - {}: {}건", reason, count);
-                }
-            }
-
-            if !final_result.warnings.is_empty() {
-                println!("\n⚠️ 경고 및 오류 이력 (최대 10건):");
-                let limit = final_result.warnings.len().min(10);
-                for i in 0..limit {
-                    println!("  - {}", final_result.warnings[i]);
-                }
-                if final_result.warnings.len() > 10 {
-                    println!("  ... 그 외 {}건의 경고가 더 있습니다.", final_result.warnings.len() - 10);
                 }
             }
         }
@@ -686,3 +713,102 @@ fn format_number(n: u64) -> String {
     }
     result.chars().rev().collect()
 }
+
+/// 단일 파일에 대해 파싱 및 데이터베이스 멱등 적재를 처리합니다.
+fn process_single_file(
+    file_path: &Path,
+    agent_filter: Option<&str>,
+    pricing_cache: &Arc<HashMap<String, crate::model::Pricing>>,
+    db_path: &str,
+    db_write_lock: &Arc<Mutex<()>>,
+    force_update: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path_str = file_path.to_str().unwrap_or("");
+    let is_vscdb = path_str.contains("state.vscdb");
+    
+    // vscdb의 가상 경로는 실제 파일 경로가 아닌 state.vscdb?session_id=... 형식임
+    let has_vscdb_param = path_str.contains("state.vscdb?session_id=");
+
+    let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if ext != "jsonl" && !is_vscdb && !has_vscdb_param {
+        return Ok(());
+    }
+
+    let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let is_codex = file_name.starts_with("rollout-") || agent_filter == Some("codex");
+    let is_antigravity = is_vscdb || has_vscdb_param || agent_filter == Some("antigravity");
+
+    let parsed_res = if is_antigravity {
+        let adapter = AntigravityAdapter;
+        adapter.parse_session(path_str)
+    } else if is_codex {
+        let adapter = CodexAdapter;
+        adapter.parse_session(path_str)
+    } else {
+        let adapter = ClaudeCodeAdapter;
+        adapter.parse_session(path_str)
+    };
+
+    let mut parsed_session = parsed_res?;
+
+    // cost_usd 계산 및 messages 채움
+    let model_id_opt = parsed_session.session.model_id.as_deref().unwrap_or("unknown");
+    let pricing_info = parsed_session.session.model_id.as_ref()
+        .and_then(|m_id| pricing_cache.get(m_id));
+
+    // 미등록 모델 발견 시 경고
+    if pricing_info.is_none() && model_id_opt != "unknown" {
+        eprintln!(
+            "모델 단가 누락 경고: '{}' 모델의 단가 정보가 pricing 테이블에 없습니다. 기본 fallback 단가를 적용합니다.",
+            model_id_opt
+        );
+    }
+
+    for msg in &mut parsed_session.messages {
+        if msg.role == "assistant" {
+            msg.cost_usd = pricing::calculate_cost_usd(
+                pricing_info,
+                msg.input_tokens,
+                msg.cache_read_input_tokens,
+                msg.output_tokens,
+            );
+        }
+    }
+
+    // DB 적재 진행
+    let _write_guard = db_write_lock.lock().unwrap();
+    let conn = rusqlite::Connection::open(db_path)?;
+    let _ = conn.pragma_update(None, "foreign_keys", "ON");
+    let _ = conn.pragma_update(None, "journal_mode", "WAL");
+    let _ = conn.pragma_update(None, "busy_timeout", &5000);
+
+    let exists = match db::get_session(&conn, &parsed_session.session.session_id)? {
+        Some(_) => true,
+        None => false,
+    };
+
+    if exists {
+        if force_update {
+            // watch / hook 모드 시 멱등성을 위해 기존 데이터 완전 삭제
+            db::delete_session(&conn, &parsed_session.session.session_id)?;
+        } else {
+            // 일반 최초 스캔 시엔 중복 적재 방지를 위해 에러 리턴으로 건너뜀
+            return Err("already_exists".into());
+        }
+    }
+
+    // 정규화 데이터 DB 적재
+    db::insert_session(&conn, &parsed_session.session)?;
+    for msg in &parsed_session.messages {
+        db::insert_message(&conn, msg)?;
+    }
+    for node in &parsed_session.nodes {
+        db::insert_node(&conn, node)?;
+    }
+    for tc in &parsed_session.tool_calls {
+        db::insert_tool_call(&conn, tc)?;
+    }
+
+    Ok(())
+}
+

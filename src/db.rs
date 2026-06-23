@@ -676,5 +676,28 @@ mod tests {
         assert_eq!(tool_report[0].tool_name, "view_file");
         assert_eq!(tool_report[0].call_count, 1);
         assert_eq!(tool_report[0].success_count, 1);
+
+        // 7. Session 삭제 및 CASCADE 연쇄 삭제 검증
+        delete_session(&conn, "sess-uuid-1234").expect("Session 삭제 실패");
+        let deleted_sess = get_session(&conn, "sess-uuid-1234").expect("Session 조회 실패");
+        assert!(deleted_sess.is_none());
+
+        let deleted_msgs = get_messages_by_session(&conn, "sess-uuid-1234").expect("Message 조회 실패");
+        assert!(deleted_msgs.is_empty());
+
+        let deleted_nodes = get_nodes_by_session(&conn, "sess-uuid-1234").expect("Node 조회 실패");
+        assert!(deleted_nodes.is_empty());
+
+        let deleted_tcs = get_tool_calls_by_session(&conn, "sess-uuid-1234").expect("ToolCall 조회 실패");
+        assert!(deleted_tcs.is_empty());
     }
 }
+
+/// 특정 세션 ID에 해당하는 세션 정보를 삭제합니다.
+/// 외래 키 제약 조건(ON DELETE CASCADE)이 활성화되어 있으므로
+/// 관련 메시지, 노드, 도구 호출도 데이터베이스에서 연쇄 삭제됩니다.
+pub fn delete_session(conn: &Connection, session_id: &str) -> Result<(), rusqlite::Error> {
+    conn.execute("DELETE FROM sessions WHERE session_id = ?1", params![session_id])?;
+    Ok(())
+}
+
