@@ -55,6 +55,15 @@ fn main() {
 
     println!("데이터베이스 파일: {}", db_path);
 
+    // 데이터베이스 초기화 및 테이블/인덱스 마이그레이션 실행
+    match db::init_db(&db_path) {
+        Ok(_) => println!("데이터베이스 초기화 및 마이그레이션이 완료되었습니다."),
+        Err(err) => {
+            eprintln!("데이터베이스 초기화 실패: {}", err);
+            std::process::exit(1);
+        }
+    }
+
     match &cli.command {
         Commands::Scan { path, agent } => {
             println!("스캔을 진행합니다. 대상 경로: {}", path);
