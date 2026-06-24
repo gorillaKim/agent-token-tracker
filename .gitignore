@@ -6,3 +6,15 @@ frontend/dist/
 *.db-journal
 *.db-wal
 *.db-shm
+
+# macOS
+.DS_Store
+
+# Playwright MCP
+.playwright-mcp/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
