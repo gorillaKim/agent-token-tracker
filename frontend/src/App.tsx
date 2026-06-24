@@ -685,7 +685,7 @@ function App() {
                   <h3 style={{ fontSize: "1.1rem", fontWeight: "700", margin: 0, color: "var(--neon-blue)" }}>Claude Code</h3>
                   <span style={{ fontSize: "0.8rem", fontWeight: "600", color: "hsl(215, 20%, 65%)" }}>
                     잔여: {tokenDisplayMode === "percentage"
-                      ? `${(100 - claudeUsagePctVal).toFixed(2)}%`
+                      ? `${(100 - claudeUsagePctVal).toFixed(0)}%`
                       : `${claudeRemainingLabel}`
                     }
                   </span>
@@ -695,7 +695,7 @@ function App() {
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "hsl(215, 20%, 75%)", fontWeight: "600" }}>
                     <span>세션 사용량 (5시간 롤링)</span>
-                    <span style={{ fontWeight: "700" }}>{claudeUsagePctVal.toFixed(2)}%</span>
+                    <span style={{ fontWeight: "700" }}>{claudeUsagePctVal.toFixed(0)}%</span>
                   </div>
                   <div style={{ height: "6px", background: "rgba(255,255,255,0.03)", borderRadius: "3px", overflow: "hidden", position: "relative" }}>
                     <div style={{ height: "100%", width: `${claudeUsagePctVal}%`, background: "linear-gradient(90deg, var(--neon-blue), var(--neon-purple))", borderRadius: "3px", transition: "width 0.5s ease-out" }} />
@@ -709,7 +709,7 @@ function App() {
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "hsl(215, 20%, 75%)", fontWeight: "600" }}>
                     <span>모든 모델 (주간)</span>
-                    <span style={{ fontWeight: "700" }}>{claudeWeeklyUsagePctVal.toFixed(2)}%</span>
+                    <span style={{ fontWeight: "700" }}>{claudeWeeklyUsagePctVal.toFixed(0)}%</span>
                   </div>
                   <div style={{ height: "6px", background: "rgba(255,255,255,0.03)", borderRadius: "3px", overflow: "hidden", position: "relative" }}>
                     <div style={{ height: "100%", width: `${claudeWeeklyUsagePctVal}%`, background: "linear-gradient(90deg, var(--neon-purple), #ff007f)", borderRadius: "3px", transition: "width 0.5s ease-out" }} />
@@ -726,7 +726,7 @@ function App() {
                   <h3 style={{ fontSize: "1.1rem", fontWeight: "700", margin: 0, color: "var(--neon-purple)" }}>Codex (OpenAI)</h3>
                   <span style={{ fontSize: "0.8rem", fontWeight: "600", color: "hsl(215, 20%, 65%)" }}>
                     잔여: {tokenDisplayMode === "percentage"
-                      ? `${(100 - openaiUsagePctVal).toFixed(2)}%`
+                      ? `${(100 - openaiUsagePctVal).toFixed(0)}%`
                       : `${openaiRemainingLabel}`
                     }
                   </span>
@@ -736,7 +736,7 @@ function App() {
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem", marginTop: "0.5rem" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "hsl(215, 20%, 75%)", fontWeight: "600" }}>
                     <span>사용량 소진율 (월간 한도)</span>
-                    <span style={{ fontWeight: "700" }}>{openaiUsagePctVal.toFixed(2)}%</span>
+                    <span style={{ fontWeight: "700" }}>{openaiUsagePctVal.toFixed(0)}%</span>
                   </div>
                   <div style={{ height: "6px", background: "rgba(255,255,255,0.03)", borderRadius: "3px", overflow: "hidden", position: "relative" }}>
                     <div style={{ height: "100%", width: `${openaiUsagePctVal}%`, background: "linear-gradient(90deg, var(--neon-purple), #9b51e0)", borderRadius: "3px", transition: "width 0.5s ease-out" }} />
@@ -753,7 +753,7 @@ function App() {
                   <h3 style={{ fontSize: "1.1rem", fontWeight: "700", margin: 0, color: "var(--neon-green)" }}>Antigravity</h3>
                   <span style={{ fontSize: "0.8rem", fontWeight: "600", color: "hsl(215, 20%, 65%)" }}>
                     잔여: {tokenDisplayMode === "percentage"
-                      ? `${(100 - antigravityUsagePctVal).toFixed(2)}%`
+                      ? `${(100 - antigravityUsagePctVal).toFixed(0)}%`
                       : `${antigravityRemainingLabel}`
                     }
                   </span>
@@ -763,7 +763,7 @@ function App() {
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem", marginTop: "0.5rem" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "hsl(215, 20%, 75%)", fontWeight: "600" }}>
                     <span>일간 소진율 (24시간 한도)</span>
-                    <span style={{ fontWeight: "700" }}>{antigravityUsagePctVal.toFixed(2)}%</span>
+                    <span style={{ fontWeight: "700" }}>{antigravityUsagePctVal.toFixed(0)}%</span>
                   </div>
                   <div style={{ height: "6px", background: "rgba(255,255,255,0.03)", borderRadius: "3px", overflow: "hidden", position: "relative" }}>
                     <div style={{ height: "100%", width: `${antigravityUsagePctVal}%`, background: "linear-gradient(90deg, var(--neon-green), #00e676)", borderRadius: "3px", transition: "width 0.5s ease-out" }} />
