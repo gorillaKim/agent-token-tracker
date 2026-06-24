@@ -1389,14 +1389,17 @@ function App() {
 function TrayPopoverView() {
   const [summaries, setSummaries] = useState<AgentSummary[]>([]);
   const [anomalies, setAnomalies] = useState<LoopDetectionResult[]>([]);
+  const [quotas, setQuotas] = useState<PlanQuotaInfo[]>([]);
   const [loading, setLoading] = useState(true);
 
   const loadData = async () => {
     try {
       const sums = await invoke<AgentSummary[]>("get_agent_summaries");
       const anoms = await invoke<LoopDetectionResult[]>("get_loop_signals");
+      const qts = await invoke<PlanQuotaInfo[]>("get_subscription_quota");
       setSummaries(sums);
       setAnomalies(anoms);
+      setQuotas(qts);
     } catch (e) {
       console.error("데이터 로드 실패:", e);
     } finally {
@@ -1416,6 +1419,16 @@ function TrayPopoverView() {
 
   const totalCost = summaries.reduce((acc, curr) => acc + curr.total_cost_usd, 0);
   const totalAnomalies = anomalies.length;
+
+  const formatTokens = (val: number): string => {
+    if (val >= 1_000_000) {
+      return `${(val / 1_000_000).toFixed(1)}M`;
+    }
+    if (val >= 1_000) {
+      return `${(val / 1_000).toFixed(1)}K`;
+    }
+    return val.toString();
+  };
 
   const handleBannerClick = async () => {
     if (anomalies.length > 0) {
@@ -1455,21 +1468,39 @@ function TrayPopoverView() {
             로드 중...
           </div>
         ) : (
-          summaries.map((sum) => (
-            <div key={sum.agent_type} className="tray-popover-row">
-              <div>
-                <span className="tray-popover-agent-name">
-                  {sum.agent_type === "claude_code" ? "Claude Code" : sum.agent_type === "codex" ? "Codex" : "Antigravity"}
-                </span>
-                <div style={{ fontSize: '0.7rem', color: 'hsl(215, 20%, 50%)', marginTop: '0.1rem' }}>
-                  세션 {sum.session_count}개 | 토큰 {sum.total_input_tokens + sum.total_output_tokens}
+          summaries.map((sum) => {
+            let providerKey = "antigravity";
+            if (sum.agent_type === "claude_code") providerKey = "anthropic";
+            else if (sum.agent_type === "codex") providerKey = "openai";
+
+            const quota = quotas.find(q => q.provider === providerKey);
+            let remainingText = "";
+            if (quota) {
+              if (quota.quota_tokens > 900_000_000_000_000) { // u64::MAX / 2
+                remainingText = "무제한";
+              } else {
+                const pct = Math.max(0, 100 - Math.round(quota.usage_pct));
+                remainingText = `잔여 ${pct}% (${formatTokens(quota.remaining_tokens)})`;
+              }
+            }
+
+            return (
+              <div key={sum.agent_type} className="tray-popover-row">
+                <div>
+                  <span className="tray-popover-agent-name">
+                    {sum.agent_type === "claude_code" ? "Claude Code" : sum.agent_type === "codex" ? "Codex" : "Antigravity"}
+                  </span>
+                  <div style={{ fontSize: '0.7rem', color: 'hsl(215, 20%, 50%)', marginTop: '0.1rem' }}>
+                    세션 {sum.session_count}개 | 토큰 {formatTokens(sum.total_input_tokens + sum.total_output_tokens)}
+                    {remainingText && ` | ${remainingText}`}
+                  </div>
                 </div>
+                <span className="tray-popover-agent-cost">
+                  ${sum.total_cost_usd.toFixed(2)}
+                </span>
               </div>
-              <span className="tray-popover-agent-cost">
-                ${sum.total_cost_usd.toFixed(2)}
-              </span>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
 
