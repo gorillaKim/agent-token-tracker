@@ -754,6 +754,34 @@ fn get_monthly_usage_openai() -> Result<u64, String> {
     Ok(used)
 }
 
+/// 오늘(24시간) OpenAI Codex 토큰 사용량 조회
+fn get_today_usage_openai() -> Result<u64, String> {
+    let conn = get_db_conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(SUM(total_input_tokens + total_output_tokens), 0)
+         FROM sessions
+         WHERE agent_type = 'codex'
+           AND started_at >= datetime('now', '-24 hours')"
+    ).map_err(|e| e.to_string())?;
+    let used: u64 = stmt.query_row([], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    Ok(used)
+}
+
+/// 최근 7일(주간) Antigravity 토큰 사용량 조회
+fn get_weekly_usage_antigravity() -> Result<u64, String> {
+    let conn = get_db_conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(SUM(total_input_tokens + total_output_tokens), 0)
+         FROM sessions
+         WHERE agent_type = 'antigravity'
+           AND started_at >= datetime('now', '-7 days')"
+    ).map_err(|e| e.to_string())?;
+    let used: u64 = stmt.query_row([], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    Ok(used)
+}
+
 /// 가장 최근 세션의 시작 시각 기준 5시간 윈도우 리셋 예상 시각 계산
 fn calc_window_reset_at() -> Result<Option<String>, String> {
     let conn = get_db_conn()?;
@@ -1136,26 +1164,35 @@ async fn get_subscription_quota(app_handle: AppHandle) -> Result<Vec<PlanQuotaIn
         println!("[Quota] 유효한 OpenAI API 키를 발견하지 못했습니다. 로컬 DB 집계를 사용합니다.");
     }
 
+    let openai_today_used = get_today_usage_openai().unwrap_or(0);
+    let openai_today_pct = if settings.token_limit_codex == 0 {
+        0.0
+    } else {
+        (openai_today_used as f64 / settings.token_limit_codex as f64 * 100.0).min(100.0)
+    };
+    let openai_today_remaining = settings.token_limit_codex.saturating_sub(openai_today_used);
+
     let openai_remaining = openai_quota.saturating_sub(openai_used);
     let openai_pct = if openai_quota == 0 {
         0.0
     } else {
         (openai_used as f64 / openai_quota as f64 * 100.0).min(100.0)
     };
+
     result.push(PlanQuotaInfo {
         provider: "openai".to_string(),
         plan_key: settings.openai_plan.clone(),
         plan_label: openai_label.to_string(),
-        quota_tokens: openai_quota,
-        used_tokens: openai_used,
-        remaining_tokens: openai_remaining,
-        usage_pct: openai_pct,
+        quota_tokens: settings.token_limit_codex,
+        used_tokens: openai_today_used,
+        remaining_tokens: openai_today_remaining,
+        usage_pct: openai_today_pct,
         window_reset_at: None,
-        window_hours: 720, // ~1달
-        weekly_quota_tokens: None,
-        weekly_used_tokens: None,
-        weekly_remaining_tokens: None,
-        weekly_usage_pct: None,
+        window_hours: 24, 
+        weekly_quota_tokens: Some(openai_quota),
+        weekly_used_tokens: Some(openai_used),
+        weekly_remaining_tokens: Some(openai_remaining),
+        weekly_usage_pct: Some(openai_pct),
         weekly_reset_at: None,
     });
 
@@ -1187,6 +1224,15 @@ async fn get_subscription_quota(app_handle: AppHandle) -> Result<Vec<PlanQuotaIn
         }
     };
 
+    let agy_weekly_used = get_weekly_usage_antigravity().unwrap_or(0);
+    let agy_weekly_quota = agy_quota * 7;
+    let agy_weekly_pct = if agy_weekly_quota == 0 {
+        0.0
+    } else {
+        (agy_weekly_used as f64 / agy_weekly_quota as f64 * 100.0).min(100.0)
+    };
+    let agy_weekly_remaining = agy_weekly_quota.saturating_sub(agy_weekly_used);
+
     result.push(PlanQuotaInfo {
         provider: "antigravity".to_string(),
         plan_key: "local".to_string(),
@@ -1197,10 +1243,10 @@ async fn get_subscription_quota(app_handle: AppHandle) -> Result<Vec<PlanQuotaIn
         usage_pct: agy_pct,
         window_reset_at: agy_reset_at,
         window_hours: 24,
-        weekly_quota_tokens: None,
-        weekly_used_tokens: None,
-        weekly_remaining_tokens: None,
-        weekly_usage_pct: None,
+        weekly_quota_tokens: Some(agy_weekly_quota),
+        weekly_used_tokens: Some(agy_weekly_used),
+        weekly_remaining_tokens: Some(agy_weekly_remaining),
+        weekly_usage_pct: Some(agy_weekly_pct),
         weekly_reset_at: None,
     });
 

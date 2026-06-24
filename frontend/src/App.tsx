@@ -1485,8 +1485,6 @@ function TrayPopoverView() {
 
             const quota = quotas.find(q => q.provider === providerKey);
             
-            let progressPct = 0;
-            let valLabel = "-";
             let barGradient = "linear-gradient(90deg, var(--neon-blue), var(--neon-purple))";
             let remainingColor = "var(--neon-blue)";
 
@@ -1501,57 +1499,61 @@ function TrayPopoverView() {
               remainingColor = "var(--neon-green)";
             }
 
-            if (quota) {
-              // 1. 소진율 (프로그레스 바 용도)
-              if (sum.agent_type === "claude_code") {
-                progressPct = quota.weekly_usage_pct ? Math.min(100, Math.round(quota.weekly_usage_pct)) : 0;
-              } else {
-                progressPct = Math.min(100, Math.round(quota.usage_pct));
-              }
-
-              // 2. 설정에 따른 잔여 표기 계산
-              const isPercentage = tokenDisplayMode === "percentage";
-
-              if (sum.agent_type === "claude_code") {
-                const weeklyQuota = quota.weekly_quota_tokens || 0;
-                const weeklyRemaining = quota.weekly_remaining_tokens || 0;
-                if (weeklyQuota > 900_000_000_000_000) {
-                  valLabel = "잔여 무제한";
-                } else {
-                  valLabel = isPercentage 
-                    ? `잔여 ${100 - progressPct}%` 
-                    : `잔여 ${formatTokens(weeklyRemaining)}`;
-                }
-              } else {
-                if (quota.quota_tokens > 900_000_000_000_000) {
-                  valLabel = "잔여 무제한";
-                } else {
-                  valLabel = isPercentage 
-                    ? `잔여 ${100 - progressPct}%` 
-                    : `잔여 ${formatTokens(quota.remaining_tokens)}`;
-                }
-              }
-            }
+            const isPercentage = tokenDisplayMode === "percentage";
 
             return (
-              <div key={sum.agent_type} className="tray-popover-row" style={{ display: "flex", flexDirection: "column", gap: "0.4rem", padding: "0.6rem 0", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: "0.4rem" }}>
-                    <span className="tray-popover-agent-name" style={{ fontWeight: 700, fontSize: "0.85rem", color: "var(--foreground)" }}>
-                      {sum.agent_type === "claude_code" ? "Claude Code" : sum.agent_type === "codex" ? "Codex" : "Antigravity"}
-                    </span>
-                    <span style={{ fontSize: "0.65rem", color: "hsl(215, 20%, 50%)" }}>
-                      ({sum.session_count} Sessions)
-                    </span>
-                  </div>
-                  <span style={{ fontSize: "0.75rem", fontWeight: "700", color: remainingColor }}>
-                    {valLabel}
+              <div key={sum.agent_type} className="tray-popover-row" style={{ display: "flex", flexDirection: "column", gap: "0.5rem", padding: "0.6rem 0", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                
+                {/* 헤더: 에이전트 이름 및 세션 개수 */}
+                <div style={{ display: "flex", alignItems: "baseline", gap: "0.4rem" }}>
+                  <span className="tray-popover-agent-name" style={{ fontWeight: 700, fontSize: "0.85rem", color: "var(--foreground)" }}>
+                    {sum.agent_type === "claude_code" ? "Claude Code" : sum.agent_type === "codex" ? "Codex" : "Antigravity"}
+                  </span>
+                  <span style={{ fontSize: "0.65rem", color: "hsl(215, 20%, 50%)" }}>
+                    ({sum.session_count} Sessions)
                   </span>
                 </div>
-                
-                <div style={{ height: "4px", background: "rgba(255,255,255,0.03)", borderRadius: "2px", overflow: "hidden", position: "relative" }}>
-                  <div style={{ height: "100%", width: `${progressPct}%`, background: barGradient, borderRadius: "2px", transition: "width 0.5s ease-out" }} />
-                </div>
+
+                {/* 1. 세션별 (또는 단기/일간) 한도 */}
+                {quota && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.7rem", color: "hsl(215, 20%, 65%)" }}>
+                      <span>{sum.agent_type === "claude_code" ? "세션 (5시간 롤링)" : "세션 (일간 한도)"}</span>
+                      <span style={{ fontWeight: "700", color: remainingColor }}>
+                        {quota.quota_tokens > 900_000_000_000_000 
+                          ? "무제한" 
+                          : isPercentage 
+                            ? `소진 ${Math.round(quota.usage_pct)}% (잔여 ${Math.max(0, 100 - Math.round(quota.usage_pct))}%)`
+                            : `잔여 ${formatTokens(quota.remaining_tokens)}`
+                        }
+                      </span>
+                    </div>
+                    <div style={{ height: "4px", background: "rgba(255,255,255,0.03)", borderRadius: "2px", overflow: "hidden", position: "relative" }}>
+                      <div style={{ height: "100%", width: `${Math.min(100, Math.round(quota.usage_pct))}%`, background: barGradient, borderRadius: "2px", transition: "width 0.5s ease-out" }} />
+                    </div>
+                  </div>
+                )}
+
+                {/* 2. 주간별 (또는 장기/월간/누적) 한도 */}
+                {quota && quota.weekly_quota_tokens !== undefined && quota.weekly_quota_tokens !== null && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem", marginTop: "0.1rem" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.7rem", color: "hsl(215, 20%, 65%)" }}>
+                      <span>{sum.agent_type === "claude_code" ? "주간 (모든 모델)" : sum.agent_type === "codex" ? "주간 (월간 한도)" : "주간 (7일 한도)"}</span>
+                      <span style={{ fontWeight: "700", color: remainingColor }}>
+                        {quota.weekly_quota_tokens > 900_000_000_000_000
+                          ? "무제한" 
+                          : isPercentage 
+                            ? `소진 ${Math.round(quota.weekly_usage_pct || 0)}% (잔여 ${Math.max(0, 100 - Math.round(quota.weekly_usage_pct || 0))}%)`
+                            : `잔여 ${formatTokens(quota.weekly_remaining_tokens || 0)}`
+                        }
+                      </span>
+                    </div>
+                    <div style={{ height: "4px", background: "rgba(255,255,255,0.03)", borderRadius: "2px", overflow: "hidden", position: "relative" }}>
+                      <div style={{ height: "100%", width: `${Math.min(100, Math.round(quota.weekly_usage_pct || 0))}%`, background: barGradient, borderRadius: "2px", transition: "width 0.5s ease-out" }} />
+                    </div>
+                  </div>
+                )}
+
               </div>
             );
           })
