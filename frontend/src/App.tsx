@@ -86,6 +86,68 @@ interface SessionDetails {
   tool_calls: ToolCall[];
 }
 
+interface PlanQuotaInfo {
+  provider: string;
+  plan_key: string;
+  plan_label: string;
+  quota_tokens: number;
+  used_tokens: number;
+  remaining_tokens: number;
+  usage_pct: number;
+  window_reset_at: string | null;
+  window_hours: number;
+
+  weekly_quota_tokens?: number;
+  weekly_used_tokens?: number;
+  weekly_remaining_tokens?: number;
+  weekly_usage_pct?: number;
+  weekly_reset_at?: string | null;
+}
+
+interface DetectedCredential {
+  provider: string;
+  token_type: string;
+  value: string;
+  raw_value: string;
+  source: string;
+  description: string;
+}
+
+interface TurnTokenUsage {
+  turn_index: number;
+  role: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cost_usd: number;
+  created_at: string;
+}
+
+interface ToolCostRank {
+  tool_name: string;
+  call_count: number;
+  success_count: number;
+  estimated_tokens: number;
+  total_cost_usd: number;
+}
+
+interface SessionAnalysis {
+  session_id: string;
+  agent_type: string;
+  model_id?: string;
+  started_at: string;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cache_read_tokens: number;
+  total_cost_usd: number;
+  cache_hit_rate: number;
+  cache_saved_cost: number;
+  turns: TurnTokenUsage[];
+  tool_cost_rank: ToolCostRank[];
+  anomaly_signals: LoopSignal[];
+  is_anomaly: boolean;
+}
+
 // ────────────────────────────────────────────────────────────
 // 이슈 #791: SVG 기반 루프 오작동 순환 디렉션 뷰어
 // ────────────────────────────────────────────────────────────
@@ -183,7 +245,8 @@ function App() {
     return <TrayPopoverView />;
   }
 
-  const [activeTab, setActiveTab] = useState<"dashboard" | "settings">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "analysis" | "settings">("dashboard");
+  const [tokenDisplayMode, setTokenDisplayMode] = useState<string>("tokens");
   const [sessions, setSessions] = useState<Session[]>([]);
   const [summaries, setSummaries] = useState<AgentSummary[]>([]);
   const [anomalies, setAnomalies] = useState<LoopDetectionResult[]>([]);
@@ -195,12 +258,18 @@ function App() {
     plugins: [],
     skills: [],
   });
-  const [tokenLimitClaude, setTokenLimitClaude] = useState<number>(50000000);
-  const [tokenLimitCodex, setTokenLimitCodex] = useState<number>(50000000);
   const [chartViewMode, setChartViewMode] = useState<"daily" | "hourly">("daily");
   const [error, setError] = useState<string | null>(null);
   const [syncLoading, setSyncLoading] = useState(false);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
+
+  // 구독 한도 정보 상태
+  const [quotaInfo, setQuotaInfo] = useState<PlanQuotaInfo[]>([]);
+
+  // 세션 분석 전용 상태
+  const [analysisSessionId, setAnalysisSessionId] = useState<string | null>(null);
+  const [analysisData, setAnalysisData] = useState<SessionAnalysis | null>(null);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
 
   // Selected session and drawer details state
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -246,6 +315,20 @@ function App() {
     }
   };
 
+  const handleSelectAnalysisSession = async (sessId: string) => {
+    setAnalysisSessionId(sessId);
+    setAnalysisLoading(true);
+    setAnalysisData(null);
+    try {
+      const data = await invoke<SessionAnalysis>("get_session_analysis", { sessionId: sessId });
+      setAnalysisData(data);
+    } catch (err: any) {
+      console.error("세션 분석 조회 실패:", err);
+    } finally {
+      setAnalysisLoading(false);
+    }
+  };
+
   async function loadData() {
     try {
       const sessList = await invoke<Session[]>("get_active_sessions");
@@ -269,9 +352,13 @@ function App() {
       const breakdown = await invoke<TokenUsageBreakdown>("get_token_usage_breakdown");
       setTokenBreakdown(breakdown);
 
-      const s = await invoke<{ log_dir: string, token_limit_claude: number, token_limit_codex: number }>("load_settings");
-      setTokenLimitClaude(s.token_limit_claude);
-      setTokenLimitCodex(s.token_limit_codex);
+      // 구독 한도 정보 로드
+      const quota = await invoke<PlanQuotaInfo[]>("get_subscription_quota");
+      setQuotaInfo(quota);
+
+      // 토큰 표시 모드 로드
+      const settings = await invoke<{ token_display_mode: string }>("load_settings");
+      setTokenDisplayMode(settings.token_display_mode || "tokens");
     } catch (err: any) {
       setError(err.toString());
     }
@@ -279,6 +366,12 @@ function App() {
 
   useEffect(() => {
     loadData();
+
+    // 60초마다 주기적으로 데이터 갱신 (실시간 쿼터 및 타이머 최신화)
+    const intervalId = setInterval(() => {
+      console.log("[Polling] 실시간 쿼터 및 데이터를 갱신합니다.");
+      loadData();
+    }, 60000);
 
     // db-updated 이벤트 리스닝 연동
     const unlistenPromise = listen("db-updated", () => {
@@ -290,10 +383,12 @@ function App() {
     const unlistenNavigate = listen<string>("navigate-to-session", (event) => {
       const sessionId = event.payload;
       console.log("[Router] 특정 세션 강제 라우팅 수신:", sessionId);
-      handleSelectSession(sessionId);
+      setActiveTab("analysis");
+      handleSelectAnalysisSession(sessionId);
     });
 
     return () => {
+      clearInterval(intervalId);
       unlistenPromise.then((f) => f());
       unlistenNavigate.then((f) => f());
     };
@@ -421,13 +516,9 @@ function App() {
 
   const claudeSummary = summaries.find(s => s.agent_type === "claude_code");
   const claudeTokens = claudeSummary ? (claudeSummary.total_input_tokens + claudeSummary.total_output_tokens) : 0;
-  const claudeRemaining = Math.max(0, tokenLimitClaude - claudeTokens);
-  const claudeUsagePct = Math.min(100, (claudeTokens / Math.max(1, tokenLimitClaude)) * 100);
 
   const codexSummary = summaries.find(s => s.agent_type === "codex");
   const codexTokens = codexSummary ? (codexSummary.total_input_tokens + codexSummary.total_output_tokens) : 0;
-  const codexRemaining = Math.max(0, tokenLimitCodex - codexTokens);
-  const codexUsagePct = Math.min(100, (codexTokens / Math.max(1, tokenLimitCodex)) * 100);
 
   const maxModelTokens = Math.max(...tokenBreakdown.models.map(m => m.total_tokens), 1);
   const maxPluginTokens = Math.max(...tokenBreakdown.plugins.map(p => p.total_tokens), 1);
@@ -464,6 +555,70 @@ function App() {
     costWasteVal = calculatedWaste > 0 ? calculatedWaste : (selectedAnomaly ? 14.30 : 0);
   }
 
+  // 롤링 초기화 남은 시간 계산 헬퍼 함수 (ccusage 스타일)
+  const formatResetTime = (resetAtStr: string | null | undefined): string => {
+    if (!resetAtStr) return "";
+    const diffMs = new Date(resetAtStr).getTime() - Date.now();
+    if (diffMs <= 0) return "곧 초기화됨";
+    
+    const diffMins = Math.ceil(diffMs / 60000);
+    const days = Math.floor(diffMins / 1440);
+    const hrs = Math.floor((diffMins % 1440) / 60);
+    const mins = diffMins % 60;
+    
+    let result = "";
+    if (days > 0) result += `${days}d `;
+    if (hrs > 0 || days > 0) result += `${hrs}h `;
+    result += `${mins}m 후 초기화`;
+    
+    return result;
+  };
+
+  // 구독 플랜별 로컬 한도 연동 파싱
+  const claudeQuota = quotaInfo.find(q => q.provider === "anthropic");
+  const openaiQuota = quotaInfo.find(q => q.provider === "openai");
+  const antigravityQuota = quotaInfo.find(q => q.provider === "antigravity");
+
+  const claudeLabel = claudeQuota ? claudeQuota.plan_label : "Claude Pro (기본값)";
+  const claudeLimitLabel = claudeQuota ? (claudeQuota.plan_key === "api" ? "API (Rate Limit)" : claudeQuota.quota_tokens.toLocaleString()) : "44,000,000";
+  const claudeRemainingLabel = claudeQuota ? (claudeQuota.plan_key === "api" ? "제한없음" : claudeQuota.remaining_tokens.toLocaleString()) : Math.max(0, 44_000_000 - claudeTokens).toLocaleString();
+  const claudeUsagePctVal = claudeQuota ? claudeQuota.usage_pct : Math.min(100, (claudeTokens / 44_000_000) * 100);
+
+  // 주간 모든 모델 한도
+  const claudeWeeklyUsagePctVal = claudeQuota?.weekly_usage_pct ?? 0;
+  const claudeWeeklyRemainingLabel = claudeQuota?.weekly_remaining_tokens?.toLocaleString() ?? "440,000,000";
+  const claudeWeeklyLimitLabel = claudeQuota?.weekly_quota_tokens?.toLocaleString() ?? "440,000,000";
+
+  // Claude 5시간 및 주간 초기화 타이머
+  const claudeResetStr = formatResetTime(claudeQuota?.window_reset_at);
+  const claudeWeeklyResetStr = formatResetTime(claudeQuota?.weekly_reset_at);
+
+  const openaiLabel = openaiQuota ? openaiQuota.plan_label : "OpenAI Tier 1 (기본값)";
+  const openaiLimitLabel = openaiQuota ? openaiQuota.quota_tokens.toLocaleString() : "100,000,000";
+  const openaiRemainingLabel = openaiQuota ? openaiQuota.remaining_tokens.toLocaleString() : Math.max(0, 100_000_000 - codexTokens).toLocaleString();
+  const openaiUsagePctVal = openaiQuota ? openaiQuota.usage_pct : Math.min(100, (codexTokens / 100_000_000) * 100);
+
+  // OpenAI 월간 초기화 남은 일수 계산
+  let openaiResetStr = "";
+  if (openaiQuota?.window_reset_at) {
+    openaiResetStr = formatResetTime(openaiQuota.window_reset_at);
+  } else {
+    const now = new Date();
+    const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const diffMsOpenAI = nextMonth.getTime() - now.getTime();
+    const diffDays = Math.floor(diffMsOpenAI / 86400000);
+    const diffHrs = Math.floor((diffMsOpenAI % 86400000) / 3600000);
+    if (diffDays > 0) {
+      openaiResetStr = `${diffDays}d ${diffHrs}h 후 초기화`;
+    }
+  }
+
+  // Antigravity 로컬 한도
+  const antigravityLimitLabel = antigravityQuota ? antigravityQuota.quota_tokens.toLocaleString() : "50,000,000";
+  const antigravityRemainingLabel = antigravityQuota ? antigravityQuota.remaining_tokens.toLocaleString() : "50,000,000";
+  const antigravityUsagePctVal = antigravityQuota ? antigravityQuota.usage_pct : 0;
+  const antigravityResetStr = formatResetTime(antigravityQuota?.window_reset_at);
+
   return (
     <div className="dashboard-container">
       {/* Sidebar Navigation */}
@@ -475,8 +630,8 @@ function App() {
           <li className={`menu-item ${activeTab === "dashboard" ? "active" : ""}`} onClick={() => setActiveTab("dashboard")}>
             <span>📊</span> 대시보드
           </li>
-          <li className="menu-item">
-            <span>🔍</span> 실시간 스캔
+          <li className={`menu-item ${activeTab === "analysis" ? "active" : ""}`} onClick={() => setActiveTab("analysis")}>
+            <span>🔍</span> 세션 상세 분석
           </li>
           <li className={`menu-item ${activeTab === "settings" ? "active" : ""}`} onClick={() => setActiveTab("settings")}>
             <span>⚙️</span> 환경 설정
@@ -491,93 +646,134 @@ function App() {
       <main className="main-content">
         {activeTab === "dashboard" ? (
           <>
-            {/* Top Status Bar */}
-            <header className="statusbar" style={{ display: "flex", flexDirection: "column", alignItems: "stretch", gap: "1rem", height: "auto", padding: "1.25rem 1.5rem" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
-                <div className="statusbar-metrics" style={{ gap: "2rem", display: "flex" }}>
-                  <div className="metric-item">
-                    <span className="metric-label">총 누적 세션</span>
-                    <span className="metric-value">{totalSessionsOverall} Sessions</span>
-                  </div>
-                  <div className="metric-item">
-                    <span className="metric-label">총 사용 토큰</span>
-                    <span className="metric-value" style={{ color: "var(--neon-blue)" }}>
-                      {totalTokensOverall.toLocaleString()} Tokens
-                    </span>
-                  </div>
-                  <div className="metric-item">
-                    <span className="metric-label">Claude 잔여 예산</span>
-                    <span className="metric-value" style={{ color: claudeRemaining > 1_000_000 ? "var(--neon-blue)" : "var(--neon-red)" }}>
-                      {claudeRemaining.toLocaleString()} / {tokenLimitClaude.toLocaleString()}
-                    </span>
-                  </div>
-                  <div className="metric-item">
-                    <span className="metric-label">Codex 잔여 예산</span>
-                    <span className="metric-value" style={{ color: codexRemaining > 1_000_000 ? "var(--neon-blue)" : "var(--neon-red)" }}>
-                      {codexRemaining.toLocaleString()} / {tokenLimitCodex.toLocaleString()}
-                    </span>
-                  </div>
+            {/* Top Status Bar (요약 바) */}
+            <header className="statusbar" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", height: "auto", padding: "1rem 1.5rem" }}>
+              <div className="statusbar-metrics" style={{ gap: "2rem", display: "flex", alignItems: "center" }}>
+                <div className="metric-item" style={{ whiteSpace: "nowrap" }}>
+                  <span className="metric-label">총 누적 세션</span>
+                  <span className="metric-value">{totalSessionsOverall} Sessions</span>
                 </div>
-                
-                <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
-                  <button
-                    onClick={handleSyncSessions}
-                    disabled={syncLoading}
-                    className="btn-sync"
-                  >
-                    <span>🔄</span> {syncLoading ? "동기화 중..." : "수동 증분 동기화"}
-                  </button>
-                  <div className="pulse-badge">
-                    <span className="pulse-dot"></span>
-                    <span>로컬 감시 작동 중</span>
-                  </div>
+                <div className="metric-item" style={{ whiteSpace: "nowrap" }}>
+                  <span className="metric-label">총 사용 토큰</span>
+                  <span className="metric-value" style={{ color: "var(--neon-blue)" }}>
+                    {totalTokensOverall.toLocaleString()} Tokens
+                  </span>
                 </div>
               </div>
-
-              {/* 토큰 사용량 게이지 바 (Claude) */}
-              <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem", marginTop: "0.25rem" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "hsl(215, 20%, 65%)", fontWeight: "600" }}>
-                  <span>Claude Code 예산 소진율 (Limit Usage)</span>
-                  <span>{claudeUsagePct.toFixed(2)}% ({claudeTokens.toLocaleString()} / {tokenLimitClaude.toLocaleString()})</span>
-                </div>
-                <div style={{ height: "8px", background: "rgba(255,255,255,0.05)", borderRadius: "4px", overflow: "hidden", border: "1px solid rgba(255,255,255,0.08)", position: "relative" }}>
-                  <div 
-                    style={{ 
-                      height: "100%", 
-                      width: `${claudeUsagePct}%`, 
-                      background: claudeUsagePct > 90 
-                        ? "linear-gradient(90deg, var(--neon-red), #ff6b6b)"
-                        : "linear-gradient(90deg, var(--neon-blue), var(--neon-purple))",
-                      borderRadius: "4px",
-                      transition: "width 0.5s ease-out",
-                      boxShadow: "0 0 8px rgba(0, 242, 254, 0.4)"
-                    }} 
-                  />
-                </div>
-              </div>
-
-              {/* 토큰 사용량 게이지 바 (Codex) */}
-              <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem", marginTop: "0.5rem" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "hsl(215, 20%, 65%)", fontWeight: "600" }}>
-                  <span>OpenAI Codex 예산 소진율 (Limit Usage)</span>
-                  <span>{codexUsagePct.toFixed(2)}% ({codexTokens.toLocaleString()} / {tokenLimitCodex.toLocaleString()})</span>
-                </div>
-                <div style={{ height: "8px", background: "rgba(255,255,255,0.05)", borderRadius: "4px", overflow: "hidden", border: "1px solid rgba(255,255,255,0.08)", position: "relative" }}>
-                  <div 
-                    style={{ 
-                      height: "100%", 
-                      width: `${codexUsagePct}%`, 
-                      background: codexUsagePct > 90 
-                        ? "linear-gradient(90deg, var(--neon-red), #ff6b6b)"
-                        : "linear-gradient(90deg, var(--neon-purple), #9b51e0)",
-                      borderRadius: "4px",
-                      transition: "width 0.5s ease-out",
-                      boxShadow: "0 0 8px rgba(155, 81, 224, 0.4)"
-                    }} 
-                  />
+              
+              <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
+                <button
+                  onClick={handleSyncSessions}
+                  disabled={syncLoading}
+                  className="btn-sync"
+                >
+                  <span>🔄</span> {syncLoading ? "동기화 중..." : "수동 증분 동기화"}
+                </button>
+                <div className="pulse-badge">
+                  <span className="pulse-dot"></span>
+                  <span>로컬 감시 작동 중</span>
                 </div>
               </div>
             </header>
+
+            {/* 3대 에이전트 실시간 쿼터 카드 그리드 */}
+            <section style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "1.5rem", marginTop: "1.5rem", marginBottom: "1.5rem" }}>
+              
+              {/* 1. Claude Card */}
+              <div className="agent-quota-card glass" style={{ padding: "1.5rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <h3 style={{ fontSize: "1.1rem", fontWeight: "700", margin: 0, color: "var(--neon-blue)" }}>Claude Code</h3>
+                  <span style={{ fontSize: "0.8rem", fontWeight: "600", color: "hsl(215, 20%, 65%)" }}>
+                    잔여: {tokenDisplayMode === "percentage"
+                      ? `${(100 - claudeUsagePctVal).toFixed(2)}%`
+                      : `${claudeRemainingLabel}`
+                    }
+                  </span>
+                </div>
+
+                {/* 5시간 롤링 */}
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "hsl(215, 20%, 75%)", fontWeight: "600" }}>
+                    <span>세션 사용량 (5시간 롤링)</span>
+                    <span style={{ fontWeight: "700" }}>{claudeUsagePctVal.toFixed(2)}%</span>
+                  </div>
+                  <div style={{ height: "6px", background: "rgba(255,255,255,0.03)", borderRadius: "3px", overflow: "hidden", position: "relative" }}>
+                    <div style={{ height: "100%", width: `${claudeUsagePctVal}%`, background: "linear-gradient(90deg, var(--neon-blue), var(--neon-purple))", borderRadius: "3px", transition: "width 0.5s ease-out" }} />
+                  </div>
+                  <div style={{ fontSize: "0.7rem", color: "hsl(215, 20%, 50%)", textAlign: "right" }}>
+                    {claudeResetStr || "롤링 대기 중"}
+                  </div>
+                </div>
+
+                {/* 주간 모든 모델 */}
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "hsl(215, 20%, 75%)", fontWeight: "600" }}>
+                    <span>모든 모델 (주간)</span>
+                    <span style={{ fontWeight: "700" }}>{claudeWeeklyUsagePctVal.toFixed(2)}%</span>
+                  </div>
+                  <div style={{ height: "6px", background: "rgba(255,255,255,0.03)", borderRadius: "3px", overflow: "hidden", position: "relative" }}>
+                    <div style={{ height: "100%", width: `${claudeWeeklyUsagePctVal}%`, background: "linear-gradient(90deg, var(--neon-purple), #ff007f)", borderRadius: "3px", transition: "width 0.5s ease-out" }} />
+                  </div>
+                  <div style={{ fontSize: "0.7rem", color: "hsl(215, 20%, 50%)", textAlign: "right" }}>
+                    {claudeWeeklyResetStr || "롤링 대기 중"}
+                  </div>
+                </div>
+              </div>
+
+              {/* 2. Codex Card */}
+              <div className="agent-quota-card glass" style={{ padding: "1.5rem", display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <h3 style={{ fontSize: "1.1rem", fontWeight: "700", margin: 0, color: "var(--neon-purple)" }}>Codex (OpenAI)</h3>
+                  <span style={{ fontSize: "0.8rem", fontWeight: "600", color: "hsl(215, 20%, 65%)" }}>
+                    잔여: {tokenDisplayMode === "percentage"
+                      ? `${(100 - openaiUsagePctVal).toFixed(2)}%`
+                      : `${openaiRemainingLabel}`
+                    }
+                  </span>
+                </div>
+
+                {/* 월간 한도 */}
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem", marginTop: "0.5rem" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "hsl(215, 20%, 75%)", fontWeight: "600" }}>
+                    <span>사용량 소진율 (월간 한도)</span>
+                    <span style={{ fontWeight: "700" }}>{openaiUsagePctVal.toFixed(2)}%</span>
+                  </div>
+                  <div style={{ height: "6px", background: "rgba(255,255,255,0.03)", borderRadius: "3px", overflow: "hidden", position: "relative" }}>
+                    <div style={{ height: "100%", width: `${openaiUsagePctVal}%`, background: "linear-gradient(90deg, var(--neon-purple), #9b51e0)", borderRadius: "3px", transition: "width 0.5s ease-out" }} />
+                  </div>
+                  <div style={{ fontSize: "0.7rem", color: "hsl(215, 20%, 50%)", textAlign: "right", marginTop: "1.25rem" }}>
+                    {openaiResetStr}
+                  </div>
+                </div>
+              </div>
+
+              {/* 3. Antigravity Card */}
+              <div className="agent-quota-card glass" style={{ padding: "1.5rem", display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <h3 style={{ fontSize: "1.1rem", fontWeight: "700", margin: 0, color: "var(--neon-green)" }}>Antigravity</h3>
+                  <span style={{ fontSize: "0.8rem", fontWeight: "600", color: "hsl(215, 20%, 65%)" }}>
+                    잔여: {tokenDisplayMode === "percentage"
+                      ? `${(100 - antigravityUsagePctVal).toFixed(2)}%`
+                      : `${antigravityRemainingLabel}`
+                    }
+                  </span>
+                </div>
+
+                {/* 24시간 로컬 한도 */}
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem", marginTop: "0.5rem" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "hsl(215, 20%, 75%)", fontWeight: "600" }}>
+                    <span>일간 소진율 (24시간 한도)</span>
+                    <span style={{ fontWeight: "700" }}>{antigravityUsagePctVal.toFixed(2)}%</span>
+                  </div>
+                  <div style={{ height: "6px", background: "rgba(255,255,255,0.03)", borderRadius: "3px", overflow: "hidden", position: "relative" }}>
+                    <div style={{ height: "100%", width: `${antigravityUsagePctVal}%`, background: "linear-gradient(90deg, var(--neon-green), #00e676)", borderRadius: "3px", transition: "width 0.5s ease-out" }} />
+                  </div>
+                  <div style={{ fontSize: "0.7rem", color: "hsl(215, 20%, 50%)", textAlign: "right", marginTop: "1.25rem" }}>
+                    {antigravityResetStr || "대기 상태"}
+                  </div>
+                </div>
+              </div>
+            </section>
 
             {syncStatus && (
               <div 
@@ -977,8 +1173,20 @@ function App() {
               </section>
             </div>
           </>
+        ) : activeTab === "analysis" ? (
+          <SessionAnalysisView
+            sessions={sessions}
+            anomalies={anomalies}
+            analysisSessionId={analysisSessionId}
+            analysisData={analysisData}
+            analysisLoading={analysisLoading}
+            onSelectSession={handleSelectAnalysisSession}
+            onInterrupt={handleInterruptAgent}
+            interruptLoading={interruptLoading}
+            interruptMessage={interruptMessage}
+          />
         ) : (
-          <SettingsView />
+          <SettingsView onSettingsSaved={loadData} />
         )}
       </main>
 
@@ -1275,12 +1483,13 @@ function TrayPopoverView() {
   );
 }
 
-function SettingsView() {
+function SettingsView({ onSettingsSaved }: { onSettingsSaved: () => Promise<void> }) {
   const [settings, setSettings] = useState({ 
     log_dir: "", 
     token_limit: 50000000,
     token_limit_claude: 50000000,
-    token_limit_codex: 50000000
+    token_limit_codex: 50000000,
+    token_display_mode: "tokens"
   });
   const [keysStatus, setKeysStatus] = useState({ anthropic: false, openai: false });
   const [anthropicKey, setAnthropicKey] = useState("");
@@ -1296,15 +1505,77 @@ function SettingsView() {
     path: false,
   });
 
+  const [localCreds, setLocalCreds] = useState<DetectedCredential[]>([]);
+  const [scanLoading, setScanLoading] = useState(false);
+  const [applyLoading, setApplyLoading] = useState<Record<number, boolean>>({});
+
+  const handleScanCredentials = async () => {
+    setScanLoading(true);
+    try {
+      const creds = await invoke<DetectedCredential[]>("get_local_credentials");
+      setLocalCreds(creds);
+    } catch (e) {
+      console.error("로컬 자격 증명 스캔 실패:", e);
+    } finally {
+      setScanLoading(false);
+    }
+  };
+
+  const handleApplyCredential = async (cred: DetectedCredential, index: number) => {
+    console.log("[Credential] handleApplyCredential clicked - provider:", cred.provider, "token_type:", cred.token_type);
+    setApplyLoading(prev => ({ ...prev, [index]: true }));
+    try {
+      await invoke("auto_apply_credential", { 
+        provider: cred.provider, 
+        rawValue: cred.raw_value,
+        raw_value: cred.raw_value 
+      });
+      console.log("[Credential] auto_apply_credential 성공!");
+      alert(`${cred.provider === "anthropic" ? "Anthropic" : "OpenAI"} 인증 정보가 성공적으로 연동 및 저장되었습니다.`);
+      await loadData();
+      await onSettingsSaved(); // 대시보드 토큰 한도/게이지 리프레시
+    } catch (e: any) {
+      console.error("[Credential] auto_apply_credential 실패:", e);
+      alert(`자동 연동 실패: ${e.toString()}`);
+    } finally {
+      setApplyLoading(prev => ({ ...prev, [index]: false }));
+    }
+  };
+
+  const [testLoading, setTestLoading] = useState<Record<number, boolean>>({});
+
+  const handleTestCredential = async (provider: "anthropic" | "openai", index: number) => {
+    setTestLoading(prev => ({ ...prev, [index]: true }));
+    try {
+      const isValid = await invoke<boolean>("validate_stored_api_key", { provider });
+      if (isValid) {
+        alert(`연동 테스트 성공: ${provider === "anthropic" ? "Anthropic" : "OpenAI"} 연결이 활성화되어 정상 작동합니다.`);
+      } else {
+        alert(`연동 테스트 실패: ${provider === "anthropic" ? "Anthropic" : "OpenAI"} 자격 증명이 유효하지 않거나 만료되었습니다.`);
+      }
+    } catch (e: any) {
+      alert(`연동 테스트 오류: ${e.toString()}`);
+    } finally {
+      setTestLoading(prev => ({ ...prev, [index]: false }));
+    }
+  };
+
   const loadData = async () => {
     try {
       const s = await invoke<{ 
         log_dir: string, 
         token_limit: number,
         token_limit_claude: number,
-        token_limit_codex: number
+        token_limit_codex: number,
+        token_display_mode: string
       }>("load_settings");
-      setSettings(s);
+      setSettings({
+        log_dir: s.log_dir,
+        token_limit: s.token_limit,
+        token_limit_claude: s.token_limit_claude,
+        token_limit_codex: s.token_limit_codex,
+        token_display_mode: s.token_display_mode || "tokens"
+      });
       
       const k = await invoke<Record<string, boolean>>("get_api_keys_status");
       setKeysStatus({
@@ -1321,6 +1592,8 @@ function SettingsView() {
       if (s.log_dir) {
         diagnosePath(s.log_dir);
       }
+      // 로컬 자격 증명 스캔 실행
+      handleScanCredentials();
     } catch (e) {
       console.error("설정 로드 실패:", e);
     }
@@ -1404,10 +1677,12 @@ function SettingsView() {
         tokenLimit: Number(newSettings.token_limit),
         tokenLimitClaude: Number(newSettings.token_limit_claude),
         tokenLimitCodex: Number(newSettings.token_limit_codex),
-        tokenLimitAntigravity: 50000000 
+        tokenLimitAntigravity: 50000000,
+        tokenDisplayMode: newSettings.token_display_mode
       });
       alert("설정이 성공적으로 저장되었습니다.");
       loadData();
+      await onSettingsSaved();
     } catch (e: any) {
       alert(`설정 저장 실패: ${e.toString()}`);
     }
@@ -1422,6 +1697,97 @@ function SettingsView() {
         <h3 className="card-title">🔑 에이전트 플랫폼 API 인증</h3>
         <p className="card-desc">API Key는 OS의 보안 키체인(keyring) 내에 안전하게 암호화 보관되며, 설정 파일에 텍스트 형태로 노출되지 않습니다.</p>
         
+        {/* 자동 연동 패널 */}
+        <div className="auto-credential-panel" style={{
+          background: "rgba(255, 255, 255, 0.02)",
+          border: "1px dashed rgba(255, 255, 255, 0.1)",
+          borderRadius: "8px",
+          padding: "1rem",
+          marginBottom: "1.5rem"
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+            <h4 style={{ margin: 0, fontSize: "0.85rem", color: "var(--neon-blue)", fontWeight: 700 }}>⚡ 로컬 인증 정보 자동 연동</h4>
+            <button 
+              onClick={handleScanCredentials} 
+              disabled={scanLoading}
+              className="btn btn-save"
+              style={{ padding: "0.25rem 0.75rem", fontSize: "0.75rem" }}
+            >
+              {scanLoading ? "스캔 중..." : "인증 정보 새로고침"}
+            </button>
+          </div>
+          <p style={{ margin: "0 0 0.75rem 0", fontSize: "0.75rem", color: "hsl(215, 20%, 60%)", lineHeight: 1.4 }}>
+            로컬 시스템(macOS 키체인, ~/.claude 설정 파일, 환경 변수 등)에 저장된 OAuth 토큰 및 API 키를 스캔하여 단 한 번의 클릭으로 쉽게 연동합니다.
+          </p>
+
+          {localCreds.length > 0 ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+              {localCreds.map((cred, idx) => (
+                <div key={idx} style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  background: "rgba(255, 255, 255, 0.02)",
+                  border: "1px solid rgba(255, 255, 255, 0.05)",
+                  padding: "0.5rem 0.75rem",
+                  borderRadius: "6px"
+                }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                      <span className={`badge-${cred.provider}`} style={{
+                        fontSize: "0.65rem",
+                        fontWeight: 800,
+                        padding: "0.1rem 0.3rem",
+                        borderRadius: "4px",
+                        background: cred.provider === "anthropic" ? "rgba(217, 119, 6, 0.15)" : "rgba(16, 185, 129, 0.15)",
+                        color: cred.provider === "anthropic" ? "hsl(35, 100%, 65%)" : "hsl(150, 100%, 45%)"
+                      }}>
+                        {cred.provider.toUpperCase()}
+                      </span>
+                      <span style={{ fontSize: "0.75rem", fontWeight: 600, color: "hsl(215, 20%, 85%)" }}>
+                        {cred.description}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: "0.7rem", color: "hsl(215, 20%, 45%)", fontFamily: "monospace" }}>
+                      감지 토큰: {cred.value} (출처: {cred.source})
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: "0.4rem" }}>
+                    <button 
+                      onClick={() => handleApplyCredential(cred, idx)}
+                      disabled={applyLoading[idx]}
+                      className="btn btn-save"
+                      style={{ padding: "0.25rem 0.6rem", fontSize: "0.7rem", background: "var(--neon-blue)", color: "#0a0c10" }}
+                    >
+                      {applyLoading[idx] ? "연동 중..." : "바로 연동"}
+                    </button>
+                    <button 
+                      onClick={() => handleTestCredential(cred.provider as any, idx)}
+                      disabled={testLoading[idx]}
+                      className="btn"
+                      style={{ 
+                        padding: "0.25rem 0.6rem", 
+                        fontSize: "0.7rem", 
+                        background: "rgba(255,255,255,0.05)", 
+                        border: "1px solid rgba(255,255,255,0.1)",
+                        color: "hsl(215, 20%, 80%)",
+                        borderRadius: "4px",
+                        cursor: "pointer"
+                      }}
+                    >
+                      {testLoading[idx] ? "테스트 중..." : "연동 테스트"}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ textAlign: "center", padding: "0.75rem", fontSize: "0.75rem", color: "hsl(215, 20%, 45%)" }}>
+              {scanLoading ? "시스템 분석 중..." : "자동 감지된 로컬 인증 정보가 없습니다. (수동 입력 가능)"}
+            </div>
+          )}
+        </div>
+
         <div className="settings-form">
           {/* Anthropic Key */}
           <div className="form-group">
@@ -1529,60 +1895,450 @@ function SettingsView() {
         </div>
       </div>
 
-      {/* Token Budget Limit Config Card */}
+      {/* Display Config Card */}
       <div className="settings-card glass" style={{ marginTop: "1.5rem" }}>
-        <h3 className="card-title">📊 에이전트별 토큰 예산 한도 설정</h3>
-        <p className="card-desc">대시보드 상단 게이지 바와 연동되어 에이전트별 토큰 예산 한도 및 실시간 소진율을 관리합니다.</p>
+        <h3 className="card-title">🖥️ 화면 표시 설정</h3>
+        <p className="card-desc">서비스 전반에 걸쳐 토큰 잔여량을 어떤 단위로 표시할지 결정합니다.</p>
         
-        <div className="settings-form" style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
-          {/* Claude Code Limit */}
+        <div className="settings-form">
           <div className="form-group">
-            <div className="form-group-header">
-              <label>Claude Code 토큰 한도</label>
-            </div>
-            <div className="input-group">
-              <input
-                type="number"
-                placeholder="예: 50000000"
-                value={settings.token_limit_claude}
-                onChange={(e) => setSettings(prev => ({ ...prev, token_limit_claude: Number(e.target.value) }))}
-                className="settings-input"
-                style={{ fontSize: "0.85rem" }}
-              />
-              <button 
-                onClick={() => handleSaveSettings({ token_limit_claude: settings.token_limit_claude })} 
-                className="btn btn-save" 
-                disabled={settings.token_limit_claude <= 0}
-              >
-                저장
-              </button>
-            </div>
-          </div>
-
-          {/* OpenAI Codex Limit */}
-          <div className="form-group">
-            <div className="form-group-header">
-              <label>OpenAI Codex 토큰 한도</label>
-            </div>
-            <div className="input-group">
-              <input
-                type="number"
-                placeholder="예: 50000000"
-                value={settings.token_limit_codex}
-                onChange={(e) => setSettings(prev => ({ ...prev, token_limit_codex: Number(e.target.value) }))}
-                className="settings-input"
-                style={{ fontSize: "0.85rem" }}
-              />
-              <button 
-                onClick={() => handleSaveSettings({ token_limit_codex: settings.token_limit_codex })} 
-                className="btn btn-save" 
-                disabled={settings.token_limit_codex <= 0}
-              >
-                저장
-              </button>
+            <label style={{ marginBottom: "0.5rem", display: "block" }}>토큰 잔여량 표시 방식</label>
+            <div style={{ display: "flex", gap: "2rem", marginTop: "0.25rem" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.85rem", cursor: "pointer", color: "hsl(215, 20%, 85%)" }}>
+                <input
+                  type="radio"
+                  name="token_display_mode"
+                  value="tokens"
+                  checked={settings.token_display_mode === "tokens"}
+                  onChange={() => handleSaveSettings({ token_display_mode: "tokens" })}
+                  style={{ cursor: "pointer" }}
+                />
+                토큰 단위 (Tokens)
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.85rem", cursor: "pointer", color: "hsl(215, 20%, 85%)" }}>
+                <input
+                  type="radio"
+                  name="token_display_mode"
+                  value="percentage"
+                  checked={settings.token_display_mode === "percentage"}
+                  onChange={() => handleSaveSettings({ token_display_mode: "percentage" })}
+                  style={{ cursor: "pointer" }}
+                />
+                백분율 (%)
+              </label>
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+
+interface SessionAnalysisViewProps {
+  sessions: Session[];
+  anomalies: LoopDetectionResult[];
+  analysisSessionId: string | null;
+  analysisData: SessionAnalysis | null;
+  analysisLoading: boolean;
+  onSelectSession: (id: string) => void;
+  onInterrupt: (agentType: string, cwd: string) => Promise<void>;
+  interruptLoading: boolean;
+  interruptMessage: string | null;
+}
+
+function SessionAnalysisView({
+  sessions,
+  anomalies,
+  analysisSessionId,
+  analysisData,
+  analysisLoading,
+  onSelectSession,
+  onInterrupt,
+  interruptLoading,
+  interruptMessage,
+}: SessionAnalysisViewProps) {
+  const [hoveredTurn, setHoveredTurn] = useState<TurnTokenUsage | null>(null);
+  const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
+
+  const anomalyMap = new Map(anomalies.map(a => [a.session_id, a]));
+
+  return (
+    <div style={{ display: "flex", flex: 1, gap: "1.5rem", height: "calc(100vh - 8rem)", overflow: "hidden" }}>
+      {/* 1. 좌측 세션 목록 */}
+      <div className="glass" style={{ width: "320px", display: "flex", flexDirection: "column", padding: "1.25rem", overflowY: "auto" }}>
+        <h3 style={{ fontSize: "1.1rem", fontWeight: 700, marginBottom: "1rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          <span>📂</span> 세션 히스토리 ({sessions.length})
+        </h3>
+        
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+          {sessions.map((s) => {
+            const isSelected = s.session_id === analysisSessionId;
+            const hasAnomaly = anomalyMap.has(s.session_id);
+            return (
+              <div
+                key={s.session_id}
+                onClick={() => onSelectSession(s.session_id)}
+                className={`session-item session-item-clickable ${isSelected ? "active" : ""}`}
+                style={{
+                  background: isSelected 
+                    ? "rgba(139, 92, 246, 0.15)" 
+                    : hasAnomaly 
+                      ? "rgba(239, 68, 68, 0.05)" 
+                      : "rgba(255, 255, 255, 0.02)",
+                  borderColor: isSelected 
+                    ? "var(--neon-purple)" 
+                    : hasAnomaly 
+                      ? "rgba(239, 68, 68, 0.3)" 
+                      : "rgba(255, 255, 255, 0.05)",
+                  borderWidth: "1px",
+                  borderStyle: "solid",
+                  padding: "0.75rem 1rem",
+                  borderRadius: "8px",
+                  cursor: "pointer",
+                  transition: "all 0.2s ease"
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.25rem" }}>
+                  <span style={{ fontWeight: 700, fontSize: "0.85rem", color: hasAnomaly ? "var(--neon-red)" : "var(--foreground)", fontFamily: "monospace" }}>
+                    {s.session_id.substring(0, 12)}...
+                  </span>
+                  {hasAnomaly && (
+                    <span style={{ fontSize: "0.7rem", padding: "0.1rem 0.3rem", borderRadius: "4px", background: "rgba(239, 68, 68, 0.2)", color: "hsl(0, 100%, 75%)", fontWeight: "bold" }}>
+                      LOOP
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: "0.75rem", color: "hsl(215, 20%, 60%)" }}>
+                  {s.agent_type} • {s.started_at.substring(11, 19)}
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: "0.5rem", fontSize: "0.75rem" }}>
+                  <span style={{ color: "hsl(215, 20%, 70%)" }}>
+                    {(s.total_input_tokens + s.total_output_tokens).toLocaleString()} Tokens
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* 2. 우측 분석 상세 패널 */}
+      <div className="glass" style={{ flex: 1, display: "flex", flexDirection: "column", padding: "1.5rem", overflowY: "auto" }}>
+        {analysisLoading ? (
+          <div style={{ display: "flex", flex: 1, flexDirection: "column", justifyContent: "center", alignItems: "center", color: "hsl(215, 20%, 55%)", gap: "1rem" }}>
+            <div style={{ width: "32px", height: "32px", border: "3px solid rgba(255,255,255,0.08)", borderTopColor: "var(--neon-blue)", borderRadius: "50%", animation: "rotate-sync 1s linear infinite" }} />
+            <span>세션 심층 분석 데이터 수집 중...</span>
+          </div>
+        ) : analysisData ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+            {/* 세션 개요 헤더 */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", borderBottom: "1px solid rgba(255,255,255,0.08)", paddingBottom: "1rem" }}>
+              <div>
+                <h2 style={{ fontSize: "1.3rem", fontWeight: 800, margin: 0, display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <span>🔍</span> 세션 분석 보고서
+                </h2>
+                <div style={{ fontSize: "0.8rem", color: "hsl(215, 20%, 50%)", fontFamily: "monospace", marginTop: "0.25rem" }}>
+                  ID: {analysisData.session_id}
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
+                <span className="pulse-badge" style={{
+                  color: analysisData.is_anomaly ? "var(--neon-red)" : "var(--neon-blue)",
+                  background: analysisData.is_anomaly ? "rgba(239, 68, 68, 0.1)" : "rgba(6, 182, 212, 0.1)",
+                  borderColor: analysisData.is_anomaly ? "rgba(239, 68, 68, 0.3)" : "rgba(6, 182, 212, 0.2)"
+                }}>
+                  {analysisData.is_anomaly ? "🚨 위험 상태 감지" : "✓ 안전 세션"}
+                </span>
+                <button
+                  onClick={() => onInterrupt(analysisData.agent_type, "")}
+                  disabled={interruptLoading}
+                  className="btn btn-delete"
+                  style={{ padding: "0.4rem 1rem", fontSize: "0.8rem" }}
+                >
+                  {interruptLoading ? "중단 중..." : "에이전트 강제종료"}
+                </button>
+              </div>
+            </div>
+
+            {/* 기본 수치 요약 */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "1rem" }}>
+              <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", padding: "1rem", borderRadius: "12px" }}>
+                <div style={{ fontSize: "0.75rem", color: "hsl(215, 20%, 50%)" }}>총 소비 비용</div>
+                <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "var(--neon-purple)", marginTop: "0.25rem", textShadow: "0 0 10px rgba(139, 92, 246, 0.3)" }}>
+                  ${analysisData.total_cost_usd.toFixed(4)}
+                </div>
+              </div>
+              <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", padding: "1rem", borderRadius: "12px" }}>
+                <div style={{ fontSize: "0.75rem", color: "hsl(215, 20%, 50%)" }}>총 사용 토큰</div>
+                <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "var(--neon-blue)", marginTop: "0.25rem" }}>
+                  {(analysisData.total_input_tokens + analysisData.total_output_tokens).toLocaleString()}
+                </div>
+              </div>
+              <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", padding: "1rem", borderRadius: "12px" }}>
+                <div style={{ fontSize: "0.75rem", color: "hsl(215, 20%, 50%)" }}>캐시 히트율</div>
+                <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "var(--neon-green)", marginTop: "0.25rem" }}>
+                  {(analysisData.cache_hit_rate * 100).toFixed(1)}%
+                </div>
+              </div>
+              <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", padding: "1rem", borderRadius: "12px" }}>
+                <div style={{ fontSize: "0.75rem", color: "hsl(215, 20%, 50%)" }}>캐시 절감 비용</div>
+                <div style={{ fontSize: "1.25rem", fontWeight: 800, color: "hsl(150, 100%, 40%)", marginTop: "0.25rem" }}>
+                  ${analysisData.cache_saved_cost.toFixed(4)}
+                </div>
+              </div>
+            </div>
+
+            {/* 턴별 토큰 소비 스택 바 차트 */}
+            <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", padding: "1.25rem", borderRadius: "12px", position: "relative" }}>
+              <h4 style={{ fontSize: "0.95rem", fontWeight: 700, margin: "0 0 1rem 0" }}>⚡ 턴별 토큰 소비 분석 (턴 순서 흐름)</h4>
+              
+              {analysisData.turns.length > 0 ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                  {/* Legend */}
+                  <div style={{ display: "flex", gap: "1rem", fontSize: "0.75rem", justifyContent: "flex-end" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                      <div style={{ width: "10px", height: "10px", background: "var(--neon-blue)", borderRadius: "2px" }} />
+                      <span>Input Tokens</span>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                      <div style={{ width: "10px", height: "10px", background: "var(--neon-purple)", borderRadius: "2px" }} />
+                      <span>Output Tokens</span>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                      <div style={{ width: "10px", height: "10px", background: "var(--neon-green)", borderRadius: "2px" }} />
+                      <span>Cache Read Tokens</span>
+                    </div>
+                  </div>
+
+                  {/* Bars container */}
+                  <div 
+                    style={{ 
+                      display: "flex", 
+                      alignItems: "flex-end", 
+                      height: "180px", 
+                      gap: "0.4rem", 
+                      overflowX: "auto", 
+                      paddingBottom: "1.5rem",
+                      borderBottom: "1px solid rgba(255,255,255,0.08)",
+                      marginTop: "0.5rem"
+                    }}
+                  >
+                    {analysisData.turns.map((turn, idx) => {
+                      const turnTotal = turn.input_tokens + turn.output_tokens;
+                      const maxTurnTotal = Math.max(...analysisData.turns.map(t => t.input_tokens + t.output_tokens), 1);
+                      const barHeightPct = (turnTotal / maxTurnTotal) * 100;
+                      
+                      const inputPct = turnTotal > 0 ? (turn.input_tokens / turnTotal) * 100 : 0;
+                      const outputPct = turnTotal > 0 ? (turn.output_tokens / turnTotal) * 100 : 0;
+                      const cachePct = turn.input_tokens > 0 ? (turn.cache_read_tokens / turn.input_tokens) * 100 : 0;
+
+                      return (
+                        <div
+                          key={idx}
+                          style={{
+                            flex: "0 0 28px",
+                            height: `${barHeightPct}%`,
+                            minHeight: "10px",
+                            display: "flex",
+                            flexDirection: "column-reverse",
+                            borderRadius: "4px 4px 0 0",
+                            overflow: "hidden",
+                            cursor: "pointer",
+                            transition: "opacity 0.2s ease",
+                            background: "rgba(255,255,255,0.02)"
+                          }}
+                          onMouseEnter={(e) => {
+                            setHoveredTurn(turn);
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            const containerRect = e.currentTarget.parentElement?.getBoundingClientRect();
+                            if (containerRect) {
+                              setTooltipPos({
+                                x: rect.left - containerRect.left + 14,
+                                y: rect.top - containerRect.top - 10
+                              });
+                            }
+                          }}
+                          onMouseLeave={() => setHoveredTurn(null)}
+                        >
+                          {/* Input Section */}
+                          <div style={{ height: `${inputPct}%`, background: "var(--neon-blue)", position: "relative" }}>
+                            {/* Cache section embedded inside input */}
+                            {cachePct > 0 && (
+                              <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: `${cachePct}%`, background: "var(--neon-green)" }} />
+                            )}
+                          </div>
+                          {/* Output Section */}
+                          <div style={{ height: `${outputPct}%`, background: "var(--neon-purple)" }} />
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* X Axis Labels */}
+                  <div style={{ display: "flex", gap: "0.4rem", overflowX: "hidden", fontSize: "0.65rem", color: "hsl(215, 20%, 50%)" }}>
+                    {analysisData.turns.map((turn, idx) => (
+                      <div key={idx} style={{ flex: "0 0 28px", textAlign: "center" }}>
+                        T{turn.turn_index}
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Interactive Tooltip inside container */}
+                  {hoveredTurn && (
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: `${tooltipPos.x}px`,
+                        top: `${tooltipPos.y}px`,
+                        transform: "translate(-50%, -100%)",
+                        background: "rgba(10, 12, 16, 0.95)",
+                        border: "1px solid var(--neon-blue)",
+                        borderRadius: "6px",
+                        padding: "0.5rem 0.75rem",
+                        fontSize: "0.72rem",
+                        boxShadow: "0 0 10px rgba(0, 242, 254, 0.2)",
+                        pointerEvents: "none",
+                        zIndex: 100,
+                        transition: "all 0.1s ease"
+                      }}
+                    >
+                      <div style={{ fontWeight: 700, color: "var(--neon-blue)", marginBottom: "4px" }}>
+                        Turn {hoveredTurn.turn_index} ({hoveredTurn.role})
+                      </div>
+                      <div style={{ color: "#fff" }}>
+                        입력: <span style={{ fontWeight: 600 }}>{hoveredTurn.input_tokens.toLocaleString()}</span>
+                      </div>
+                      <div style={{ color: "#fff" }}>
+                        출력: <span style={{ fontWeight: 600 }}>{hoveredTurn.output_tokens.toLocaleString()}</span>
+                      </div>
+                      {hoveredTurn.cache_read_tokens > 0 && (
+                        <div style={{ color: "var(--neon-green)" }}>
+                          캐시 리드: <span style={{ fontWeight: 600 }}>{hoveredTurn.cache_read_tokens.toLocaleString()}</span>
+                        </div>
+                      )}
+                      <div style={{ color: "var(--neon-purple)", fontWeight: 600, marginTop: "4px" }}>
+                        비용: ${hoveredTurn.cost_usd.toFixed(5)}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div style={{ padding: "2rem", textAlign: "center", color: "hsl(215, 20%, 40%)", fontSize: "0.85rem" }}>
+                  턴별 토큰 사용 내역이 없습니다.
+                </div>
+              )}
+            </div>
+
+            {/* 하단 2단: 캐시 도넛 차트 & 도구 비용 랭킹 */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.5rem" }}>
+              {/* 캐시 히트율 도넛 차트 카드 */}
+              <div className="glass" style={{ padding: "1.25rem", background: "rgba(255,255,255,0.01)" }}>
+                <h4 style={{ fontSize: "0.95rem", fontWeight: 700, margin: "0 0 1rem 0" }}>🔌 캐시 효율성 & 히트율</h4>
+                <div style={{ display: "flex", alignItems: "center", gap: "2rem" }}>
+                  {/* SVG 도넛 */}
+                  <div style={{ position: "relative", width: "120px", height: "120px" }}>
+                    <svg width="100%" height="100%" viewBox="0 0 42 42">
+                      <circle cx="21" cy="21" r="15.915" fill="transparent" stroke="rgba(255,255,255,0.03)" strokeWidth="4" />
+                      <circle
+                        cx="21"
+                        cy="21"
+                        r="15.915"
+                        fill="transparent"
+                        stroke="var(--neon-green)"
+                        strokeWidth="4"
+                        strokeDasharray={`${analysisData.cache_hit_rate * 100} ${100 - (analysisData.cache_hit_rate * 100)}`}
+                        strokeDashoffset="25"
+                        style={{ filter: "drop-shadow(0 0 4px rgba(16, 185, 129, 0.4))", transition: "stroke-dasharray 0.5s ease" }}
+                      />
+                    </svg>
+                    <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", textAlign: "center" }}>
+                      <div style={{ fontSize: "1.1rem", fontWeight: 800, color: "var(--foreground)" }}>
+                        {(analysisData.cache_hit_rate * 100).toFixed(0)}%
+                      </div>
+                      <div style={{ fontSize: "0.6rem", color: "hsl(215, 20%, 50%)" }}>HIT RATE</div>
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", flex: 1 }}>
+                    <div style={{ background: "linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(6, 182, 212, 0.05))", border: "1px solid rgba(16, 185, 129, 0.15)", borderRadius: "8px", padding: "0.5rem 0.75rem" }}>
+                      <div style={{ fontSize: "0.7rem", color: "hsl(215, 20%, 65%)" }}>누적 캐시 사용량</div>
+                      <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--neon-green)", marginTop: "0.15rem" }}>
+                        {analysisData.total_cache_read_tokens.toLocaleString()} Tokens
+                      </div>
+                    </div>
+                    <div style={{ fontSize: "0.75rem", color: "hsl(215, 20%, 60%)", lineHeight: 1.4 }}>
+                      캐시가 탑재된 Claude 모델 사용 시 입력 토큰을 최대 90% 저렴하게 처리하여 예산을 대폭 절감합니다.
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 도구 비용 랭킹 카드 */}
+              <div className="glass" style={{ padding: "1.25rem", background: "rgba(255,255,255,0.01)" }}>
+                <h4 style={{ fontSize: "0.95rem", fontWeight: 700, margin: "0 0 1rem 0" }}>🛠️ 도구별 비용 랭킹 (Top 10)</h4>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", maxHeight: "160px", overflowY: "auto", paddingRight: "4px" }}>
+                  {analysisData.tool_cost_rank.map((t) => {
+                    const maxCost = Math.max(...analysisData.tool_cost_rank.map(tc => tc.total_cost_usd), 0.0001);
+                    const barWidth = (t.total_cost_usd / maxCost) * 100;
+                    return (
+                      <div key={t.tool_name} style={{ display: "flex", flexDirection: "column", gap: "0.2rem" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem" }}>
+                          <span style={{ fontWeight: 600, color: "hsl(215, 20%, 85%)", fontFamily: "monospace" }}>{t.tool_name}</span>
+                          <span style={{ fontWeight: 700, color: "var(--neon-blue)" }}>
+                            ${t.total_cost_usd.toFixed(4)} ({t.call_count}회)
+                          </span>
+                        </div>
+                        <div style={{ height: "6px", background: "rgba(255,255,255,0.03)", borderRadius: "3px", overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${barWidth}%`, background: "var(--neon-blue)", borderRadius: "3px" }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {analysisData.tool_cost_rank.length === 0 && (
+                    <div style={{ color: "hsl(215, 20%, 40%)", fontSize: "0.8rem", textAlign: "center", padding: "1.5rem" }}>
+                      이 세션에 도구 호출 정보가 없습니다.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* 이상 제어 / 시각화 디렉션 */}
+            <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", padding: "1.25rem", borderRadius: "12px" }}>
+              <h4 style={{ fontSize: "0.95rem", fontWeight: 700, margin: "0 0 0.75rem 0", color: analysisData.is_anomaly ? "var(--neon-red)" : "var(--neon-green)" }}>
+                {analysisData.is_anomaly ? "🚨 오작동 이상 탐지 분석" : "✓ 세션 이상 탐지 분석"}
+              </h4>
+              {analysisData.is_anomaly ? (
+                <div>
+                  <div style={{ fontSize: "0.8rem", color: "hsl(215, 20%, 85%)", marginBottom: "1rem", lineHeight: 1.5 }}>
+                    {analysisData.anomaly_signals.map((s, idx) => (
+                      <div key={idx} style={{ padding: "0.5rem 0.75rem", background: "rgba(239, 68, 68, 0.06)", borderLeft: "3px solid var(--neon-red)", borderRadius: "0 6px 6px 0", marginBottom: "0.5rem" }}>
+                        <strong>{s.signal_type === "repeated_call" ? "자가 루프 의심" : "핑퐁 순환 호출"}:</strong> {s.description}
+                      </div>
+                    ))}
+                  </div>
+                  <LoopDirectionViewer signals={analysisData.anomaly_signals} />
+                </div>
+              ) : (
+                <div style={{ fontSize: "0.8rem", color: "hsl(215, 20%, 70%)" }}>
+                  현재 세션에서 동일한 도구 호출의 오작동 순환(Loop) 현상이나 급격한 토큰 폭팽 이상 징후가 검출되지 않았습니다. 안전하게 관리되고 있습니다.
+                </div>
+              )}
+            </div>
+            
+            {interruptMessage && (
+              <div style={{ padding: "0.75rem 1rem", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: "8px", fontSize: "0.75rem" }}>
+                {interruptMessage}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div style={{ display: "flex", flex: 1, flexDirection: "column", justifyContent: "center", alignItems: "center", color: "hsl(215, 20%, 40%)" }}>
+            <span>👈 왼쪽 히스토리 목록에서 분석할 세션을 선택해 주세요.</span>
+          </div>
+        )}
       </div>
     </div>
   );

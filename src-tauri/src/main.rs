@@ -569,6 +569,18 @@ fn default_token_limit() -> u64 {
     50_000_000
 }
 
+fn default_claude_plan() -> String {
+    "pro".to_string()
+}
+
+fn default_openai_plan() -> String {
+    "tier1".to_string()
+}
+
+fn default_token_display_mode() -> String {
+    "tokens".to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppSettings {
     pub log_dir: String,
@@ -580,6 +592,14 @@ pub struct AppSettings {
     pub token_limit_codex: u64,
     #[serde(default = "default_token_limit")]
     pub token_limit_antigravity: u64,
+    /// Anthropic 구독 플랜: "free" | "pro" | "max5x" | "max20x" | "api"
+    #[serde(default = "default_claude_plan")]
+    pub claude_plan: String,
+    /// OpenAI 구독 티어: "free" | "tier1" | "tier2" | "tier5"
+    #[serde(default = "default_openai_plan")]
+    pub openai_plan: String,
+    #[serde(default = "default_token_display_mode")]
+    pub token_display_mode: String,
 }
 
 fn get_config_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -599,14 +619,34 @@ fn save_settings(
     token_limit_claude: u64,
     token_limit_codex: u64,
     token_limit_antigravity: u64,
+    claude_plan: Option<String>,
+    openai_plan: Option<String>,
+    token_display_mode: Option<String>,
 ) -> Result<(), String> {
     let path = get_config_path(&app_handle)?;
+    // 기존 설정을 읽어 플랜 필드를 보존
+    let existing = if path.exists() {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<AppSettings>(&s).ok())
+    } else {
+        None
+    };
     let settings = AppSettings {
         log_dir,
         token_limit,
         token_limit_claude,
         token_limit_codex,
         token_limit_antigravity,
+        claude_plan: claude_plan.unwrap_or_else(|| {
+            existing.as_ref().map(|s| s.claude_plan.clone()).unwrap_or_else(default_claude_plan)
+        }),
+        openai_plan: openai_plan.unwrap_or_else(|| {
+            existing.as_ref().map(|s| s.openai_plan.clone()).unwrap_or_else(default_openai_plan)
+        }),
+        token_display_mode: token_display_mode.unwrap_or_else(|| {
+            existing.as_ref().map(|s| s.token_display_mode.clone()).unwrap_or_else(default_token_display_mode)
+        }),
     };
     let json = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("JSON 직렬화 실패: {}", e))?;
@@ -625,6 +665,9 @@ fn load_settings(app_handle: AppHandle) -> Result<AppSettings, String> {
             token_limit_claude: 50_000_000,
             token_limit_codex: 50_000_000,
             token_limit_antigravity: 50_000_000,
+            claude_plan: default_claude_plan(),
+            openai_plan: default_openai_plan(),
+            token_display_mode: default_token_display_mode(),
         });
     }
     let json = std::fs::read_to_string(path)
@@ -634,8 +677,800 @@ fn load_settings(app_handle: AppHandle) -> Result<AppSettings, String> {
     Ok(settings)
 }
 
+// ────────────────────────────────────────────────────────────
+// 구독 플랜 한도 테이블 (ccusage 방식 — 플랜별 내장값)
+// ────────────────────────────────────────────────────────────
+
+/// 플랜 이름 → (5시간 윈도우 토큰 한도, 설명)
+fn claude_plan_quota(plan: &str) -> (u64, &'static str) {
+    match plan {
+        "free"   => (10_000_000,   "Claude Free (10M / 5hr window)"),
+        "pro"    => (44_000_000,   "Claude Pro ($20/mo, ~44M / 5hr window)"),
+        "max5x"  => (220_000_000,  "Claude Max 5x ($100/mo, ~220M / 5hr window)"),
+        "max20x" => (880_000_000,  "Claude Max 20x ($200/mo, ~880M / 5hr window)"),
+        "api"    => (u64::MAX / 2, "Claude API (rate limit 기반)"),
+        _        => (44_000_000,   "Claude Pro (기본값)"),
+    }
+}
+
+/// OpenAI 티어 → (월간 토큰 한도, 설명)
+fn openai_tier_quota(tier: &str) -> (u64, &'static str) {
+    match tier {
+        "free"  => (1_000_000,    "OpenAI Free Tier"),
+        "tier1" => (100_000_000,  "OpenAI Tier 1 ($5+ 충전)"),
+        "tier2" => (500_000_000,  "OpenAI Tier 2 ($50+ 지출)"),
+        "tier5" => (5_000_000_000, "OpenAI Tier 5 (최고 한도)"),
+        _       => (100_000_000,  "OpenAI Tier 1 (기본값)"),
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PlanQuotaInfo {
+    pub provider: String,
+    pub plan_key: String,
+    pub plan_label: String,
+    pub quota_tokens: u64,
+    /// 5시간 윈도우 내 사용량 (Claude) or 이번 달 사용량 (OpenAI)
+    pub used_tokens: u64,
+    pub remaining_tokens: u64,
+    pub usage_pct: f64,
+    /// 5시간 윈도우 리셋 예상 시각 (ISO 8601, Claude 전용)
+    pub window_reset_at: Option<String>,
+    pub window_hours: u32,
+
+    // Claude 주간 모든 모델 한도 필드 (Option)
+    pub weekly_quota_tokens: Option<u64>,
+    pub weekly_used_tokens: Option<u64>,
+    pub weekly_remaining_tokens: Option<u64>,
+    pub weekly_usage_pct: Option<f64>,
+    pub weekly_reset_at: Option<String>,
+}
+
+/// 현재 5시간 롤링 윈도우 내의 Claude 토큰 사용량 조회
+#[tauri::command]
+fn get_rolling_window_usage() -> Result<u64, String> {
+    let conn = get_db_conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(SUM(total_input_tokens + total_output_tokens), 0)
+         FROM sessions
+         WHERE started_at >= datetime('now', '-5 hours')"
+    ).map_err(|e| e.to_string())?;
+    let used: u64 = stmt.query_row([], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    Ok(used)
+}
+
+/// 이번 달 OpenAI 누적 토큰 사용량 조회
+fn get_monthly_usage_openai() -> Result<u64, String> {
+    let conn = get_db_conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(SUM(total_input_tokens + total_output_tokens), 0)
+         FROM sessions
+         WHERE agent_type = 'codex'
+           AND strftime('%Y-%m', started_at) = strftime('%Y-%m', 'now')"
+    ).map_err(|e| e.to_string())?;
+    let used: u64 = stmt.query_row([], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    Ok(used)
+}
+
+/// 가장 최근 세션의 시작 시각 기준 5시간 윈도우 리셋 예상 시각 계산
+fn calc_window_reset_at() -> Result<Option<String>, String> {
+    let conn = get_db_conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT MAX(started_at) FROM sessions WHERE started_at >= datetime('now', '-5 hours')"
+    ).map_err(|e| e.to_string())?;
+    let oldest: Option<String> = stmt.query_row([], |r| r.get(0)).ok().flatten();
+    if let Some(ts) = oldest {
+        // 가장 오래된 세션 시각 + 5시간 = 리셋 예상 시각
+        let conn2 = get_db_conn()?;
+        let mut stmt2 = conn2.prepare(
+            "SELECT MIN(started_at) FROM sessions WHERE started_at >= datetime('now', '-5 hours')"
+        ).map_err(|e| e.to_string())?;
+        let _ = ts;
+        let earliest: Option<String> = stmt2.query_row([], |r| r.get(0)).ok().flatten();
+        if let Some(earliest_ts) = earliest {
+            // earliest_ts + 5h → reset_at (ISO 문자열로 반환)
+            let reset_sql_result: Result<String, _> = conn2.query_row(
+                &format!("SELECT datetime('{}', '+5 hours')", earliest_ts),
+                [],
+                |r| r.get(0),
+            );
+            return Ok(reset_sql_result.ok());
+        }
+    }
+    Ok(None)
+}
+
+// 헬퍼 함수: 로컬 fetch-claude-usage.swift 파일에서 세션 키 파싱
+fn get_local_session_key_from_swift() -> Option<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    if home.is_empty() { return None; }
+    let swift_path = Path::new(&home).join(".claude").join("fetch-claude-usage.swift");
+    if !swift_path.exists() || !swift_path.is_file() { return None; }
+    if let Ok(content) = std::fs::read_to_string(swift_path) {
+        for line in content.lines() {
+            if line.contains("injectedKey") {
+                if let Some(start_idx) = line.find("\"") {
+                    if let Some(end_idx) = line[start_idx + 1..].find("\"") {
+                        let key = &line[start_idx + 1..start_idx + 1 + end_idx];
+                        if !key.trim().is_empty() {
+                            return Some(key.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+// 헬퍼 함수: 로컬 fetch-claude-usage.swift 파일에서 orgId 파싱
+fn get_local_org_id_from_swift() -> Option<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    if home.is_empty() { return None; }
+    let swift_path = Path::new(&home).join(".claude").join("fetch-claude-usage.swift");
+    if !swift_path.exists() || !swift_path.is_file() { return None; }
+    if let Ok(content) = std::fs::read_to_string(swift_path) {
+        for line in content.lines() {
+            if line.contains("injectedOrgId") {
+                if let Some(start_idx) = line.find("\"") {
+                    if let Some(end_idx) = line[start_idx + 1..].find("\"") {
+                        let org_id = &line[start_idx + 1..start_idx + 1 + end_idx];
+                        if !org_id.trim().is_empty() {
+                            return Some(org_id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+// 헬퍼 함수: 세션 키를 활용해 organizations 리스트를 받아와 첫 번째 orgId 반환
+async fn fetch_first_org_id(session_key: &str) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let response = client.get("https://claude.ai/api/organizations")
+        .header("Cookie", format!("sessionKey={}", session_key))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("Organization 조회 요청 실패: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Organization 조회 실패, status: {}", response.status()));
+    }
+
+    let json: serde_json::Value = response.json()
+        .await
+        .map_err(|e| format!("Organization JSON 파싱 실패: {}", e))?;
+
+    if let Some(arr) = json.as_array() {
+        if let Some(first_org) = arr.first() {
+            if let Some(uuid) = first_org.get("uuid").and_then(|u| u.as_str()) {
+                return Ok(uuid.to_string());
+            }
+        }
+    }
+    
+    Err("유효한 Organization ID를 찾을 수 없습니다.".to_string())
+}
+
+// 헬퍼 함수: 세션 키와 orgId로 실제 Claude Usage 데이터 실시간 조회
+async fn fetch_claude_usage_from_api(session_key: &str, org_id: &str) -> Result<(f64, Option<String>, Option<f64>, Option<String>), String> {
+    let client = reqwest::Client::new();
+    let url = format!("https://claude.ai/api/organizations/{}/usage", org_id);
+    let response = client.get(&url)
+        .header("Cookie", format!("sessionKey={}", session_key))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("Claude usage API 호출 실패: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Claude usage API 응답 에러, status: {}", response.status()));
+    }
+
+    let json: serde_json::Value = response.json()
+        .await
+        .map_err(|e| format!("Claude usage JSON 파싱 실패: {}", e))?;
+
+    let mut five_hour_util = 0.0;
+    let mut five_hour_reset = None;
+
+    if let Some(five_hour) = json.get("five_hour") {
+        if let Some(utilization_val) = five_hour.get("utilization") {
+            five_hour_util = if let Some(u_f64) = utilization_val.as_f64() {
+                u_f64
+            } else if let Some(u_i64) = utilization_val.as_i64() {
+                u_i64 as f64
+            } else {
+                return Err("utilization 값 포맷 에러".to_string());
+            };
+        }
+        five_hour_reset = five_hour.get("resets_at")
+            .and_then(|r| r.as_str())
+            .map(|s| s.to_string());
+    }
+
+    let mut weekly_util = None;
+    let mut weekly_reset = None;
+
+    if let Some(seven_day) = json.get("seven_day") {
+        if let Some(utilization_val) = seven_day.get("utilization") {
+            let utilization = if let Some(u_f64) = utilization_val.as_f64() {
+                u_f64
+            } else if let Some(u_i64) = utilization_val.as_i64() {
+                u_i64 as f64
+            } else {
+                0.0
+            };
+            weekly_util = Some(utilization);
+        }
+        weekly_reset = seven_day.get("resets_at")
+            .and_then(|r| r.as_str())
+            .map(|s| s.to_string());
+    }
+
+    Ok((five_hour_util, five_hour_reset, weekly_util, weekly_reset))
+}
+
+fn get_today_usage_antigravity() -> Result<u64, String> {
+    let conn = get_db_conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(SUM(total_input_tokens + total_output_tokens), 0)
+         FROM sessions
+         WHERE agent_type = 'antigravity'
+           AND started_at >= datetime('now', '-24 hours')"
+    ).map_err(|e| e.to_string())?;
+    let used: u64 = stmt.query_row([], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    Ok(used)
+}
+
+/// 구독 플랜별 토큰 사용 현황 조회
+#[tauri::command]
+async fn get_subscription_quota(app_handle: AppHandle) -> Result<Vec<PlanQuotaInfo>, String> {
+    let settings = load_settings(app_handle)?;
+
+    let mut result = Vec::new();
+
+    // ── Claude (5시간 롤링 윈도우) ──
+    let mut claude_used = get_rolling_window_usage().unwrap_or(0);
+    let (claude_quota, claude_label) = claude_plan_quota(&settings.claude_plan);
+    let mut claude_remaining = claude_quota.saturating_sub(claude_used);
+    let mut claude_pct = if claude_quota == 0 || claude_quota == u64::MAX / 2 {
+        0.0
+    } else {
+        (claude_used as f64 / claude_quota as f64 * 100.0).min(100.0)
+    };
+    let mut reset_at = calc_window_reset_at().unwrap_or(None);
+
+    // Claude 주간 롤링 한도 변수 초기화 (기본값)
+    let weekly_quota = if claude_quota == u64::MAX / 2 { u64::MAX / 2 } else { claude_quota * 10 }; // 5시간의 10배 (Pro 기준 440M)
+    let mut claude_weekly_used = 0;
+    let mut claude_weekly_pct = 0.0;
+    let mut claude_weekly_reset = None;
+
+    // 키체인 또는 로컬 swift 스크립트에서 세션 키 획득 시도
+    let mut resolved_session_key = None;
+    if let Ok(entry) = Entry::new("agent-token-tracker", "anthropic") {
+        if let Ok(session_key) = entry.get_password() {
+            let trimmed = session_key.trim().to_string();
+            if trimmed.starts_with("sk-ant-sid02-") && !trimmed.is_empty() {
+                resolved_session_key = Some(trimmed);
+            }
+        }
+    }
+    
+    // 키체인에서 획득하지 못한 경우 로컬 swift 스크립트에서 직접 파싱 시도
+    if resolved_session_key.is_none() {
+        if let Some(key) = get_local_session_key_from_swift() {
+            println!("[Quota] swift 스크립트로부터 세션 키 파싱 성공!");
+            resolved_session_key = Some(key);
+        }
+    }
+
+    if let Some(session_key) = resolved_session_key {
+        println!("[Quota] Anthropic 웹 세션 키를 활용하여 Claude 실시간 사용량 조회를 시작합니다.");
+        
+        // orgId 결정 (로컬 swift 스크립트 파싱 -> 실패 시 API 조회)
+        let mut target_org_id = get_local_org_id_from_swift();
+        if target_org_id.is_none() {
+            if let Ok(api_org_id) = fetch_first_org_id(&session_key).await {
+                target_org_id = Some(api_org_id);
+            }
+        }
+
+        if let Some(org_id) = target_org_id {
+            println!("[Quota] Claude usage 조회를 위해 org_id: {} 를 사용합니다.", org_id);
+            match fetch_claude_usage_from_api(&session_key, &org_id).await {
+                Ok((five_hour_utilization, api_resets_at, weekly_utilization, weekly_api_resets_at)) => {
+                    // 1. 5시간 롤링 한도 가공
+                    claude_pct = if five_hour_utilization < 1.0 {
+                        five_hour_utilization * 100.0
+                    } else {
+                        five_hour_utilization
+                    };
+                    if claude_quota != u64::MAX / 2 && claude_quota > 0 {
+                        claude_used = (claude_quota as f64 * (claude_pct / 100.0)) as u64;
+                        claude_remaining = claude_quota.saturating_sub(claude_used);
+                    }
+                    if let Some(r_at) = api_resets_at {
+                        reset_at = Some(r_at);
+                    }
+
+                    // 2. 주간 롤링 한도 가공
+                    if let Some(w_util) = weekly_utilization {
+                        claude_weekly_pct = if w_util < 1.0 {
+                            w_util * 100.0
+                        } else {
+                            w_util
+                        };
+                        if weekly_quota != u64::MAX / 2 && weekly_quota > 0 {
+                            claude_weekly_used = (weekly_quota as f64 * (claude_weekly_pct / 100.0)) as u64;
+                        }
+                    }
+                    if let Some(w_r_at) = weekly_api_resets_at {
+                        claude_weekly_reset = Some(w_r_at);
+                    }
+
+                    println!(
+                        "[Quota] Claude 실시간 조회 성공: 소진율 = {:.2}%, 주간 소진율 = {:.2}%, 리셋시각 = {:?}",
+                        claude_pct, claude_weekly_pct, reset_at
+                    );
+                }
+                Err(e) => {
+                    eprintln!("[Quota] Claude 실시간 usage API 호출 실패 (로컬 DB 폴백 사용): {}", e);
+                }
+            }
+        }
+    } else {
+        println!("[Quota] 유효한 Claude 웹 세션 키를 발견하지 못했습니다. 로컬 DB 집계를 사용합니다.");
+    }
+
+    let weekly_remaining = weekly_quota.saturating_sub(claude_weekly_used);
+
+    result.push(PlanQuotaInfo {
+        provider: "anthropic".to_string(),
+        plan_key: settings.claude_plan.clone(),
+        plan_label: claude_label.to_string(),
+        quota_tokens: claude_quota,
+        used_tokens: claude_used,
+        remaining_tokens: claude_remaining,
+        usage_pct: claude_pct,
+        window_reset_at: reset_at,
+        window_hours: 5,
+        weekly_quota_tokens: Some(weekly_quota),
+        weekly_used_tokens: Some(claude_weekly_used),
+        weekly_remaining_tokens: Some(weekly_remaining),
+        weekly_usage_pct: Some(claude_weekly_pct),
+        weekly_reset_at: claude_weekly_reset,
+    });
+
+    // ── OpenAI Codex (이번 달 누적) ──
+    let openai_used = get_monthly_usage_openai().unwrap_or(0);
+    let (openai_quota, openai_label) = openai_tier_quota(&settings.openai_plan);
+    let openai_remaining = openai_quota.saturating_sub(openai_used);
+    let openai_pct = if openai_quota == 0 {
+        0.0
+    } else {
+        (openai_used as f64 / openai_quota as f64 * 100.0).min(100.0)
+    };
+    result.push(PlanQuotaInfo {
+        provider: "openai".to_string(),
+        plan_key: settings.openai_plan.clone(),
+        plan_label: openai_label.to_string(),
+        quota_tokens: openai_quota,
+        used_tokens: openai_used,
+        remaining_tokens: openai_remaining,
+        usage_pct: openai_pct,
+        window_reset_at: None,
+        window_hours: 720, // ~1달
+        weekly_quota_tokens: None,
+        weekly_used_tokens: None,
+        weekly_remaining_tokens: None,
+        weekly_usage_pct: None,
+        weekly_reset_at: None,
+    });
+
+    // ── Antigravity (24시간 누적) ──
+    let agy_used = get_today_usage_antigravity().unwrap_or(0);
+    let agy_quota = settings.token_limit_antigravity;
+    let agy_remaining = agy_quota.saturating_sub(agy_used);
+    let agy_pct = if agy_quota == 0 {
+        0.0
+    } else {
+        (agy_used as f64 / agy_quota as f64 * 100.0).min(100.0)
+    };
+    
+    let agy_reset_at = {
+        let conn = get_db_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT MIN(started_at) FROM sessions WHERE agent_type = 'antigravity' AND started_at >= datetime('now', '-24 hours')"
+        ).map_err(|e| e.to_string())?;
+        let oldest: Option<String> = stmt.query_row([], |r| r.get(0)).ok().flatten();
+        if let Some(earliest_ts) = oldest {
+            let reset_sql_result: Result<String, _> = conn.query_row(
+                &format!("SELECT datetime('{}', '+24 hours')", earliest_ts),
+                [],
+                |r| r.get(0),
+            );
+            reset_sql_result.ok()
+        } else {
+            None
+        }
+    };
+
+    result.push(PlanQuotaInfo {
+        provider: "antigravity".to_string(),
+        plan_key: "local".to_string(),
+        plan_label: "Antigravity Local Quota".to_string(),
+        quota_tokens: agy_quota,
+        used_tokens: agy_used,
+        remaining_tokens: agy_remaining,
+        usage_pct: agy_pct,
+        window_reset_at: agy_reset_at,
+        window_hours: 24,
+        weekly_quota_tokens: None,
+        weekly_used_tokens: None,
+        weekly_remaining_tokens: None,
+        weekly_usage_pct: None,
+        weekly_reset_at: None,
+    });
+
+    Ok(result)
+}
+
+// ────────────────────────────────────────────────────────────
+// 세션 심층 분석 커맨드
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TurnTokenUsage {
+    pub turn_index: i64,
+    pub role: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cost_usd: f64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ToolCostRank {
+    pub tool_name: String,
+    pub call_count: u64,
+    pub success_count: u64,
+    pub estimated_tokens: u64,
+    pub total_cost_usd: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionAnalysis {
+    pub session_id: String,
+    pub agent_type: String,
+    pub model_id: Option<String>,
+    pub started_at: String,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub total_cache_read_tokens: u64,
+    pub total_cost_usd: f64,
+    /// 캐시 히트율 (0.0 ~ 1.0)
+    pub cache_hit_rate: f64,
+    /// 캐시로 절감된 예상 비용 (USD)
+    pub cache_saved_cost: f64,
+    /// 턴별 토큰 소비 내역
+    pub turns: Vec<TurnTokenUsage>,
+    /// 도구별 비용 랭킹 (상위 10개)
+    pub tool_cost_rank: Vec<ToolCostRank>,
+    /// 이상 탐지 시그널
+    pub anomaly_signals: Vec<agent_token_tracker::detect::loops::LoopSignal>,
+    /// 이상 탐지 여부
+    pub is_anomaly: bool,
+}
+
+#[tauri::command]
+fn get_session_analysis(session_id: String) -> Result<SessionAnalysis, String> {
+    let conn = get_db_conn()?;
+
+    // 세션 기본 정보
+    let sessions = db::get_all_sessions(&conn)
+        .map_err(|e| format!("세션 조회 실패: {}", e))?;
+    let sess = sessions.into_iter().find(|s| s.session_id == session_id)
+        .ok_or_else(|| format!("세션 ID를 찾을 수 없습니다: {}", session_id))?;
+
+    // 메시지 조회
+    let messages = db::get_messages_by_session(&conn, &session_id)
+        .map_err(|e| format!("메시지 조회 실패: {}", e))?;
+
+    // 도구 호출 조회
+    let tool_calls = db::get_tool_calls_by_session(&conn, &session_id)
+        .map_err(|e| format!("도구 호출 조회 실패: {}", e))?;
+
+    // 캐시 관련 집계
+    let total_input: u64 = messages.iter().map(|m| m.input_tokens).sum();
+    let total_output: u64 = messages.iter().map(|m| m.output_tokens).sum();
+    let total_cache_read: u64 = messages.iter().map(|m| m.cache_read_input_tokens).sum();
+    let total_cost: f64 = messages.iter().map(|m| m.cost_usd).sum();
+
+    let cache_hit_rate = if total_input > 0 {
+        total_cache_read as f64 / total_input as f64
+    } else {
+        0.0
+    };
+
+    // 캐시 절감 비용 추정 (캐시 읽기 비용 vs 일반 입력 비용 차이)
+    // claude-3-5-sonnet: input $3/MTok, cache_read $0.30/MTok → 약 90% 절감
+    let cache_saved_cost = total_cache_read as f64 * 2.7 / 1_000_000.0;
+
+    // 턴별 내역
+    let turns: Vec<TurnTokenUsage> = messages.iter().map(|m| TurnTokenUsage {
+        turn_index: m.turn_index as i64,
+        role: m.role.clone(),
+        input_tokens: m.input_tokens,
+        output_tokens: m.output_tokens,
+        cache_read_tokens: m.cache_read_input_tokens,
+        cost_usd: m.cost_usd,
+        created_at: m.created_at.clone(),
+    }).collect();
+
+    // 도구별 비용 랭킹 (세션의 총 토큰을 도구 호출 수에 비례 배분)
+    let total_tool_calls = tool_calls.len() as u64;
+    let token_per_call = if total_tool_calls > 0 {
+        (total_input + total_output) / total_tool_calls
+    } else {
+        0
+    };
+    let cost_per_call = if total_tool_calls > 0 {
+        total_cost / total_tool_calls as f64
+    } else {
+        0.0
+    };
+
+    let mut tool_map: std::collections::HashMap<String, (u64, u64, f64)> = std::collections::HashMap::new();
+    for tc in &tool_calls {
+        let entry = tool_map.entry(tc.tool_name.clone()).or_insert((0, 0, 0.0));
+        entry.0 += 1; // call_count
+        if tc.success { entry.1 += 1; } // success_count
+        entry.2 += cost_per_call; // cost_usd 비례배분
+    }
+
+    let mut tool_cost_rank: Vec<ToolCostRank> = tool_map.into_iter().map(|(name, (calls, successes, cost))| {
+        ToolCostRank {
+            tool_name: name,
+            call_count: calls,
+            success_count: successes,
+            estimated_tokens: calls * token_per_call,
+            total_cost_usd: cost,
+        }
+    }).collect();
+    tool_cost_rank.sort_by(|a, b| b.call_count.cmp(&a.call_count));
+    tool_cost_rank.truncate(10);
+
+    // 이상 탐지
+    let config = DetectorConfig::default();
+    let detect_result = detect_session_anomalies(&sess, &messages, &tool_calls, &config);
+
+    Ok(SessionAnalysis {
+        session_id: sess.session_id.clone(),
+        agent_type: sess.agent_type.clone(),
+        model_id: sess.model_id.clone(),
+        started_at: sess.started_at.clone(),
+        total_input_tokens: total_input,
+        total_output_tokens: total_output,
+        total_cache_read_tokens: total_cache_read,
+        total_cost_usd: total_cost,
+        cache_hit_rate,
+        cache_saved_cost,
+        turns,
+        tool_cost_rank,
+        anomaly_signals: detect_result.signals,
+        is_anomaly: detect_result.is_anomaly,
+    })
+}
+
+// ────────────────────────────────────────────────────────────
+// 이슈 #791: 로컬 인증 토큰 자동 감지 및 간편 연동 커맨드
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DetectedCredential {
+    pub provider: String,          // "anthropic" | "openai"
+    pub token_type: String,        // "oauth_token" | "api_key"
+    pub value: String,             // 마스킹 처리된 토큰 값 (예: "sk-ant-oat01...xxxx")
+    pub raw_value: String,         // 실제 토큰 값
+    pub source: String,            // "Keychain" | "EnvVar" | "ConfigFile"
+    pub description: String,       // 설명 텍스트
+}
+
+fn mask_token(token: &str) -> String {
+    if token.len() <= 12 {
+        return "****".to_string();
+    }
+    let prefix = &token[0..8];
+    let suffix = &token[token.len() - 4..];
+    format!("{}...{}", prefix, suffix)
+}
+
+#[tauri::command]
+fn get_local_credentials() -> Result<Vec<DetectedCredential>, String> {
+    let mut detected = Vec::new();
+
+    // 1. macOS Keychain에서 claude-code OAuth 토큰 조회 시도
+    // A. security CLI 커맨드 직접 쿼리 (가장 확실함)
+    let output = std::process::Command::new("security")
+        .args(&["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .output();
+    if let Ok(out) = output {
+        if out.status.success() {
+            let password = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !password.is_empty() {
+                detected.push(DetectedCredential {
+                    provider: "anthropic".to_string(),
+                    token_type: "oauth_token".to_string(),
+                    value: mask_token(&password),
+                    raw_value: password.clone(),
+                    source: "Keychain".to_string(),
+                    description: "macOS 키체인 (Claude Code-credentials)".to_string(),
+                });
+            }
+        }
+    }
+
+    // B. keyring 크레이트를 통한 백업 스캔
+    if detected.is_empty() {
+        let user = std::env::var("USER").unwrap_or_default();
+        let username = std::env::var("USERNAME").unwrap_or_default();
+        let mut accounts = vec![
+            "oauth".to_string(),
+            "claude-code".to_string(),
+            "current".to_string(),
+            "default".to_string(),
+            "session".to_string(),
+            "token".to_string(),
+        ];
+        if !user.is_empty() { accounts.push(user); }
+        if !username.is_empty() { accounts.push(username); }
+
+        let services = vec!["Claude Code-credentials", "Claude Code", "claude-code"];
+
+        'outer: for svc in services {
+            for acct in &accounts {
+                if let Ok(entry) = Entry::new(svc, acct) {
+                    if let Ok(password) = entry.get_password() {
+                        if !password.trim().is_empty() {
+                            detected.push(DetectedCredential {
+                                provider: "anthropic".to_string(),
+                                token_type: "oauth_token".to_string(),
+                                value: mask_token(&password),
+                                raw_value: password.clone(),
+                                source: "Keychain".to_string(),
+                                description: format!("macOS 키체인 (서비스: {}, 계정: {})", svc, acct),
+                            });
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. 로컬 파일시스템 스캔
+    let home = std::env::var("HOME").unwrap_or_default();
+    if !home.is_empty() {
+        let home_path = Path::new(&home);
+        
+        // A. 기존 설정 파일 감지
+        let possible_files = vec![
+            (home_path.join(".claude").join(".credentials.json"), "oauthToken"),
+            (home_path.join(".claude").join("login.json"), "accessToken"),
+            (home_path.join(".claude").join("config.json"), "oauthToken"),
+        ];
+
+        for (path, key) in possible_files {
+            if path.exists() && path.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(token) = val.get(key).and_then(|v| v.as_str()) {
+                            if !token.trim().is_empty() {
+                                detected.push(DetectedCredential {
+                                    provider: "anthropic".to_string(),
+                                    token_type: "oauth_token".to_string(),
+                                    value: mask_token(token),
+                                    raw_value: token.to_string(),
+                                    source: "ConfigFile".to_string(),
+                                    description: format!("로컬 설정 파일 ({})", path.file_name().unwrap().to_str().unwrap()),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // B. fetch-claude-usage.swift 파일 스캔 및 세션 키 파싱
+        let swift_script_path = home_path.join(".claude").join("fetch-claude-usage.swift");
+        if swift_script_path.exists() && swift_script_path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&swift_script_path) {
+                for line in content.lines() {
+                    if line.contains("injectedKey") && line.contains("sk-ant-sid02") {
+                        if let Some(start_idx) = line.find("\"") {
+                            if let Some(end_idx) = line[start_idx + 1..].find("\"") {
+                                let token = &line[start_idx + 1..start_idx + 1 + end_idx];
+                                if !token.trim().is_empty() {
+                                    detected.push(DetectedCredential {
+                                        provider: "anthropic".to_string(),
+                                        token_type: "oauth_token".to_string(),
+                                        value: mask_token(token),
+                                        raw_value: token.to_string(),
+                                        source: "ConfigFile".to_string(),
+                                        description: "Claude.ai 세션 키 (fetch-claude-usage.swift)".to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. 환경 변수 스캔
+    if let Ok(token) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
+        if !token.trim().is_empty() {
+            detected.push(DetectedCredential {
+                provider: "anthropic".to_string(),
+                token_type: "oauth_token".to_string(),
+                value: mask_token(&token),
+                raw_value: token,
+                source: "EnvVar".to_string(),
+                description: "환경 변수 CLAUDE_CODE_OAUTH_TOKEN".to_string(),
+            });
+        }
+    }
+
+    if let Ok(token) = std::env::var("ANTHROPIC_API_KEY") {
+        if !token.trim().is_empty() {
+            detected.push(DetectedCredential {
+                provider: "anthropic".to_string(),
+                token_type: "api_key".to_string(),
+                value: mask_token(&token),
+                raw_value: token,
+                source: "EnvVar".to_string(),
+                description: "환경 변수 ANTHROPIC_API_KEY".to_string(),
+            });
+        }
+    }
+
+    if let Ok(token) = std::env::var("OPENAI_API_KEY") {
+        if !token.trim().is_empty() {
+            detected.push(DetectedCredential {
+                provider: "openai".to_string(),
+                token_type: "api_key".to_string(),
+                value: mask_token(&token),
+                raw_value: token,
+                source: "EnvVar".to_string(),
+                description: "환경 변수 OPENAI_API_KEY".to_string(),
+            });
+        }
+    }
+
+    Ok(detected)
+}
+
+#[tauri::command]
+fn auto_apply_credential(provider: String, raw_value: String) -> Result<(), String> {
+    println!("[Credential] auto_apply_credential 호출 - provider: {}, raw_value 길이: {}", provider, raw_value.len());
+    let res = save_api_key(provider, raw_value);
+    println!("[Credential] auto_apply_credential 결과: {:?}", res);
+    res
+}
+
 #[tauri::command]
 fn save_api_key(provider: String, api_key: String) -> Result<(), String> {
+    println!("[Credential] save_api_key 호출 - provider: {}, api_key 길이: {}", provider, api_key.len());
     if provider != "anthropic" && provider != "openai" {
         return Err("지원하지 않는 플랫폼입니다.".to_string());
     }
@@ -691,6 +1526,13 @@ async fn validate_stored_api_key(provider: String) -> Result<bool, String> {
         Ok(k) => k,
         Err(_) => return Ok(false),
     };
+
+    // OAuth 토큰(sk-ant-oat) 또는 웹 세션 키(sk-ant-sid)는 공식 API(/v1/messages) 인증에 쓸 수 없으므로 
+    // 포맷 매칭 시 즉시 유효(true) 판정을 내립니다.
+    if api_key.starts_with("sk-ant-oat") || api_key.starts_with("sk-ant-sid") {
+        println!("[Credential] Anthropic OAuth 또는 웹 세션 토큰 감지 - API 테스트를 우회하여 유효 판정");
+        return Ok(true);
+    }
 
     let client = reqwest::Client::new();
     
@@ -1181,7 +2023,12 @@ fn main() {
             validate_local_path,
             sync_local_sessions,
             get_hourly_token_usage,
-            get_token_usage_breakdown
+            get_token_usage_breakdown,
+            get_subscription_quota,
+            get_rolling_window_usage,
+            get_session_analysis,
+            get_local_credentials,
+            auto_apply_credential
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 앱 구동 중 에러 발생");

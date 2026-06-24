@@ -157,6 +157,7 @@ body {
 .metric-item {
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 .metric-label {
@@ -167,10 +168,11 @@ body {
 }
 
 .metric-value {
-  font-size: 1.125rem;
+  font-size: 1.05rem;
   font-weight: 700;
   color: var(--foreground);
   font-family: 'Outfit', sans-serif;
+  white-space: nowrap;
 }
 
 .pulse-badge {
