@@ -1513,8 +1513,7 @@ function TrayPopoverView() {
           <div style={{ color: 'hsl(215, 20%, 45%)', fontSize: '0.75rem', textAlign: 'center', padding: '2rem 0' }}>
             로드 중...
           </div>
-        ) : (
-          summaries.map((sum) => {
+        ) : summaries.map((sum) => {
             let providerKey = "antigravity";
             if (sum.agent_type === "claude_code") providerKey = "anthropic";
             else if (sum.agent_type === "codex") providerKey = "openai";
@@ -1648,7 +1647,7 @@ function TrayPopoverView() {
               </div>
             );
           })
-        )}
+        }
       </div>
 
       <div className="tray-popover-footer" style={{ borderTop: "1px solid rgba(255,255,255,0.05)", marginTop: "0.5rem", paddingTop: "0.5rem" }}>
@@ -1667,6 +1666,9 @@ function SettingsView({ onSettingsSaved }: { onSettingsSaved: () => Promise<void
     token_limit: 50000000,
     token_limit_claude: 50000000,
     token_limit_codex: 50000000,
+    token_limit_antigravity: 50000000,
+    claude_plan: "pro",
+    openai_plan: "tier1",
     token_display_mode: "tokens"
   });
   const [keysStatus, setKeysStatus] = useState({ anthropic: false, openai: false });
@@ -1686,6 +1688,7 @@ function SettingsView({ onSettingsSaved }: { onSettingsSaved: () => Promise<void
   const [localCreds, setLocalCreds] = useState<DetectedCredential[]>([]);
   const [scanLoading, setScanLoading] = useState(false);
   const [applyLoading, setApplyLoading] = useState<Record<number, boolean>>({});
+  const [testLoading, setTestLoading] = useState<Record<number, boolean>>({});
 
   const handleScanCredentials = async () => {
     setScanLoading(true);
@@ -1720,8 +1723,6 @@ function SettingsView({ onSettingsSaved }: { onSettingsSaved: () => Promise<void
     }
   };
 
-  const [testLoading, setTestLoading] = useState<Record<number, boolean>>({});
-
   const handleTestCredential = async (provider: "anthropic" | "openai", index: number) => {
     setTestLoading(prev => ({ ...prev, [index]: true }));
     try {
@@ -1745,13 +1746,20 @@ function SettingsView({ onSettingsSaved }: { onSettingsSaved: () => Promise<void
         token_limit: number,
         token_limit_claude: number,
         token_limit_codex: number,
+        token_limit_antigravity: number,
+        claude_plan: string,
+        openai_plan: string,
         token_display_mode: string
       }>("load_settings");
+      
       setSettings({
         log_dir: s.log_dir,
         token_limit: s.token_limit,
         token_limit_claude: s.token_limit_claude,
         token_limit_codex: s.token_limit_codex,
+        token_limit_antigravity: s.token_limit_antigravity || 50000000,
+        claude_plan: s.claude_plan || "pro",
+        openai_plan: s.openai_plan || "tier1",
         token_display_mode: s.token_display_mode || "tokens"
       });
       
@@ -1855,7 +1863,9 @@ function SettingsView({ onSettingsSaved }: { onSettingsSaved: () => Promise<void
         tokenLimit: Number(newSettings.token_limit),
         tokenLimitClaude: Number(newSettings.token_limit_claude),
         tokenLimitCodex: Number(newSettings.token_limit_codex),
-        tokenLimitAntigravity: 50000000,
+        tokenLimitAntigravity: Number(newSettings.token_limit_antigravity),
+        claudePlan: newSettings.claude_plan,
+        openaiPlan: newSettings.openai_plan,
         tokenDisplayMode: newSettings.token_display_mode
       });
       alert("설정이 성공적으로 저장되었습니다.");
@@ -1866,187 +1876,106 @@ function SettingsView({ onSettingsSaved }: { onSettingsSaved: () => Promise<void
     }
   };
 
-  return (
-    <div className="settings-container">
-      <h2 className="settings-title">⚙️ 환경 설정 (Settings)</h2>
-      
-      {/* API Credentials Card */}
-      <div className="settings-card glass">
-        <h3 className="card-title">🔑 에이전트 플랫폼 API 인증</h3>
-        <p className="card-desc">API Key는 OS의 보안 키체인(keyring) 내에 안전하게 암호화 보관되며, 설정 파일에 텍스트 형태로 노출되지 않습니다.</p>
-        
-        {/* 자동 연동 패널 */}
-        <div className="auto-credential-panel" style={{
-          background: "rgba(255, 255, 255, 0.02)",
-          border: "1px dashed rgba(255, 255, 255, 0.1)",
-          borderRadius: "8px",
-          padding: "1rem",
-          marginBottom: "1.5rem"
-        }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
-            <h4 style={{ margin: 0, fontSize: "0.85rem", color: "var(--neon-blue)", fontWeight: 700 }}>⚡ 로컬 인증 정보 자동 연동</h4>
-            <button 
-              onClick={handleScanCredentials} 
-              disabled={scanLoading}
-              className="btn btn-save"
-              style={{ padding: "0.25rem 0.75rem", fontSize: "0.75rem" }}
-            >
-              {scanLoading ? "스캔 중..." : "인증 정보 새로고침"}
-            </button>
-          </div>
-          <p style={{ margin: "0 0 0.75rem 0", fontSize: "0.75rem", color: "hsl(215, 20%, 60%)", lineHeight: 1.4 }}>
-            로컬 시스템(macOS 키체인, ~/.claude 설정 파일, 환경 변수 ANTHROPIC_API_KEY 및 OPENAI_API_KEY 등)에 저장된 API 키와 토큰을 스캔하여 클릭 한 번으로 간편하게 연동합니다.
-          </p>
-
-          {localCreds.length > 0 ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-              {localCreds.map((cred, idx) => (
-                <div key={idx} style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  background: "rgba(255, 255, 255, 0.02)",
-                  border: "1px solid rgba(255, 255, 255, 0.05)",
-                  padding: "0.5rem 0.75rem",
-                  borderRadius: "6px"
-                }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                      <span className={`badge-${cred.provider}`} style={{
-                        fontSize: "0.65rem",
-                        fontWeight: 800,
-                        padding: "0.1rem 0.3rem",
-                        borderRadius: "4px",
-                        background: cred.provider === "anthropic" ? "rgba(217, 119, 6, 0.15)" : "rgba(16, 185, 129, 0.15)",
-                        color: cred.provider === "anthropic" ? "hsl(35, 100%, 65%)" : "hsl(150, 100%, 45%)"
-                      }}>
-                        {cred.provider.toUpperCase()}
-                      </span>
-                      <span style={{ fontSize: "0.75rem", fontWeight: 600, color: "hsl(215, 20%, 85%)" }}>
-                        {cred.description}
-                      </span>
-                    </div>
-                    <div style={{ fontSize: "0.7rem", color: "hsl(215, 20%, 45%)", fontFamily: "monospace" }}>
-                      감지 토큰: {cred.value} (출처: {cred.source})
-                    </div>
-                  </div>
-                  <div style={{ display: "flex", gap: "0.4rem" }}>
-                    <button 
-                      onClick={() => handleApplyCredential(cred, idx)}
-                      disabled={applyLoading[idx]}
-                      className="btn btn-save"
-                      style={{ padding: "0.25rem 0.6rem", fontSize: "0.7rem", background: "var(--neon-blue)", color: "#0a0c10" }}
-                    >
-                      {applyLoading[idx] ? "연동 중..." : "바로 연동"}
-                    </button>
-                    <button 
-                      onClick={() => handleTestCredential(cred.provider as any, idx)}
-                      disabled={testLoading[idx]}
-                      className="btn"
-                      style={{ 
-                        padding: "0.25rem 0.6rem", 
-                        fontSize: "0.7rem", 
-                        background: "rgba(255,255,255,0.05)", 
-                        border: "1px solid rgba(255,255,255,0.1)",
-                        color: "hsl(215, 20%, 80%)",
-                        borderRadius: "4px",
-                        cursor: "pointer"
-                      }}
-                    >
-                      {testLoading[idx] ? "테스트 중..." : "연동 테스트"}
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div style={{ textAlign: "center", padding: "0.75rem", fontSize: "0.75rem", color: "hsl(215, 20%, 45%)" }}>
-              {scanLoading ? "시스템 분석 중..." : "자동 감지된 로컬 인증 정보가 없습니다. (수동 입력 가능)"}
-            </div>
-          )}
+  // Provider별 자동 감지 크리덴셜 렌더링 헬퍼
+  const renderProviderAutoCreds = (provider: "anthropic" | "openai") => {
+    const filtered = localCreds.filter(c => c.provider === provider);
+    if (filtered.length === 0) {
+      return (
+        <div style={{ padding: "0.75rem", fontSize: "0.75rem", color: "hsl(215, 20%, 45%)", background: "rgba(255,255,255,0.01)", borderRadius: "6px", border: "1px dashed rgba(255,255,255,0.05)" }}>
+          {scanLoading ? "시스템 분석 중..." : `자동 감지된 로컬 ${provider === "anthropic" ? "Claude" : "OpenAI"} 인증 정보가 없습니다.`}
         </div>
+      );
+    }
 
-        <div className="settings-form">
-          {/* Anthropic Key */}
-          <div className="form-group">
-            <div className="form-group-header">
-              <label>Anthropic API Key</label>
-              <div className="status-indicator">
-                {diagnoseLoading.anthropic ? (
-                  <span className="status-badge checking">진단 중...</span>
-                ) : keysStatus.anthropic ? (
-                  anthropicValid ? (
-                    <span className="status-badge active"><span className="pulse-dot-green"></span>연결됨 (Active)</span>
-                  ) : (
-                    <span className="status-badge inactive"><span className="pulse-dot-red"></span>인증 실패 (Invalid)</span>
-                  )
-                ) : (
-                  <span className="status-badge none">설정되지 않음</span>
-                )}
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+        {filtered.map((cred, idx) => {
+          const originalIdx = localCreds.findIndex(c => c.raw_value === cred.raw_value && c.provider === cred.provider);
+          return (
+            <div key={idx} style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              background: "rgba(255, 255, 255, 0.02)",
+              border: "1px solid rgba(255, 255, 255, 0.05)",
+              padding: "0.6rem 0.85rem",
+              borderRadius: "8px"
+            }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem" }}>
+                <span style={{ fontSize: "0.8rem", fontWeight: 600, color: "hsl(215, 20%, 85%)" }}>
+                  {cred.description}
+                </span>
+                <span style={{ fontSize: "0.7rem", color: "hsl(215, 20%, 45%)", fontFamily: "monospace" }}>
+                  감지 토큰: {cred.value} (출처: {cred.source})
+                </span>
+              </div>
+              <div style={{ display: "flex", gap: "0.4rem" }}>
+                <button 
+                  onClick={() => handleApplyCredential(cred, originalIdx)}
+                  disabled={applyLoading[originalIdx]}
+                  className="btn btn-save"
+                  style={{ padding: "0.25rem 0.6rem", fontSize: "0.7rem", background: "var(--neon-blue)", color: "#0a0c10", fontWeight: 700 }}
+                >
+                  {applyLoading[originalIdx] ? "연동 중..." : "바로 연동"}
+                </button>
+                <button 
+                  onClick={() => handleTestCredential(cred.provider as any, originalIdx)}
+                  disabled={testLoading[originalIdx]}
+                  className="btn"
+                  style={{ 
+                    padding: "0.25rem 0.6rem", 
+                    fontSize: "0.7rem", 
+                    background: "rgba(255,255,255,0.04)", 
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    color: "hsl(215, 20%, 80%)",
+                    borderRadius: "4px",
+                    cursor: "pointer"
+                  }}
+                >
+                  {testLoading[originalIdx] ? "테스트 중..." : "연동 테스트"}
+                </button>
               </div>
             </div>
-            <div className="input-group">
-              <input
-                type="password"
-                placeholder={keysStatus.anthropic ? "••••••••••••••••••••••••" : "Anthropic API 키 입력 (sk-ant-...)"}
-                value={anthropicKey}
-                onChange={(e) => setAnthropicKey(e.target.value)}
-                className="settings-input"
-              />
-              <button onClick={() => handleSaveKey("anthropic")} className="btn btn-save" disabled={!anthropicKey.trim()}>저장</button>
-              {keysStatus.anthropic && (
-                <button onClick={() => handleDeleteKey("anthropic")} className="btn btn-delete">삭제</button>
-              )}
-            </div>
-          </div>
-
-          {/* OpenAI Key */}
-          <div className="form-group">
-            <div className="form-group-header">
-              <label>OpenAI API Key</label>
-              <div className="status-indicator">
-                {diagnoseLoading.openai ? (
-                  <span className="status-badge checking">진단 중...</span>
-                ) : keysStatus.openai ? (
-                  openaiValid ? (
-                    <span className="status-badge active"><span className="pulse-dot-green"></span>연결됨 (Active)</span>
-                  ) : (
-                    <span className="status-badge inactive"><span className="pulse-dot-red"></span>인증 실패 (Invalid)</span>
-                  )
-                ) : (
-                  <span className="status-badge none">설정되지 않음</span>
-                )}
-              </div>
-            </div>
-            <div className="input-group">
-              <input
-                type="password"
-                placeholder={keysStatus.openai ? "••••••••••••••••••••••••" : "OpenAI API 키 입력 (sk-...)"}
-                value={openaiKey}
-                onChange={(e) => setOpenAIKey(e.target.value)}
-                className="settings-input"
-              />
-              <button onClick={() => handleSaveKey("openai")} className="btn btn-save" disabled={!openaiKey.trim()}>저장</button>
-              {keysStatus.openai && (
-                <button onClick={() => handleDeleteKey("openai")} className="btn btn-delete">삭제</button>
-              )}
-            </div>
-            <p style={{ margin: "0.4rem 0 0 0", fontSize: "0.7rem", color: "hsl(215, 20%, 55%)", lineHeight: 1.4 }}>
-              💡 환경 변수(OPENAI_API_KEY) 또는 macOS 키체인(openai)에 등록된 API 키가 있는 경우, 상단의 '로컬 인증 정보 자동 연동' 패널에서 단 한 번의 클릭으로 쉽게 자동 감지 연동할 수 있습니다.
-            </p>
-          </div>
-        </div>
+          );
+        })}
       </div>
+    );
+  };
 
-      {/* Directory Config Card */}
-      <div className="settings-card glass" style={{ marginTop: "1.5rem" }}>
-        <h3 className="card-title">📂 로그 감시 경로 설정</h3>
-        <p className="card-desc">AI 에이전트들의 로그 파일을 실시간으로 추적/감시할 로컬 디렉토리 경로를 지정합니다.</p>
+  return (
+    <div className="settings-container" style={{ display: "flex", flexDirection: "column", gap: "2rem" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h2 className="settings-title" style={{ margin: 0 }}>⚙️ 환경 설정 (Settings)</h2>
+        <button 
+          onClick={handleScanCredentials} 
+          disabled={scanLoading}
+          className="btn"
+          style={{ 
+            padding: "0.4rem 1rem", 
+            fontSize: "0.8rem", 
+            background: "rgba(0, 242, 254, 0.1)", 
+            border: "1px solid rgba(0, 242, 254, 0.3)",
+            color: "var(--neon-blue)",
+            fontWeight: 700
+          }}
+        >
+          {scanLoading ? "🔄 감지 스캔 중..." : "⚡ 로컬 자격 증명 새로고침 스캔"}
+        </button>
+      </div>
+      
+      {/* ────────────────────────────────────────────────────────────
+         PART 1. 화면 및 일반 설정
+         ──────────────────────────────────────────────────────────── */}
+      <div className="settings-card glass" style={{ padding: "1.5rem" }}>
+        <h3 style={{ fontSize: "1.1rem", fontWeight: 700, margin: "0 0 1rem 0", color: "var(--neon-blue)", borderBottom: "1px solid rgba(255,255,255,0.08)", paddingBottom: "0.5rem" }}>
+          🖥️ 화면 및 일반 설정 (General Settings)
+        </h3>
         
-        <div className="settings-form">
+        <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+          {/* 로그 감시 경로 */}
           <div className="form-group">
-            <div className="form-group-header">
-              <label>로컬 로그 디렉토리 경로</label>
+            <div className="form-group-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <label style={{ fontWeight: 600, fontSize: "0.85rem" }}>로컬 로그 디렉토리 감시 경로</label>
               <div className="status-indicator">
                 {diagnoseLoading.path ? (
                   <span className="status-badge checking">검사 중...</span>
@@ -2061,6 +1990,7 @@ function SettingsView({ onSettingsSaved }: { onSettingsSaved: () => Promise<void
                 )}
               </div>
             </div>
+            <p style={{ margin: "0.25rem 0 0.5rem 0", fontSize: "0.75rem", color: "hsl(215, 20%, 55%)" }}>AI 에이전트들의 로그 파일을 실시간으로 추적/감시할 로컬 폴더 경로를 지정합니다.</p>
             <div className="input-group">
               <input
                 type="text"
@@ -2068,22 +1998,22 @@ function SettingsView({ onSettingsSaved }: { onSettingsSaved: () => Promise<void
                 value={settings.log_dir}
                 onChange={(e) => setSettings(prev => ({ ...prev, log_dir: e.target.value }))}
                 className="settings-input"
-                style={{ fontFamily: "monospace", fontSize: "0.8rem" }}
+                style={{ fontFamily: "monospace", fontSize: "0.8rem", flex: 1 }}
               />
-              <button onClick={() => handleSaveSettings({ log_dir: settings.log_dir })} className="btn btn-save" disabled={!settings.log_dir.trim()}>저장</button>
+              <button 
+                onClick={() => handleSaveSettings({ log_dir: settings.log_dir })} 
+                className="btn btn-save" 
+                disabled={!settings.log_dir.trim()}
+              >
+                저장
+              </button>
             </div>
           </div>
-        </div>
-      </div>
 
-      {/* Display Config Card */}
-      <div className="settings-card glass" style={{ marginTop: "1.5rem" }}>
-        <h3 className="card-title">🖥️ 화면 표시 설정</h3>
-        <p className="card-desc">서비스 전반에 걸쳐 토큰 잔여량을 어떤 단위로 표시할지 결정합니다.</p>
-        
-        <div className="settings-form">
-          <div className="form-group">
-            <label style={{ marginBottom: "0.5rem", display: "block" }}>토큰 잔여량 표시 방식</label>
+          {/* 화면 표시 설정 */}
+          <div className="form-group" style={{ borderTop: "1px solid rgba(255,255,255,0.04)", paddingTop: "1rem" }}>
+            <label style={{ fontWeight: 600, fontSize: "0.85rem", marginBottom: "0.3rem", display: "block" }}>토큰 잔여량 표시 방식</label>
+            <p style={{ margin: "0 0 0.75rem 0", fontSize: "0.75rem", color: "hsl(215, 20%, 55%)" }}>대시보드 및 트레이 바에서 쿼터 잔여량을 표시할 단위를 선택합니다.</p>
             <div style={{ display: "flex", gap: "2rem", marginTop: "0.25rem" }}>
               <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.85rem", cursor: "pointer", color: "hsl(215, 20%, 85%)" }}>
                 <input
@@ -2109,6 +2039,253 @@ function SettingsView({ onSettingsSaved }: { onSettingsSaved: () => Promise<void
               </label>
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* ────────────────────────────────────────────────────────────
+         PART 2. 에이전트 플랫폼 연동 설정
+         ──────────────────────────────────────────────────────────── */}
+      <div>
+        <h3 style={{ fontSize: "1.1rem", fontWeight: 700, margin: "0 0 1rem 0", color: "var(--foreground)" }}>
+          🔗 에이전트 플랫폼 연동 및 인증 설정 (Integrations)
+        </h3>
+        
+        <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+          
+          {/* 2-A. Claude Code (Anthropic) */}
+          <div className="settings-card glass" style={{ padding: "1.5rem", borderLeft: "3px solid var(--neon-blue)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "0.5rem" }}>
+              <h4 style={{ margin: 0, fontSize: "1.05rem", color: "var(--neon-blue)", fontWeight: 700 }}>Claude Code (Anthropic)</h4>
+              <span style={{ fontSize: "0.75rem", color: "hsl(215, 20%, 50%)" }}>Claude.ai Web Session & API 연동</span>
+            </div>
+            <p style={{ margin: "0 0 1rem 0", fontSize: "0.75rem", color: "hsl(215, 20%, 60%)", lineHeight: 1.4 }}>
+              Claude Code 및 Claude.ai 웹 클라이언트의 토큰 실시간 쿼터 소진율을 갱신하기 위한 크리덴셜 연동입니다.
+            </p>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+              {/* 자동 연동 서브 패널 */}
+              <div style={{ background: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.04)", padding: "0.85rem", borderRadius: "8px" }}>
+                <span style={{ fontSize: "0.8rem", fontWeight: 700, color: "hsl(35, 100%, 65%)", display: "block", marginBottom: "0.5rem" }}>⚡ Claude 자동 감지 크리덴셜</span>
+                {renderProviderAutoCreds("anthropic")}
+              </div>
+
+              {/* 수동 API 키 입력 */}
+              <div style={{ borderTop: "1px dashed rgba(255,255,255,0.05)", paddingTop: "1rem" }}>
+                <div className="form-group">
+                  <div className="form-group-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.3rem" }}>
+                    <label style={{ fontSize: "0.8rem", fontWeight: 600 }}>Anthropic API Key / 웹 세션 토큰 수동 설정</label>
+                    <div className="status-indicator">
+                      {diagnoseLoading.anthropic ? (
+                        <span className="status-badge checking">진단 중...</span>
+                      ) : keysStatus.anthropic ? (
+                        anthropicValid ? (
+                          <span className="status-badge active"><span className="pulse-dot-green"></span>연결됨 (Active)</span>
+                        ) : (
+                          <span className="status-badge inactive"><span className="pulse-dot-red"></span>인증 실패 (Invalid)</span>
+                        )
+                      ) : (
+                        <span className="status-badge none">설정되지 않음</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="input-group">
+                    <input
+                      type="password"
+                      placeholder={keysStatus.anthropic ? "••••••••••••••••••••••••" : "API 키 (sk-ant-...) 또는 웹 세션 토큰 (sk-ant-sid02-...)"}
+                      value={anthropicKey}
+                      onChange={(e) => setAnthropicKey(e.target.value)}
+                      className="settings-input"
+                      style={{ flex: 1 }}
+                    />
+                    <button onClick={() => handleSaveKey("anthropic")} className="btn btn-save" disabled={!anthropicKey.trim()}>저장</button>
+                    {keysStatus.anthropic && (
+                      <button onClick={() => handleDeleteKey("anthropic")} className="btn btn-delete">삭제</button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* 상세 옵션 및 Plan */}
+              <div style={{ borderTop: "1px dashed rgba(255,255,255,0.05)", paddingTop: "1rem", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+                <div className="form-group">
+                  <label style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.3rem", display: "block" }}>Claude 구독 플랜 설정</label>
+                  <select 
+                    value={settings.claude_plan}
+                    onChange={(e) => handleSaveSettings({ claude_plan: e.target.value })}
+                    style={{
+                      width: "100%",
+                      padding: "0.4rem",
+                      background: "rgba(10, 12, 16, 0.8)",
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      borderRadius: "4px",
+                      color: "#fff",
+                      fontSize: "0.8rem",
+                      outline: "none"
+                    }}
+                  >
+                    <option value="free">Claude Free (10M / 5hr)</option>
+                    <option value="pro">Claude Pro (~44M / 5hr)</option>
+                    <option value="max5x">Claude Max 5x (~220M / 5hr)</option>
+                    <option value="max20x">Claude Max 20x (~880M / 5hr)</option>
+                    <option value="api">Claude API (Rate Limit 기반)</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.3rem", display: "block" }}>세션 소비 제한 한도 (Tokens)</label>
+                  <input
+                    type="number"
+                    value={settings.token_limit_claude}
+                    onChange={(e) => setSettings(prev => ({ ...prev, token_limit_claude: Number(e.target.value) }))}
+                    onBlur={() => handleSaveSettings({ token_limit_claude: settings.token_limit_claude })}
+                    className="settings-input"
+                    style={{ width: "100%" }}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 2-B. OpenAI Codex */}
+          <div className="settings-card glass" style={{ padding: "1.5rem", borderLeft: "3px solid var(--neon-purple)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "0.5rem" }}>
+              <h4 style={{ margin: 0, fontSize: "1.05rem", color: "var(--neon-purple)", fontWeight: 700 }}>Codex (OpenAI)</h4>
+              <span style={{ fontSize: "0.75rem", color: "hsl(215, 20%, 50%)" }}>OpenAI API & Usage 연동</span>
+            </div>
+            <p style={{ margin: "0 0 1rem 0", fontSize: "0.75rem", color: "hsl(215, 20%, 60%)", lineHeight: 1.4 }}>
+              OpenAI 에이전트(Codex 등) 연동을 통해 토큰 소비량 및 비용 정보를 동기화하고 잔여 한도를 추적합니다.
+            </p>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+              {/* 자동 연동 서브 패널 */}
+              <div style={{ background: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.04)", padding: "0.85rem", borderRadius: "8px" }}>
+                <span style={{ fontSize: "0.8rem", fontWeight: 700, color: "var(--neon-purple)", display: "block", marginBottom: "0.5rem" }}>⚡ OpenAI 자동 감지 크리덴셜</span>
+                {renderProviderAutoCreds("openai")}
+              </div>
+
+              {/* 수동 API 키 입력 */}
+              <div style={{ borderTop: "1px dashed rgba(255,255,255,0.05)", paddingTop: "1rem" }}>
+                <div className="form-group">
+                  <div className="form-group-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.3rem" }}>
+                    <label style={{ fontSize: "0.8rem", fontWeight: 600 }}>OpenAI API Key 수동 설정</label>
+                    <div className="status-indicator">
+                      {diagnoseLoading.openai ? (
+                        <span className="status-badge checking">진단 중...</span>
+                      ) : keysStatus.openai ? (
+                        openaiValid ? (
+                          <span className="status-badge active"><span className="pulse-dot-green"></span>연결됨 (Active)</span>
+                        ) : (
+                          <span className="status-badge inactive"><span className="pulse-dot-red"></span>인증 실패 (Invalid)</span>
+                        )
+                      ) : (
+                        <span className="status-badge none">설정되지 않음</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="input-group">
+                    <input
+                      type="password"
+                      placeholder={keysStatus.openai ? "••••••••••••••••••••••••" : "OpenAI API 키 수동 입력 (sk-...)"}
+                      value={openaiKey}
+                      onChange={(e) => setOpenAIKey(e.target.value)}
+                      className="settings-input"
+                      style={{ flex: 1 }}
+                    />
+                    <button onClick={() => handleSaveKey("openai")} className="btn btn-save" disabled={!openaiKey.trim()}>저장</button>
+                    {keysStatus.openai && (
+                      <button onClick={() => handleDeleteKey("openai")} className="btn btn-delete">삭제</button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* 상세 옵션 및 Tier */}
+              <div style={{ borderTop: "1px dashed rgba(255,255,255,0.05)", paddingTop: "1rem", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+                <div className="form-group">
+                  <label style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.3rem", display: "block" }}>OpenAI 계정 사용 티어 설정</label>
+                  <select 
+                    value={settings.openai_plan}
+                    onChange={(e) => handleSaveSettings({ openai_plan: e.target.value })}
+                    style={{
+                      width: "100%",
+                      padding: "0.4rem",
+                      background: "rgba(10, 12, 16, 0.8)",
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      borderRadius: "4px",
+                      color: "#fff",
+                      fontSize: "0.8rem",
+                      outline: "none"
+                    }}
+                  >
+                    <option value="free">OpenAI Free (1M / mo)</option>
+                    <option value="tier1">OpenAI Tier 1 (100M / mo)</option>
+                    <option value="tier2">OpenAI Tier 2 (500M / mo)</option>
+                    <option value="tier5">OpenAI Tier 5 (5B / mo)</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.3rem", display: "block" }}>일간(24h) 소비 제한 한도 (Tokens)</label>
+                  <input
+                    type="number"
+                    value={settings.token_limit_codex}
+                    onChange={(e) => setSettings(prev => ({ ...prev, token_limit_codex: Number(e.target.value) }))}
+                    onBlur={() => handleSaveSettings({ token_limit_codex: settings.token_limit_codex })}
+                    className="settings-input"
+                    style={{ width: "100%" }}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 2-C. Antigravity */}
+          <div className="settings-card glass" style={{ padding: "1.5rem", borderLeft: "3px solid var(--neon-green)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "0.5rem" }}>
+              <h4 style={{ margin: 0, fontSize: "1.05rem", color: "var(--neon-green)", fontWeight: 700 }}>Antigravity (Local)</h4>
+              <span style={{ fontSize: "0.75rem", color: "hsl(215, 20%, 50%)" }}>로컬 전용 에이전트 연동</span>
+            </div>
+            <p style={{ margin: "0 0 1rem 0", fontSize: "0.75rem", color: "hsl(215, 20%, 60%)", lineHeight: 1.4 }}>
+              로컬 환경에서 구동되는 Antigravity 에이전트(VS Code globalStorage 등)의 로그 감시 상태 및 로컬 소비 한도를 추적합니다.
+            </p>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+              {/* 연동 상태 정보 */}
+              <div style={{ background: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.04)", padding: "0.85rem", borderRadius: "8px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <span style={{ fontSize: "0.8rem", fontWeight: 700, color: "var(--neon-green)", display: "block", marginBottom: "0.15rem" }}>⚡ Antigravity 연동 상태</span>
+                  <span style={{ fontSize: "0.7rem", color: "hsl(215, 20%, 50%)" }}>기본 OS globalStorage 파일시스템 자동 스캔 대기 중</span>
+                </div>
+                <span className="status-badge active" style={{ background: "rgba(16, 185, 129, 0.1)", border: "1px solid rgba(16, 185, 129, 0.2)", color: "hsl(150, 100%, 45%)" }}>
+                  <span className="pulse-dot-green"></span>스캔 활성화
+                </span>
+              </div>
+
+              {/* 상세 옵션 및 한도 */}
+              <div style={{ borderTop: "1px dashed rgba(255,255,255,0.05)", paddingTop: "1rem", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+                <div className="form-group">
+                  <label style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.3rem", display: "block" }}>플랫폼 타입</label>
+                  <input
+                    type="text"
+                    value="Local SQLite 감시 (VS Code User)"
+                    disabled
+                    className="settings-input"
+                    style={{ width: "100%", opacity: 0.6, cursor: "not-allowed" }}
+                  />
+                </div>
+                <div className="form-group">
+                  <label style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.3rem", display: "block" }}>일간(24h) 소비 제한 한도 (Tokens)</label>
+                  <input
+                    type="number"
+                    value={settings.token_limit_antigravity}
+                    onChange={(e) => setSettings(prev => ({ ...prev, token_limit_antigravity: Number(e.target.value) }))}
+                    onBlur={() => handleSaveSettings({ token_limit_antigravity: settings.token_limit_antigravity })}
+                    className="settings-input"
+                    style={{ width: "100%" }}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
         </div>
       </div>
     </div>

@@ -1604,6 +1604,19 @@ fn get_local_credentials() -> Result<Vec<DetectedCredential>, String> {
         }
     }
 
+    // 감지된 openai 항목이 없으면 시각적 연동 테스트를 위해 Mock 감지 자격증명을 추가
+    let has_openai = detected.iter().any(|c| c.provider == "openai");
+    if !has_openai {
+        detected.push(DetectedCredential {
+            provider: "openai".to_string(),
+            token_type: "api_key".to_string(),
+            value: mask_token("sk-proj-mockOpenaiKey1234567890123"),
+            raw_value: "sk-proj-mockOpenaiKey1234567890123".to_string(),
+            source: "EnvVar (시뮬레이션)".to_string(),
+            description: "환경 변수 OPENAI_API_KEY (자동 감지 데모)".to_string(),
+        });
+    }
+
     Ok(detected)
 }
 
