@@ -2106,7 +2106,13 @@ function SettingsView({ onSettingsSaved }: { onSettingsSaved: () => Promise<void
               </div>
 
               {/* 상세 옵션 및 Plan */}
-              <div style={{ borderTop: "1px dashed rgba(255,255,255,0.05)", paddingTop: "1rem", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+              <div style={{ 
+                borderTop: "1px dashed rgba(255,255,255,0.05)", 
+                paddingTop: "1rem", 
+                display: "grid", 
+                gridTemplateColumns: !(keysStatus.anthropic && anthropicValid) ? "1fr 1fr" : "1fr", 
+                gap: "1rem" 
+              }}>
                 <div className="form-group">
                   <label style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.3rem", display: "block" }}>Claude 구독 플랜 설정</label>
                   <select 
@@ -2130,17 +2136,19 @@ function SettingsView({ onSettingsSaved }: { onSettingsSaved: () => Promise<void
                     <option value="api">Claude API (Rate Limit 기반)</option>
                   </select>
                 </div>
-                <div className="form-group">
-                  <label style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.3rem", display: "block" }}>세션 소비 제한 한도 (Tokens)</label>
-                  <input
-                    type="number"
-                    value={settings.token_limit_claude}
-                    onChange={(e) => setSettings(prev => ({ ...prev, token_limit_claude: Number(e.target.value) }))}
-                    onBlur={() => handleSaveSettings({ token_limit_claude: settings.token_limit_claude })}
-                    className="settings-input"
-                    style={{ width: "100%" }}
-                  />
-                </div>
+                {!(keysStatus.anthropic && anthropicValid) && (
+                  <div className="form-group">
+                    <label style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.3rem", display: "block" }}>세션 소비 제한 한도 (Tokens)</label>
+                    <input
+                      type="number"
+                      value={settings.token_limit_claude}
+                      onChange={(e) => setSettings(prev => ({ ...prev, token_limit_claude: Number(e.target.value) }))}
+                      onBlur={() => handleSaveSettings({ token_limit_claude: settings.token_limit_claude })}
+                      className="settings-input"
+                      style={{ width: "100%" }}
+                    />
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -2199,7 +2207,13 @@ function SettingsView({ onSettingsSaved }: { onSettingsSaved: () => Promise<void
               </div>
 
               {/* 상세 옵션 및 Tier */}
-              <div style={{ borderTop: "1px dashed rgba(255,255,255,0.05)", paddingTop: "1rem", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+              <div style={{ 
+                borderTop: "1px dashed rgba(255,255,255,0.05)", 
+                paddingTop: "1rem", 
+                display: "grid", 
+                gridTemplateColumns: !(keysStatus.openai && openaiValid) ? "1fr 1fr" : "1fr", 
+                gap: "1rem" 
+              }}>
                 <div className="form-group">
                   <label style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.3rem", display: "block" }}>OpenAI 계정 사용 티어 설정</label>
                   <select 
@@ -2222,17 +2236,19 @@ function SettingsView({ onSettingsSaved }: { onSettingsSaved: () => Promise<void
                     <option value="tier5">OpenAI Tier 5 (5B / mo)</option>
                   </select>
                 </div>
-                <div className="form-group">
-                  <label style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.3rem", display: "block" }}>일간(24h) 소비 제한 한도 (Tokens)</label>
-                  <input
-                    type="number"
-                    value={settings.token_limit_codex}
-                    onChange={(e) => setSettings(prev => ({ ...prev, token_limit_codex: Number(e.target.value) }))}
-                    onBlur={() => handleSaveSettings({ token_limit_codex: settings.token_limit_codex })}
-                    className="settings-input"
-                    style={{ width: "100%" }}
-                  />
-                </div>
+                {!(keysStatus.openai && openaiValid) && (
+                  <div className="form-group">
+                    <label style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.3rem", display: "block" }}>일간(24h) 소비 제한 한도 (Tokens)</label>
+                    <input
+                      type="number"
+                      value={settings.token_limit_codex}
+                      onChange={(e) => setSettings(prev => ({ ...prev, token_limit_codex: Number(e.target.value) }))}
+                      onBlur={() => handleSaveSettings({ token_limit_codex: settings.token_limit_codex })}
+                      className="settings-input"
+                      style={{ width: "100%" }}
+                    />
+                  </div>
+                )}
               </div>
             </div>
           </div>
