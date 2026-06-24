@@ -1517,14 +1517,14 @@ function TrayPopoverView() {
                 {/* 1. 세션별 (또는 단기/일간) 한도 */}
                 {quota && (
                   <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.7rem", color: "hsl(215, 20%, 65%)" }}>
-                      <span>{sum.agent_type === "claude_code" ? "세션 (5시간 롤링)" : "세션 (일간 한도)"}</span>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: "0.5rem", fontSize: "0.7rem", color: "hsl(215, 20%, 65%)" }}>
+                      <span>{sum.agent_type === "claude_code" ? "세션 (5시간)" : "세션 (일간)"}</span>
                       <span style={{ fontWeight: "700", color: remainingColor }}>
                         {quota.quota_tokens > 900_000_000_000_000 
                           ? "무제한" 
                           : isPercentage 
-                            ? `소진 ${Math.round(quota.usage_pct)}% (잔여 ${Math.max(0, 100 - Math.round(quota.usage_pct))}%)`
-                            : `잔여 ${formatTokens(quota.remaining_tokens)}`
+                            ? `소진 ${Math.round(quota.usage_pct)}%`
+                            : `${formatTokens(quota.used_tokens)}`
                         }
                       </span>
                     </div>
@@ -1537,14 +1537,14 @@ function TrayPopoverView() {
                 {/* 2. 주간별 (또는 장기/월간/누적) 한도 */}
                 {quota && quota.weekly_quota_tokens !== undefined && quota.weekly_quota_tokens !== null && (
                   <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem", marginTop: "0.1rem" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.7rem", color: "hsl(215, 20%, 65%)" }}>
-                      <span>{sum.agent_type === "claude_code" ? "주간 (모든 모델)" : sum.agent_type === "codex" ? "주간 (월간 한도)" : "주간 (7일 한도)"}</span>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: "0.5rem", fontSize: "0.7rem", color: "hsl(215, 20%, 65%)" }}>
+                      <span>{sum.agent_type === "claude_code" ? "주간 (모든모델)" : sum.agent_type === "codex" ? "주간 (월간)" : "주간 (7일)"}</span>
                       <span style={{ fontWeight: "700", color: remainingColor }}>
                         {quota.weekly_quota_tokens > 900_000_000_000_000
                           ? "무제한" 
                           : isPercentage 
-                            ? `소진 ${Math.round(quota.weekly_usage_pct || 0)}% (잔여 ${Math.max(0, 100 - Math.round(quota.weekly_usage_pct || 0))}%)`
-                            : `잔여 ${formatTokens(quota.weekly_remaining_tokens || 0)}`
+                            ? `소진 ${Math.round(quota.weekly_usage_pct || 0)}%`
+                            : `${formatTokens(quota.weekly_used_tokens || 0)}`
                         }
                       </span>
                     </div>
