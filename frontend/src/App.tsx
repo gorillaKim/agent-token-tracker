@@ -1390,6 +1390,7 @@ function TrayPopoverView() {
   const [summaries, setSummaries] = useState<AgentSummary[]>([]);
   const [anomalies, setAnomalies] = useState<LoopDetectionResult[]>([]);
   const [quotas, setQuotas] = useState<PlanQuotaInfo[]>([]);
+  const [tokenDisplayMode, setTokenDisplayMode] = useState<string>("tokens");
   const [loading, setLoading] = useState(true);
 
   const loadData = async () => {
@@ -1397,6 +1398,16 @@ function TrayPopoverView() {
       const sums = await invoke<AgentSummary[]>("get_agent_summaries");
       const anoms = await invoke<LoopDetectionResult[]>("get_loop_signals");
       const qts = await invoke<PlanQuotaInfo[]>("get_subscription_quota");
+      
+      try {
+        const appSettings = await invoke<any>("load_settings");
+        if (appSettings && appSettings.token_display_mode) {
+          setTokenDisplayMode(appSettings.token_display_mode);
+        }
+      } catch (e) {
+        console.error("설정 로드 실패:", e);
+      }
+
       setSummaries(sums);
       setAnomalies(anoms);
       setQuotas(qts);
@@ -1417,7 +1428,6 @@ function TrayPopoverView() {
     };
   }, []);
 
-  const totalCost = summaries.reduce((acc, curr) => acc + curr.total_cost_usd, 0);
   const totalAnomalies = anomalies.length;
 
   const formatTokens = (val: number): string => {
@@ -1462,7 +1472,7 @@ function TrayPopoverView() {
         </div>
       )}
 
-      <div className="tray-popover-list">
+      <div className="tray-popover-list" style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
         {loading ? (
           <div style={{ color: 'hsl(215, 20%, 45%)', fontSize: '0.75rem', textAlign: 'center', padding: '2rem 0' }}>
             로드 중...
@@ -1475,60 +1485,80 @@ function TrayPopoverView() {
 
             const quota = quotas.find(q => q.provider === providerKey);
             
-            let mainUsageText = "-";
-            let subDetailText = `세션 ${sum.session_count}개 | 토큰 ${formatTokens(sum.total_input_tokens + sum.total_output_tokens)}`;
+            let progressPct = 0;
+            let valLabel = "-";
+            let barGradient = "linear-gradient(90deg, var(--neon-blue), var(--neon-purple))";
+            let remainingColor = "var(--neon-blue)";
+
+            if (sum.agent_type === "claude_code") {
+              barGradient = "linear-gradient(90deg, var(--neon-blue), var(--neon-purple))";
+              remainingColor = "var(--neon-blue)";
+            } else if (sum.agent_type === "codex") {
+              barGradient = "linear-gradient(90deg, var(--neon-purple), #9b51e0)";
+              remainingColor = "var(--neon-purple)";
+            } else {
+              barGradient = "linear-gradient(90deg, var(--neon-green), #00e676)";
+              remainingColor = "var(--neon-green)";
+            }
 
             if (quota) {
-              const mainPct = Math.min(100, Math.round(quota.usage_pct));
-              const mainRemainingPct = Math.max(0, 100 - mainPct);
-              
+              // 1. 소진율 (프로그레스 바 용도)
               if (sum.agent_type === "claude_code") {
-                const weeklyPct = quota.weekly_usage_pct ? Math.min(100, Math.round(quota.weekly_usage_pct)) : 0;
-                const weeklyRemainingPct = Math.max(0, 100 - weeklyPct);
-
-                // 우측에 5시간 및 주간 소진율 표기
-                mainUsageText = `5h: ${mainPct}% | 1w: ${weeklyPct}%`;
-                
-                // 하단 상세에 잔여량과 주간 잔여량 표기
-                const rem5h = quota.quota_tokens > 900_000_000_000_000 ? "무제한" : `${mainRemainingPct}% (${formatTokens(quota.remaining_tokens)})`;
-                const rem1w = quota.weekly_quota_tokens && quota.weekly_quota_tokens > 900_000_000_000_000 
-                  ? "무제한" 
-                  : quota.weekly_remaining_tokens 
-                    ? `${weeklyRemainingPct}% (${formatTokens(quota.weekly_remaining_tokens)})`
-                    : "-";
-                
-                subDetailText = `세션 ${sum.session_count}개 | 5h잔여 ${rem5h} | 1w잔여 ${rem1w}`;
-              } else if (sum.agent_type === "codex") {
-                mainUsageText = `월간: ${mainPct}%`;
-                const remOpenai = quota.quota_tokens > 900_000_000_000_000 ? "무제한" : `${mainRemainingPct}% (${formatTokens(quota.remaining_tokens)})`;
-                subDetailText = `세션 ${sum.session_count}개 | 잔여 ${remOpenai}`;
+                progressPct = quota.weekly_usage_pct ? Math.min(100, Math.round(quota.weekly_usage_pct)) : 0;
               } else {
-                mainUsageText = `일간: ${mainPct}%`;
-                const remAgy = quota.quota_tokens > 900_000_000_000_000 ? "무제한" : `${mainRemainingPct}% (${formatTokens(quota.remaining_tokens)})`;
-                subDetailText = `세션 ${sum.session_count}개 | 잔여 ${remAgy}`;
+                progressPct = Math.min(100, Math.round(quota.usage_pct));
+              }
+
+              // 2. 설정에 따른 잔여 표기 계산
+              const isPercentage = tokenDisplayMode === "percentage";
+
+              if (sum.agent_type === "claude_code") {
+                const weeklyQuota = quota.weekly_quota_tokens || 0;
+                const weeklyRemaining = quota.weekly_remaining_tokens || 0;
+                if (weeklyQuota > 900_000_000_000_000) {
+                  valLabel = "잔여 무제한";
+                } else {
+                  valLabel = isPercentage 
+                    ? `잔여 ${100 - progressPct}%` 
+                    : `잔여 ${formatTokens(weeklyRemaining)}`;
+                }
+              } else {
+                if (quota.quota_tokens > 900_000_000_000_000) {
+                  valLabel = "잔여 무제한";
+                } else {
+                  valLabel = isPercentage 
+                    ? `잔여 ${100 - progressPct}%` 
+                    : `잔여 ${formatTokens(quota.remaining_tokens)}`;
+                }
               }
             }
 
             return (
-              <div key={sum.agent_type} className="tray-popover-row" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0.75rem 0", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-                <div>
-                  <span className="tray-popover-agent-name" style={{ fontWeight: 700, fontSize: "0.9rem" }}>
-                    {sum.agent_type === "claude_code" ? "Claude Code" : sum.agent_type === "codex" ? "Codex" : "Antigravity"}
-                  </span>
-                  <div style={{ fontSize: '0.7rem', color: 'hsl(215, 20%, 55%)', marginTop: '0.2rem' }}>
-                    {subDetailText}
+              <div key={sum.agent_type} className="tray-popover-row" style={{ display: "flex", flexDirection: "column", gap: "0.4rem", padding: "0.6rem 0", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: "0.4rem" }}>
+                    <span className="tray-popover-agent-name" style={{ fontWeight: 700, fontSize: "0.85rem", color: "var(--foreground)" }}>
+                      {sum.agent_type === "claude_code" ? "Claude Code" : sum.agent_type === "codex" ? "Codex" : "Antigravity"}
+                    </span>
+                    <span style={{ fontSize: "0.65rem", color: "hsl(215, 20%, 50%)" }}>
+                      ({sum.session_count} Sessions)
+                    </span>
                   </div>
+                  <span style={{ fontSize: "0.75rem", fontWeight: "700", color: remainingColor }}>
+                    {valLabel}
+                  </span>
                 </div>
-                <span className="tray-popover-agent-usage" style={{ fontWeight: 800, fontSize: "0.85rem", color: "var(--neon-blue)", whiteSpace: "nowrap" }}>
-                  {mainUsageText}
-                </span>
+                
+                <div style={{ height: "4px", background: "rgba(255,255,255,0.03)", borderRadius: "2px", overflow: "hidden", position: "relative" }}>
+                  <div style={{ height: "100%", width: `${progressPct}%`, background: barGradient, borderRadius: "2px", transition: "width 0.5s ease-out" }} />
+                </div>
               </div>
             );
           })
         )}
       </div>
 
-      <div className="tray-popover-footer">
+      <div className="tray-popover-footer" style={{ borderTop: "1px solid rgba(255,255,255,0.05)", marginTop: "0.5rem", paddingTop: "0.5rem" }}>
         <span>오늘 누적 사용 토큰</span>
         <span style={{ fontWeight: 800, color: 'var(--neon-blue)' }}>
           {summaries.reduce((acc, curr) => acc + (curr.total_input_tokens + curr.total_output_tokens), 0).toLocaleString()} Tokens
