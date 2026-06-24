@@ -916,6 +916,54 @@ async fn fetch_claude_usage_from_api(session_key: &str, org_id: &str) -> Result<
     Ok((five_hour_util, five_hour_reset, weekly_util, weekly_reset))
 }
 
+#[derive(Debug, Deserialize)]
+struct OpenAIUsageResponse {
+    data: Option<Vec<OpenAIUsageItem>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIUsageItem {
+    n_context_tokens_total: Option<u64>,
+    n_generated_tokens_total: Option<u64>,
+}
+
+async fn fetch_openai_usage_from_api(api_key: &str) -> Result<u64, String> {
+    let now = chrono::Local::now();
+    let start_date = now.format("%Y-%m-01").to_string();
+    let end_date = now.format("%Y-%m-%d").to_string();
+
+    let client = reqwest::Client::new();
+    let url = format!(
+        "https://api.openai.com/v1/usage?start_date={}&end_date={}",
+        start_date, end_date
+    );
+
+    let response = client.get(&url)
+        .bearer_auth(api_key)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("OpenAI API 호출 실패: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("OpenAI API 응답 에러, status: {}", response.status()));
+    }
+
+    let usage_res: OpenAIUsageResponse = response.json()
+        .await
+        .map_err(|e| format!("OpenAI JSON 파싱 실패: {}", e))?;
+
+    let mut total_tokens = 0;
+    if let Some(items) = usage_res.data {
+        for item in items {
+            total_tokens += item.n_context_tokens_total.unwrap_or(0);
+            total_tokens += item.n_generated_tokens_total.unwrap_or(0);
+        }
+    }
+
+    Ok(total_tokens)
+}
+
 fn get_today_usage_antigravity() -> Result<u64, String> {
     let conn = get_db_conn()?;
     let mut stmt = conn.prepare(
@@ -1050,8 +1098,44 @@ async fn get_subscription_quota(app_handle: AppHandle) -> Result<Vec<PlanQuotaIn
     });
 
     // ── OpenAI Codex (이번 달 누적) ──
-    let openai_used = get_monthly_usage_openai().unwrap_or(0);
+    let mut openai_used = get_monthly_usage_openai().unwrap_or(0);
     let (openai_quota, openai_label) = openai_tier_quota(&settings.openai_plan);
+
+    // 키체인 혹은 환경변수에서 OpenAI API Key 획득 시도
+    let mut resolved_openai_key = None;
+    if let Ok(entry) = Entry::new("agent-token-tracker", "openai") {
+        if let Ok(api_key) = entry.get_password() {
+            let trimmed = api_key.trim().to_string();
+            if !trimmed.is_empty() {
+                resolved_openai_key = Some(trimmed);
+            }
+        }
+    }
+
+    if resolved_openai_key.is_none() {
+        if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
+            let trimmed = api_key.trim().to_string();
+            if !trimmed.is_empty() {
+                resolved_openai_key = Some(trimmed);
+            }
+        }
+    }
+
+    if let Some(api_key) = resolved_openai_key {
+        println!("[Quota] OpenAI API 키를 활용하여 OpenAI 실시간 사용량 조회를 시작합니다.");
+        match fetch_openai_usage_from_api(&api_key).await {
+            Ok(total_tokens) => {
+                println!("[Quota] OpenAI 실시간 조회 성공: total_tokens = {}", total_tokens);
+                openai_used = total_tokens;
+            }
+            Err(e) => {
+                eprintln!("[Quota] OpenAI 실시간 usage API 호출 실패 (로컬 DB 폴백 사용): {}", e);
+            }
+        }
+    } else {
+        println!("[Quota] 유효한 OpenAI API 키를 발견하지 못했습니다. 로컬 DB 집계를 사용합니다.");
+    }
+
     let openai_remaining = openai_quota.saturating_sub(openai_used);
     let openai_pct = if openai_quota == 0 {
         0.0

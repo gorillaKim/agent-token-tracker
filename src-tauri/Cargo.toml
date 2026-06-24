@@ -15,3 +15,4 @@ notify = "6.1.1"
 agent-token-tracker = { path = ".." }
 keyring = "3.2.1"
 reqwest = { version = "0.12", features = ["json"] }
+chrono = { version = "0.4", features = ["serde"] }

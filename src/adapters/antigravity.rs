@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn test_git_info_raw_parsing() {
         let ws_info = WorkspaceInfo {
-            workspace_root: Some("/Users/madup/front-core".to_string()),
+            workspace_root: Some("/mock/front-core".to_string()),
             workspace_uri: None,
             git_info_raw: Some(b"\x12+https://github.com/madup-inc/front-core.git\"\tfeat/jake".to_vec()),
         };
