@@ -1587,6 +1587,23 @@ fn get_local_credentials() -> Result<Vec<DetectedCredential>, String> {
         }
     }
 
+    // 4. macOS Keychain에서 openai API 키 조회 시도
+    if let Ok(entry) = Entry::new("agent-token-tracker", "openai") {
+        if let Ok(api_key) = entry.get_password() {
+            let trimmed = api_key.trim().to_string();
+            if !trimmed.is_empty() {
+                detected.push(DetectedCredential {
+                    provider: "openai".to_string(),
+                    token_type: "api_key".to_string(),
+                    value: mask_token(&trimmed),
+                    raw_value: trimmed,
+                    source: "Keychain".to_string(),
+                    description: "macOS 키체인 (agent-token-tracker / openai)".to_string(),
+                });
+            }
+        }
+    }
+
     Ok(detected)
 }
 

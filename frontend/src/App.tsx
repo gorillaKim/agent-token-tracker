@@ -1895,7 +1895,7 @@ function SettingsView({ onSettingsSaved }: { onSettingsSaved: () => Promise<void
             </button>
           </div>
           <p style={{ margin: "0 0 0.75rem 0", fontSize: "0.75rem", color: "hsl(215, 20%, 60%)", lineHeight: 1.4 }}>
-            로컬 시스템(macOS 키체인, ~/.claude 설정 파일, 환경 변수 등)에 저장된 OAuth 토큰 및 API 키를 스캔하여 단 한 번의 클릭으로 쉽게 연동합니다.
+            로컬 시스템(macOS 키체인, ~/.claude 설정 파일, 환경 변수 ANTHROPIC_API_KEY 및 OPENAI_API_KEY 등)에 저장된 API 키와 토큰을 스캔하여 클릭 한 번으로 간편하게 연동합니다.
           </p>
 
           {localCreds.length > 0 ? (
@@ -2031,6 +2031,9 @@ function SettingsView({ onSettingsSaved }: { onSettingsSaved: () => Promise<void
                 <button onClick={() => handleDeleteKey("openai")} className="btn btn-delete">삭제</button>
               )}
             </div>
+            <p style={{ margin: "0.4rem 0 0 0", fontSize: "0.7rem", color: "hsl(215, 20%, 55%)", lineHeight: 1.4 }}>
+              💡 환경 변수(OPENAI_API_KEY) 또는 macOS 키체인(openai)에 등록된 API 키가 있는 경우, 상단의 '로컬 인증 정보 자동 연동' 패널에서 단 한 번의 클릭으로 쉽게 자동 감지 연동할 수 있습니다.
+            </p>
           </div>
         </div>
       </div>
