@@ -1,20 +1,26 @@
-import { 
-  Session, 
-  AgentSummary, 
-  LoopDetectionResult, 
-  DailyTokenUsage, 
-  HourlyTokenUsage, 
-  PlanQuotaInfo 
+import {
+  Session,
+  AgentSummary,
+  LoopDetectionResult,
+  DailyTokenUsage,
+  HourlyTokenUsage,
+  PlanQuotaInfo,
 } from "../types";
 import { AgentQuotaCard } from "../components/AgentQuotaCard";
 import { SplineChart } from "../components/SplineChart";
 import { formatCwd, formatTokens } from "../utils/formatters";
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { Activity, AlertTriangle } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Skeleton } from "@/components/ui/skeleton";
 
 interface DashboardViewProps {
-  sessions: Session[];
   summaries: AgentSummary[];
-  anomalies: LoopDetectionResult[];
   dailyTokenUsage: DailyTokenUsage[];
   hourlyTokenUsage: HourlyTokenUsage[];
   quotaInfo: PlanQuotaInfo[];
@@ -22,15 +28,20 @@ interface DashboardViewProps {
   setSelectedSessionId: (id: string | null) => void;
 }
 
+const DAY_OPTIONS = [
+  { label: "1d", value: 1 },
+  { label: "3d", value: 3 },
+  { label: "7d", value: 7 },
+];
+
 /**
  * 대시보드 메인 화면 뷰
- * 
+ *
  * 할당량 카드 그리드, 인터랙티브 토큰 사용량 차트, 그리고 활성/오작동 세션 현황판을 렌더링합니다.
+ * 하단 현황 섹션은 1d/3d/7d 시간 필터(기본 1d)로 필터링하며, 변경 시마다 백엔드를 재호출합니다.
  */
 export function DashboardView({
-  sessions,
   summaries,
-  anomalies,
   dailyTokenUsage,
   hourlyTokenUsage,
   quotaInfo,
@@ -45,16 +56,56 @@ export function DashboardView({
   });
 
   const toggleSummary = (agentType: string) => {
-    setExpandedSummaries(prev => ({
+    setExpandedSummaries((prev) => ({
       ...prev,
-      [agentType]: !prev[agentType]
+      [agentType]: !prev[agentType],
     }));
   };
 
+  // 하단 현황(활성 세션 + 오작동) 시간 필터 — 기본 1d
+  const [bottomDays, setBottomDays] = useState<number>(1);
+  const [bottomSessions, setBottomSessions] = useState<Session[]>([]);
+  const [bottomAnomalies, setBottomAnomalies] = useState<LoopDetectionResult[]>([]);
+  const [bottomLoading, setBottomLoading] = useState<boolean>(true);
+
+  // 선택된 기간으로 백엔드 재조회 (필터 변경마다 API 호출)
+  const fetchBottom = useCallback(async () => {
+    setBottomLoading(true);
+    try {
+      const [sess, anoms] = await Promise.all([
+        invoke<Session[]>("get_active_sessions", { days: bottomDays }),
+        invoke<LoopDetectionResult[]>("get_loop_signals", { days: bottomDays }),
+      ]);
+      setBottomSessions(sess);
+      setBottomAnomalies(anoms);
+    } catch (e) {
+      console.error("대시보드 현황 로드 실패:", e);
+    } finally {
+      setBottomLoading(false);
+    }
+  }, [bottomDays]);
+
+  useEffect(() => {
+    fetchBottom();
+  }, [fetchBottom]);
+
+  // 로그 변경 감지 시에도 현재 기간 기준으로 갱신
+  useEffect(() => {
+    const unlistenPromise = listen("db-updated", () => {
+      fetchBottom();
+    });
+    return () => {
+      unlistenPromise.then((fn) => fn());
+    };
+  }, [fetchBottom]);
+
+  const showSessionSkeleton = bottomLoading && bottomSessions.length === 0;
+  const showAnomalySkeleton = bottomLoading && bottomAnomalies.length === 0;
+
   return (
-    <>
+    <div className="flex flex-col gap-6">
       {/* 할당량 및 쿼터 정보 섹션 */}
-      <section className="cards-grid">
+      <section className="grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] gap-4">
         {summaries.map((sum) => {
           let providerKey = "antigravity";
           if (sum.agent_type === "claude_code") providerKey = "anthropic";
@@ -76,76 +127,141 @@ export function DashboardView({
       </section>
 
       {/* 개선된 인터랙티브 차트 컴포넌트 마운트 */}
-      <SplineChart 
-        dailyTokenUsage={dailyTokenUsage}
-        hourlyTokenUsage={hourlyTokenUsage}
-      />
+      <SplineChart dailyTokenUsage={dailyTokenUsage} hourlyTokenUsage={hourlyTokenUsage} />
 
-      {/* 대시보드 하단: 활성 세션 & 이상 세션 */}
-      <div className="bottom-sections">
-        <section className="section-card glass">
-          <h3 className="section-header">🟢 활성 작업 세션 ({sessions.length})</h3>
-          <div className="session-list">
-            {sessions.map((s) => (
-              <div
-                key={s.session_id}
-                onClick={() => setSelectedSessionId(s.session_id)}
-                className="session-item session-item-clickable"
+      {/* 대시보드 하단: 활성 세션 & 이상 세션 (1d/3d/7d 필터) */}
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-end gap-2">
+          <span className="mr-1 text-xs text-muted-foreground">기간</span>
+          <div className="flex items-center gap-0.5 rounded-lg border border-border bg-muted/40 p-0.5">
+            {DAY_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => setBottomDays(opt.value)}
+                className={cn(
+                  "rounded-md px-3 py-1 text-xs font-medium transition-colors",
+                  bottomDays === opt.value
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
               >
-                <div className="session-meta">
-                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                    <span className="session-id">{s.session_name || s.session_id.substring(0, 18) + "..."}</span>
-                    {s.parent_session_id && (
-                      <span style={{ 
-                        fontSize: "0.6rem", 
-                        padding: "0.05rem 0.3rem", 
-                        borderRadius: "4px", 
-                        background: "rgba(139, 92, 246, 0.2)", 
-                        color: "var(--neon-purple)", 
-                        fontWeight: "bold",
-                        border: "1px solid rgba(139, 92, 246, 0.3)",
-                        whiteSpace: "nowrap"
-                      }}>
-                        서브에이전트 세션
-                      </span>
-                    )}
-                  </div>
-                  <span className="session-agent">{s.agent_type} • {formatCwd(s.cwd)}</span>
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+          <Card className="lg:col-span-2">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Activity className="h-4 w-4 text-success" />
+                활성 작업 세션
+                <Badge variant="secondary" className="ml-auto tabular-nums">
+                  {bottomSessions.length}
+                </Badge>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <ScrollArea className="h-[280px] pr-3">
+                <div className="flex flex-col gap-1">
+                  {showSessionSkeleton ? (
+                    <div className="flex flex-col gap-2">
+                      <Skeleton className="h-14 w-full" />
+                      <Skeleton className="h-14 w-full" />
+                      <Skeleton className="h-14 w-full" />
+                    </div>
+                  ) : (
+                    <>
+                      {bottomSessions.map((s) => (
+                        <button
+                          key={s.session_id}
+                          onClick={() => setSelectedSessionId(s.session_id)}
+                          className="flex w-full items-center justify-between gap-3 rounded-md px-3 py-2.5 text-left transition-colors hover:bg-muted"
+                        >
+                          <div className="flex min-w-0 flex-col gap-0.5">
+                            <div className="flex items-center gap-2">
+                              <span className="truncate text-sm font-medium">
+                                {s.session_name || s.session_id.substring(0, 18) + "..."}
+                              </span>
+                              {s.parent_session_id && (
+                                <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px]">
+                                  서브에이전트
+                                </Badge>
+                              )}
+                            </div>
+                            <span className="truncate text-xs text-muted-foreground">
+                              {s.agent_type} • {formatCwd(s.cwd)}
+                            </span>
+                          </div>
+                          <span className="shrink-0 text-xs font-medium tabular-nums text-muted-foreground">
+                            {formatTokens(s.total_input_tokens + s.total_output_tokens)} Tokens
+                          </span>
+                        </button>
+                      ))}
+                      {bottomSessions.length === 0 && (
+                        <div className="py-8 text-center text-sm text-muted-foreground">
+                          선택한 기간에 활성 세션이 없습니다.
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
-                <span className="session-tokens">
-                  {formatTokens(s.total_input_tokens + s.total_output_tokens)} Tokens
-                </span>
-              </div>
-            ))}
-            {sessions.length === 0 && (
-              <div style={{ color: "hsl(215, 20%, 40%)", textAlign: "center", padding: "1rem" }}>
-                수집된 활성 세션이 없습니다. 로그 감시 경로 설정을 확인해 주세요.
-              </div>
-            )}
-          </div>
-        </section>
+              </ScrollArea>
+            </CardContent>
+          </Card>
 
-        <section className="section-card glass">
-          <h3 className="section-header" style={{ color: "var(--neon-red)" }}>🚨 오작동 탐지 현황 ({anomalies.length})</h3>
-          <div className="anomaly-list">
-            {anomalies.map((a) => (
-              <div
-                key={a.session_id}
-                onClick={() => setSelectedSessionId(a.session_id)}
-                className="anomaly-item anomaly-item-clickable"
-              >
-                <span className="anomaly-id">{a.session_id.substring(0, 16)}...</span>
-                <span className="anomaly-desc">오작동 시그널 {a.signals.length}개 검출됨</span>
-              </div>
-            ))}
-            {anomalies.length === 0 && (
-              <div style={{ color: "hsl(150, 100%, 35%)", textAlign: "center", padding: "1rem" }}>
-                지속 루프 및 토큰 폭팽 등의 오작동 세션이 없습니다.
-              </div>
-            )}
-          </div>
-        </section>
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <AlertTriangle className="h-4 w-4 text-destructive" />
+                오작동 탐지 현황
+                <Badge
+                  variant={bottomAnomalies.length > 0 ? "destructive" : "secondary"}
+                  className="ml-auto tabular-nums"
+                >
+                  {bottomAnomalies.length}
+                </Badge>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <ScrollArea className="h-[280px] pr-3">
+                <div className="flex flex-col gap-1">
+                  {showAnomalySkeleton ? (
+                    <div className="flex flex-col gap-2">
+                      <Skeleton className="h-12 w-full" />
+                      <Skeleton className="h-12 w-full" />
+                      <Skeleton className="h-12 w-full" />
+                    </div>
+                  ) : (
+                    <>
+                      {bottomAnomalies.map((a) => (
+                        <button
+                          key={a.session_id}
+                          onClick={() => setSelectedSessionId(a.session_id)}
+                          className="flex w-full flex-col gap-0.5 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-left transition-colors hover:bg-destructive/10"
+                        >
+                          <span className="truncate font-mono text-xs">
+                            {a.session_id.substring(0, 16)}...
+                          </span>
+                          <span className="text-xs text-destructive">
+                            오작동 시그널 {a.signals.length}개 검출됨
+                          </span>
+                        </button>
+                      ))}
+                      {bottomAnomalies.length === 0 && (
+                        <div className="py-8 text-center text-sm text-muted-foreground">
+                          선택한 기간에 오작동 세션이 없습니다.
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </ScrollArea>
+            </CardContent>
+          </Card>
+        </div>
       </div>
-    </>
+    </div>
   );
 }

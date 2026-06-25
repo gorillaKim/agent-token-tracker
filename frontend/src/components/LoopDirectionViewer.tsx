@@ -1,5 +1,7 @@
 import React, { useState } from "react";
 import { LoopSignal } from "../types";
+import { Badge } from "@/components/ui/badge";
+import { Repeat } from "lucide-react";
 
 interface LoopDirectionViewerProps {
   signals: LoopSignal[];
@@ -47,18 +49,20 @@ export function LoopDirectionViewer({ signals }: LoopDirectionViewerProps) {
     }
 
     return (
-      <div className="loop-viewer-container" style={{ position: "relative" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.5rem" }}>
-          <span style={{ fontSize: "0.85rem", fontWeight: 700, color: "var(--neon-red)" }}>🔄 핑퐁 순환 흐름도</span>
-          <span className="badge-cycles">{cycles} Cycles</span>
+      <div className="loop-viewer-container relative rounded-lg border border-border bg-muted/20 p-3">
+        <div className="mb-2 flex items-center justify-between">
+          <span className="flex items-center gap-1.5 text-sm font-semibold text-destructive">
+            <Repeat className="h-4 w-4" /> 핑퐁 순환 흐름도
+          </span>
+          <Badge variant="destructive">{cycles} Cycles</Badge>
         </div>
         <svg viewBox="0 0 400 140" className="loop-svg">
           <defs>
             <marker id="arrow-red-right" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-              <path d="M0,0 L6,3 L0,6 Z" fill="var(--neon-red)" />
+              <path d="M0,0 L6,3 L0,6 Z" fill="hsl(0, 72%, 55%)" />
             </marker>
             <marker id="arrow-red-left" markerWidth="6" markerHeight="6" refX="1" refY="3" orient="auto">
-              <path d="M6,0 L0,3 L6,6 Z" fill="var(--neon-red)" />
+              <path d="M6,0 L0,3 L6,6 Z" fill="hsl(0, 72%, 55%)" />
             </marker>
           </defs>
           
@@ -90,9 +94,9 @@ export function LoopDirectionViewer({ signals }: LoopDirectionViewerProps) {
         </svg>
 
         {hoveredTool && (
-          <div 
-            className="tooltip-text" 
-            style={{ 
+          <div
+            className="rounded-md border border-border bg-popover text-xs text-foreground shadow-lg"
+            style={{
               visibility: "visible", 
               opacity: 1, 
               position: "absolute", 
@@ -130,15 +134,17 @@ export function LoopDirectionViewer({ signals }: LoopDirectionViewerProps) {
     }
 
     return (
-      <div className="loop-viewer-container" style={{ position: "relative" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.5rem" }}>
-          <span style={{ fontSize: "0.85rem", fontWeight: 700, color: "var(--neon-red)" }}>🔁 자가 순환 루프</span>
-          <span className="badge-cycles">{count} Reps</span>
+      <div className="loop-viewer-container relative rounded-lg border border-border bg-muted/20 p-3">
+        <div className="mb-2 flex items-center justify-between">
+          <span className="flex items-center gap-1.5 text-sm font-semibold text-destructive">
+            <Repeat className="h-4 w-4" /> 자가 순환 루프
+          </span>
+          <Badge variant="destructive">{count} Reps</Badge>
         </div>
         <svg viewBox="0 0 400 140" className="loop-svg">
           <defs>
             <marker id="arrow-red-self" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-              <path d="M0,0 L6,3 L0,6 Z" fill="var(--neon-red)" />
+              <path d="M0,0 L6,3 L0,6 Z" fill="hsl(0, 72%, 55%)" />
             </marker>
           </defs>
           
@@ -156,9 +162,9 @@ export function LoopDirectionViewer({ signals }: LoopDirectionViewerProps) {
         </svg>
 
         {hoveredTool && (
-          <div 
-            className="tooltip-text" 
-            style={{ 
+          <div
+            className="rounded-md border border-border bg-popover text-xs text-foreground shadow-lg"
+            style={{
               visibility: "visible", 
               opacity: 1, 
               position: "absolute", 
