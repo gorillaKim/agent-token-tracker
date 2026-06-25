@@ -11,14 +11,26 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@fontsource-variable/inter": "^5.2.8",
+    "@tailwindcss/vite": "^4.3.1",
     "@tauri-apps/api": "^2.0.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.21.0",
+    "radix-ui": "^1.6.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "recharts": "^3.8.0",
+    "sonner": "^2.0.7",
+    "tailwind-merge": "^3.6.0",
+    "tailwindcss": "^4.3.1",
+    "tailwindcss-animate": "^1.0.7"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
     "@testing-library/jest-dom": "^6.4.0",
     "@testing-library/react": "^16.0.0",
+    "@types/node": "^26.0.1",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",

@@ -1,0 +1,211 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@plugin "tailwindcss-animate";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Clean modern dark-only design system (#822)
+ * - zinc 중성 표면 + 헤어라인 보더 + 절제된 인디고 단일 액센트
+ * - 네온/글래스모피즘 폐기. 다크 전용(html.dark 고정).
+ * - HSL triplet 컨벤션: 토큰은 bare triplet, @theme에서 hsl(var(--x))로 래핑.
+ */
+:root {
+  /* 표면 */
+  --background: 240 6% 7%;
+  --foreground: 0 0% 96%;
+  --card: 240 5% 10%;
+  --card-foreground: 0 0% 96%;
+  --popover: 240 5% 9%;
+  --popover-foreground: 0 0% 96%;
+
+  /* 액센트(인디고) */
+  --primary: 250 70% 62%;
+  --primary-foreground: 0 0% 100%;
+
+  /* 보조/뮤트/호버 */
+  --secondary: 240 4% 14%;
+  --secondary-foreground: 0 0% 96%;
+  --muted: 240 4% 14%;
+  --muted-foreground: 240 5% 62%;
+  --accent: 240 4% 16%;
+  --accent-foreground: 0 0% 98%;
+
+  /* 보더/인풋/포커스 — 헤어라인 */
+  --border: 240 4% 18%;
+  --input: 240 4% 20%;
+  --ring: 250 70% 62%;
+
+  /* 시맨틱 */
+  --destructive: 0 72% 55%;
+  --destructive-foreground: 0 0% 98%;
+  --success: 152 55% 45%;
+  --success-foreground: 0 0% 98%;
+  --warning: 38 92% 55%;
+  --warning-foreground: 38 40% 10%;
+
+  /* 에이전트 브랜드 색 (AgentQuotaCard·차트 범례) */
+  --agent-claude: 32 95% 55%;
+  --agent-codex: 199 89% 55%;
+  --agent-antigravity: 152 55% 50%;
+
+  /* 차트 (SplineChart) */
+  --chart-1: 250 70% 62%;
+  --chart-2: 199 89% 55%;
+  --chart-3: 32 95% 55%;
+  --chart-4: 152 55% 50%;
+  --chart-axis: 240 5% 50%;
+  --chart-grid: 0 0% 100% / 0.05;
+
+  --radius: 0.625rem;
+}
+
+/* 다크 전용 — html.dark 고정. :root가 이미 다크이므로 .dark는 동일값 미러(안전). */
+.dark {
+  --background: 240 6% 7%;
+  --foreground: 0 0% 96%;
+  --card: 240 5% 10%;
+  --card-foreground: 0 0% 96%;
+  --popover: 240 5% 9%;
+  --popover-foreground: 0 0% 96%;
+  --primary: 250 70% 62%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 240 4% 14%;
+  --secondary-foreground: 0 0% 96%;
+  --muted: 240 4% 14%;
+  --muted-foreground: 240 5% 62%;
+  --accent: 240 4% 16%;
+  --accent-foreground: 0 0% 98%;
+  --border: 240 4% 18%;
+  --input: 240 4% 20%;
+  --ring: 250 70% 62%;
+  --destructive: 0 72% 55%;
+  --destructive-foreground: 0 0% 98%;
+  --success: 152 55% 45%;
+  --success-foreground: 0 0% 98%;
+  --warning: 38 92% 55%;
+  --warning-foreground: 38 40% 10%;
+  --agent-claude: 32 95% 55%;
+  --agent-codex: 199 89% 55%;
+  --agent-antigravity: 152 55% 50%;
+  --chart-1: 250 70% 62%;
+  --chart-2: 199 89% 55%;
+  --chart-3: 32 95% 55%;
+  --chart-4: 152 55% 50%;
+  --chart-axis: 240 5% 50%;
+  --chart-grid: 0 0% 100% / 0.05;
+}
+
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-success: hsl(var(--success));
+  --color-success-foreground: hsl(var(--success-foreground));
+  --color-warning: hsl(var(--warning));
+  --color-warning-foreground: hsl(var(--warning-foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-agent-claude: hsl(var(--agent-claude));
+  --color-agent-codex: hsl(var(--agent-codex));
+  --color-agent-antigravity: hsl(var(--agent-antigravity));
+  --color-chart-1: hsl(var(--chart-1));
+  --color-chart-2: hsl(var(--chart-2));
+  --color-chart-3: hsl(var(--chart-3));
+  --color-chart-4: hsl(var(--chart-4));
+  --color-chart-axis: hsl(var(--chart-axis));
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: "Inter Variable", system-ui, -apple-system, sans-serif;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html,
+  body,
+  #root {
+    @apply h-full;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+  /* 트레이 팝오버(투명 윈도우): body 불투명 배경 제거 — 컨테이너만 보이게 */
+  html.tray,
+  html.tray body,
+  html.tray #root {
+    background: transparent;
+  }
+  /* 커스텀 스크롤바 (클린 모던) */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--border));
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--muted-foreground) / 0.5);
+    background-clip: content-box;
+  }
+}
+
+/*
+ * 커스텀 SVG 컴포넌트 프레젠테이션 (#830 SplineChart, #831 LoopDirectionViewer)
+ * SVG presentation 속성은 var()를 못 쓰므로 클래스로 토큰을 주입한다. glow/네온 제거.
+ */
+@layer components {
+  /* ── LoopDirectionViewer ── */
+  .loop-svg {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+  .loop-node-circle {
+    fill: hsl(var(--destructive) / 0.12);
+    stroke: hsl(var(--destructive) / 0.6);
+    stroke-width: 1.5;
+  }
+  .loop-node-text {
+    fill: hsl(var(--foreground));
+    font-weight: 600;
+  }
+  .loop-line {
+    fill: none;
+    stroke: hsl(var(--destructive));
+    stroke-width: 2;
+  }
+  .dash-flow-red {
+    stroke-dasharray: 6 4;
+    animation: dash-flow 0.9s linear infinite;
+  }
+}
+
+@keyframes dash-flow {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
