@@ -22,7 +22,8 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
     token_limit_antigravity: 50000000,
     claude_plan: "pro",
     openai_plan: "tier1",
-    token_display_mode: "tokens"
+    token_display_mode: "tokens",
+    refresh_interval: 3
   });
   const [keysStatus, setKeysStatus] = useState({ anthropic: false, openai: false });
   const [quotaInfo, setQuotaInfo] = useState<PlanQuotaInfo[]>([]);
@@ -116,9 +117,10 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
         token_limit_antigravity: number,
         claude_plan: string,
         openai_plan: string,
-        token_display_mode: string
+        token_display_mode: string,
+        refresh_interval: number
       }>("load_settings");
-      
+
       setSettings({
         log_dir: s.log_dir,
         token_limit: s.token_limit,
@@ -127,7 +129,8 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
         token_limit_antigravity: s.token_limit_antigravity || 50000000,
         claude_plan: s.claude_plan || "pro",
         openai_plan: s.openai_plan || "tier1",
-        token_display_mode: s.token_display_mode || "tokens"
+        token_display_mode: s.token_display_mode || "tokens",
+        refresh_interval: s.refresh_interval ?? 3
       });
       
       const k = await invoke<Record<string, boolean>>("get_api_keys_status");
@@ -244,7 +247,8 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
         tokenLimitAntigravity: Number(newSettings.token_limit_antigravity),
         claudePlan: newSettings.claude_plan,
         openaiPlan: newSettings.openai_plan,
-        tokenDisplayMode: newSettings.token_display_mode
+        tokenDisplayMode: newSettings.token_display_mode,
+        refreshInterval: Number(newSettings.refresh_interval)
       });
       alert("설정이 성공적으로 저장되었습니다.");
       loadData();
@@ -446,6 +450,27 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
                     />
                     백분율 (%)
                   </label>
+                </div>
+              </div>
+
+              {/* 세션 자동 갱신 주기 설정 */}
+              <div className="form-group" style={{ borderTop: "1px solid rgba(255,255,255,0.04)", paddingTop: "1rem" }}>
+                <label style={{ fontWeight: 600, fontSize: "0.85rem", marginBottom: "0.3rem", display: "block" }}>세션 자동 갱신 주기</label>
+                <p style={{ margin: "0 0 0.75rem 0", fontSize: "0.75rem", color: "hsl(215, 20%, 55%)" }}>대시보드·트레이의 세션 사용량을 선택한 주기마다 자동으로 새로고침합니다. (그 외에도 로그 변경 감지 시 즉시 갱신됩니다.)</p>
+                <div style={{ display: "flex", gap: "2rem", marginTop: "0.25rem" }}>
+                  {[1, 3, 5].map((min) => (
+                    <label key={min} style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.85rem", cursor: "pointer", color: "hsl(215, 20%, 85%)" }}>
+                      <input
+                        type="radio"
+                        name="refresh_interval"
+                        value={min}
+                        checked={settings.refresh_interval === min}
+                        onChange={() => handleSaveSettings({ refresh_interval: min })}
+                        style={{ cursor: "pointer" }}
+                      />
+                      {min}분마다
+                    </label>
+                  ))}
                 </div>
               </div>
             </div>

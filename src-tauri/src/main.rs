@@ -700,6 +700,11 @@ fn default_token_display_mode() -> String {
     "tokens".to_string()
 }
 
+/// 대시보드/트레이 세션 정보 자동 갱신 주기(분). 0이면 끔(수동), 그 외 1·3·5
+fn default_refresh_interval() -> u32 {
+    3
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppSettings {
     pub log_dir: String,
@@ -719,6 +724,9 @@ pub struct AppSettings {
     pub openai_plan: String,
     #[serde(default = "default_token_display_mode")]
     pub token_display_mode: String,
+    /// 대시보드/트레이 세션 정보 자동 갱신 주기(분). 0=끔, 1·3·5
+    #[serde(default = "default_refresh_interval")]
+    pub refresh_interval: u32,
 }
 
 fn get_config_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -741,6 +749,7 @@ fn save_settings(
     claude_plan: Option<String>,
     openai_plan: Option<String>,
     token_display_mode: Option<String>,
+    refresh_interval: Option<u32>,
 ) -> Result<(), String> {
     let path = get_config_path(&app_handle)?;
     // 기존 설정을 읽어 플랜 필드를 보존
@@ -766,6 +775,9 @@ fn save_settings(
         token_display_mode: token_display_mode.unwrap_or_else(|| {
             existing.as_ref().map(|s| s.token_display_mode.clone()).unwrap_or_else(default_token_display_mode)
         }),
+        refresh_interval: refresh_interval.unwrap_or_else(|| {
+            existing.as_ref().map(|s| s.refresh_interval).unwrap_or_else(default_refresh_interval)
+        }),
     };
     let json = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("JSON 직렬화 실패: {}", e))?;
@@ -787,6 +799,7 @@ fn load_settings(app_handle: AppHandle) -> Result<AppSettings, String> {
             claude_plan: default_claude_plan(),
             openai_plan: default_openai_plan(),
             token_display_mode: default_token_display_mode(),
+            refresh_interval: default_refresh_interval(),
         });
     }
     let json = std::fs::read_to_string(path)

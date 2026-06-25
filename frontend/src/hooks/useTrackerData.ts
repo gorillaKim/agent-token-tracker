@@ -21,6 +21,7 @@ export function useTrackerData() {
   const [dailyTokenUsage, setDailyTokenUsage] = useState<DailyTokenUsage[]>([]);
   const [hourlyTokenUsage, setHourlyTokenUsage] = useState<HourlyTokenUsage[]>([]);
   const [quotaInfo, setQuotaInfo] = useState<PlanQuotaInfo[]>([]);
+  const [refreshInterval, setRefreshInterval] = useState<number>(3);
 
   const [error, setError] = useState<string | null>(null);
   const [syncLoading, setSyncLoading] = useState(false);
@@ -48,8 +49,11 @@ export function useTrackerData() {
       const quota = await invoke<PlanQuotaInfo[]>("get_subscription_quota");
       setQuotaInfo(quota);
 
-      const settings = await invoke<{ token_display_mode: string }>("load_settings");
+      const settings = await invoke<{ token_display_mode: string; refresh_interval: number }>("load_settings");
       setTokenDisplayMode(settings.token_display_mode || "tokens");
+      if (typeof settings.refresh_interval === "number") {
+        setRefreshInterval(settings.refresh_interval);
+      }
     } catch (err: any) {
       setError(err.toString());
     }
@@ -130,6 +134,15 @@ export function useTrackerData() {
       unlistenPromise.then((fn) => fn());
     };
   }, []);
+
+  // 설정된 주기(분)마다 세션 정보 자동 갱신 (0이면 끔)
+  useEffect(() => {
+    if (!refreshInterval || refreshInterval <= 0) return;
+    const id = setInterval(() => {
+      loadData();
+    }, refreshInterval * 60 * 1000);
+    return () => clearInterval(id);
+  }, [refreshInterval]);
 
   return {
     tokenDisplayMode,

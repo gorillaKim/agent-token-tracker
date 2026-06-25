@@ -16,6 +16,7 @@ export function TrayPopoverView() {
   const [anomalies, setAnomalies] = useState<LoopDetectionResult[]>([]);
   const [quotas, setQuotas] = useState<PlanQuotaInfo[]>([]);
   const [tokenDisplayMode, setTokenDisplayMode] = useState<string>("tokens");
+  const [refreshInterval, setRefreshInterval] = useState<number>(3);
   const [loading, setLoading] = useState(true);
 
   const loadData = async () => {
@@ -28,6 +29,9 @@ export function TrayPopoverView() {
         const appSettings = await invoke<any>("load_settings");
         if (appSettings && appSettings.token_display_mode) {
           setTokenDisplayMode(appSettings.token_display_mode);
+        }
+        if (appSettings && typeof appSettings.refresh_interval === "number") {
+          setRefreshInterval(appSettings.refresh_interval);
         }
       } catch (e) {
         console.error("설정 로드 실패:", e);
@@ -52,6 +56,15 @@ export function TrayPopoverView() {
       unlistenPromise.then((fn) => fn());
     };
   }, []);
+
+  // 설정된 주기(분)마다 자동 갱신 (0이면 끔)
+  useEffect(() => {
+    if (!refreshInterval || refreshInterval <= 0) return;
+    const id = setInterval(() => {
+      loadData();
+    }, refreshInterval * 60 * 1000);
+    return () => clearInterval(id);
+  }, [refreshInterval]);
 
   const totalAnomalies = anomalies.length;
 
