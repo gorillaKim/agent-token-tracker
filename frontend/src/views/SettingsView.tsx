@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { PlanQuotaInfo, DetectedCredential } from "../types";
+import { PlanQuotaInfo, DetectedCredential, DetectedLogPath } from "../types";
 import { formatTokens, formatResetTime } from "../utils/formatters";
 
 interface SettingsViewProps {
@@ -14,8 +14,11 @@ interface SettingsViewProps {
  * 로그 디렉토리 감시 경로 설정, 수동 API Key 관리 및 로컬 키체인/설정 파일 자동 크리덴셜 연동과 검증 등을 처리합니다.
  */
 export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewProps) {
-  const [settings, setSettings] = useState({ 
-    log_dir: "", 
+  const [settings, setSettings] = useState({
+    log_dir: "",
+    claude_log_dir: "",
+    codex_log_dir: "",
+    antigravity_log_dir: "",
     token_limit: 50000000,
     token_limit_claude: 50000000,
     token_limit_codex: 50000000,
@@ -42,6 +45,9 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
 
   const [localCreds, setLocalCreds] = useState<DetectedCredential[]>([]);
   const [scanLoading, setScanLoading] = useState(false);
+  const [logPaths, setLogPaths] = useState<DetectedLogPath[]>([]);
+  const [logPathScanLoading, setLogPathScanLoading] = useState(false);
+  const [logPathDrafts, setLogPathDrafts] = useState<Record<string, string>>({});
   const [applyLoading, setApplyLoading] = useState<Record<number, boolean>>({});
   const [testLoading, setTestLoading] = useState<Record<number, boolean>>({});
   const [autoCredsTestResults, setAutoCredsTestResults] = useState<Record<number, { checked: boolean; valid: boolean | null; error?: string }>>({});
@@ -56,6 +62,35 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
     } finally {
       setScanLoading(false);
     }
+  };
+
+  const handleScanLogPaths = async () => {
+    setLogPathScanLoading(true);
+    try {
+      const paths = await invoke<DetectedLogPath[]>("get_detected_log_paths");
+      setLogPaths(paths);
+      // 입력 초안을 현재 설정값으로 동기화
+      const drafts: Record<string, string> = {};
+      paths.forEach(p => { drafts[p.agent] = p.configured_path; });
+      setLogPathDrafts(drafts);
+    } catch (e) {
+      console.error("세션 로그 경로 스캔 실패:", e);
+    } finally {
+      setLogPathScanLoading(false);
+    }
+  };
+
+  // 에이전트별 로그 경로 저장 ("" 전달 시 기본 경로 자동감지로 복원)
+  const handleSaveLogPath = async (agent: string, path: string) => {
+    const fieldMap: Record<string, "claude_log_dir" | "codex_log_dir" | "antigravity_log_dir"> = {
+      claude_code: "claude_log_dir",
+      codex: "codex_log_dir",
+      antigravity: "antigravity_log_dir",
+    };
+    const field = fieldMap[agent];
+    if (!field) return;
+    await handleSaveSettings({ [field]: path.trim() } as Partial<typeof settings>);
+    await handleScanLogPaths();
   };
 
   const handleApplyCredential = async (cred: DetectedCredential, index: number) => {
@@ -109,8 +144,11 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
 
   const loadData = async () => {
     try {
-      const s = await invoke<{ 
-        log_dir: string, 
+      const s = await invoke<{
+        log_dir: string,
+        claude_log_dir: string,
+        codex_log_dir: string,
+        antigravity_log_dir: string,
         token_limit: number,
         token_limit_claude: number,
         token_limit_codex: number,
@@ -123,6 +161,9 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
 
       setSettings({
         log_dir: s.log_dir,
+        claude_log_dir: s.claude_log_dir || "",
+        codex_log_dir: s.codex_log_dir || "",
+        antigravity_log_dir: s.antigravity_log_dir || "",
         token_limit: s.token_limit,
         token_limit_claude: s.token_limit_claude,
         token_limit_codex: s.token_limit_codex,
@@ -150,6 +191,8 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
       }
       // 로컬 자격 증명 스캔 실행
       handleScanCredentials();
+      // 세션 로그 경로 자동 감지 스캔 실행
+      handleScanLogPaths();
 
       try {
         const quota = await invoke<PlanQuotaInfo[]>("get_subscription_quota");
@@ -239,8 +282,11 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
   const handleSaveSettings = async (updates: Partial<typeof settings>) => {
     const newSettings = { ...settings, ...updates };
     try {
-      await invoke("save_settings", { 
-        logDir: newSettings.log_dir, 
+      await invoke("save_settings", {
+        logDir: newSettings.log_dir,
+        claudeLogDir: newSettings.claude_log_dir,
+        codexLogDir: newSettings.codex_log_dir,
+        antigravityLogDir: newSettings.antigravity_log_dir,
         tokenLimit: Number(newSettings.token_limit),
         tokenLimitClaude: Number(newSettings.token_limit_claude),
         tokenLimitCodex: Number(newSettings.token_limit_codex),
@@ -499,6 +545,61 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
 
           <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
             
+            {/* 세션 로그 경로 자동 감지 */}
+            <div className="settings-card glass" style={{ padding: "1.5rem", borderLeft: "3px solid hsl(35, 100%, 60%)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+                <h4 style={{ margin: 0, fontSize: "1.05rem", color: "hsl(35, 100%, 65%)", fontWeight: 700 }}>📂 세션 로그 경로</h4>
+                <button
+                  onClick={handleScanLogPaths}
+                  disabled={logPathScanLoading}
+                  className="btn"
+                  style={{ padding: "0.35rem 0.9rem", fontSize: "0.78rem", background: "rgba(255,170,0,0.1)", border: "1px solid rgba(255,170,0,0.3)", color: "hsl(35, 100%, 65%)", fontWeight: 700 }}
+                >
+                  {logPathScanLoading ? "🔄 스캔 중..." : "⚡ 경로 자동 감지 새로고침"}
+                </button>
+              </div>
+              <p style={{ margin: "0 0 1rem 0", fontSize: "0.75rem", color: "hsl(215, 20%, 60%)", lineHeight: 1.4 }}>
+                각 에이전트(Claude·Codex·Antigravity)의 세션 로그 폴더를 자동 감지하여 실시간 감시합니다. 로그가 비표준 위치에 있으면 직접 경로를 지정할 수 있습니다.
+                <br />경로 변경은 즉시 동기화에 반영되며, 실시간 감시(watcher)는 앱 재시작 후 적용됩니다.
+              </p>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.85rem" }}>
+                {logPaths.length === 0 ? (
+                  <span style={{ fontSize: "0.8rem", color: "hsl(215, 20%, 55%)" }}>
+                    {logPathScanLoading ? "경로 감지 중..." : "감지된 경로가 없습니다."}
+                  </span>
+                ) : logPaths.map((lp) => (
+                  <div key={lp.agent} style={{ background: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.05)", padding: "0.85rem", borderRadius: "8px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+                      <span style={{ fontSize: "0.85rem", fontWeight: 700, color: "#fff" }}>{lp.label}</span>
+                      {lp.exists ? (
+                        <span className="status-badge active"><span className="pulse-dot-green"></span>감지됨</span>
+                      ) : (
+                        <span className="status-badge none">경로 없음</span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: "0.72rem", color: "hsl(215, 20%, 55%)", marginBottom: "0.5rem", fontFamily: "monospace", wordBreak: "break-all" }}>
+                      현재: {lp.active_path}{lp.configured_path ? "  (사용자 지정)" : "  (기본 자동감지)"}
+                    </div>
+                    <div className="input-group" style={{ display: "flex", gap: "0.5rem" }}>
+                      <input
+                        type="text"
+                        placeholder={lp.default_path}
+                        value={logPathDrafts[lp.agent] ?? ""}
+                        onChange={(e) => setLogPathDrafts(prev => ({ ...prev, [lp.agent]: e.target.value }))}
+                        className="settings-input"
+                        style={{ flex: 1, fontSize: "0.75rem" }}
+                      />
+                      <button className="btn btn-save" onClick={() => handleSaveLogPath(lp.agent, logPathDrafts[lp.agent] ?? "")}>저장</button>
+                      {lp.configured_path && (
+                        <button className="btn btn-delete" onClick={() => handleSaveLogPath(lp.agent, "")}>기본값</button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
             {/* Claude Code (Anthropic) */}
             <div className="settings-card glass" style={{ padding: "1.5rem", borderLeft: "3px solid var(--neon-blue)" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>

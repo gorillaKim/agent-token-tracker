@@ -118,6 +118,15 @@ export interface DetectedCredential {
   description: string;
 }
 
+export interface DetectedLogPath {
+  agent: string;            // "claude_code" | "codex" | "antigravity"
+  label: string;            // 표시용 이름
+  default_path: string;     // OS 기본 경로(자동 감지)
+  configured_path: string;  // 사용자가 지정한 경로("" = 기본 경로 사용 중)
+  active_path: string;      // 실제 사용 중인 경로
+  exists: boolean;          // active_path 존재 여부
+}
+
 export interface TurnTokenUsage {
   turn_index: number;
   role: string;

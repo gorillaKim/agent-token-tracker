@@ -313,56 +313,143 @@ fn process_watch_file(
     Ok(())
 }
 
-/// 설정된 log_dir + OS별 기본 에이전트 로그 경로(존재하는 것만)를 자동 감지하여 반환한다.
-/// 수동 동기화(sync)와 백그라운드 파일 감시(watcher)가 공통으로 사용한다.
-/// 반환값: 디렉토리(Claude/Codex 세션 폴더) 또는 파일(Antigravity state.vscdb)들의 루트 경로.
-fn detect_log_paths(app_handle: &AppHandle) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-
-    // 1. 사용자가 설정에서 직접 지정한 log_dir
-    if let Ok(config_path) = get_config_path(app_handle) {
-        if config_path.exists() {
-            if let Ok(json) = std::fs::read_to_string(&config_path) {
-                if let Ok(settings) = serde_json::from_str::<AppSettings>(&json) {
-                    if !settings.log_dir.is_empty() {
-                        roots.push(PathBuf::from(&settings.log_dir));
-                    }
+/// 저장된 설정을 읽어온다(파일 없거나 파싱 실패 시 기본값 반환).
+fn read_settings(app_handle: &AppHandle) -> AppSettings {
+    if let Ok(path) = get_config_path(app_handle) {
+        if path.exists() {
+            if let Ok(json) = std::fs::read_to_string(&path) {
+                if let Ok(s) = serde_json::from_str::<AppSettings>(&json) {
+                    return s;
                 }
             }
         }
     }
+    AppSettings {
+        log_dir: String::new(),
+        claude_log_dir: String::new(),
+        codex_log_dir: String::new(),
+        antigravity_log_dir: String::new(),
+        token_limit: default_token_limit(),
+        token_limit_claude: default_token_limit(),
+        token_limit_codex: default_token_limit(),
+        token_limit_antigravity: default_token_limit(),
+        claude_plan: default_claude_plan(),
+        openai_plan: default_openai_plan(),
+        token_display_mode: default_token_display_mode(),
+        refresh_interval: default_refresh_interval(),
+    }
+}
 
-    // 2. OS별 기본 에이전트 로그 경로 자동 감지 (존재하는 것만)
+/// Claude Code 세션 로그 기본 경로 (~/.claude/projects)
+fn default_claude_log_dir(home: &str) -> PathBuf {
+    Path::new(home).join(".claude").join("projects")
+}
+/// Codex 세션 로그 기본 경로 (~/.codex/sessions)
+fn default_codex_log_dir(home: &str) -> PathBuf {
+    Path::new(home).join(".codex").join("sessions")
+}
+/// Antigravity state.vscdb 기본 경로 (macOS)
+fn default_antigravity_log_dir(home: &str) -> PathBuf {
+    Path::new(home)
+        .join("Library")
+        .join("Application Support")
+        .join("Code")
+        .join("User")
+        .join("globalStorage")
+        .join("state.vscdb")
+}
+
+/// 에이전트별 로그 경로(설정값 우선 → 없으면 OS 기본 경로 자동 감지)를 취합한다.
+/// 수동 동기화(sync)와 백그라운드 파일 감시(watcher)가 공통으로 사용한다.
+/// 반환값: 디렉토리(Claude/Codex 세션 폴더) 또는 파일(Antigravity state.vscdb)들의 루트 경로.
+fn detect_log_paths(app_handle: &AppHandle) -> Vec<PathBuf> {
+    let settings = read_settings(app_handle);
     let home = std::env::var("HOME").unwrap_or_default();
-    if !home.is_empty() {
-        // Claude Code 세션 로그
-        let claude_path = Path::new(&home).join(".claude").join("projects");
-        if claude_path.is_dir() {
-            roots.push(claude_path);
+    let mut roots = Vec::new();
+
+    // 공통(레거시) 추가 경로
+    if !settings.log_dir.is_empty() {
+        roots.push(PathBuf::from(&settings.log_dir));
+    }
+
+    // Claude Code: 설정값 우선, 없으면 기본 경로
+    let claude = if !settings.claude_log_dir.is_empty() {
+        PathBuf::from(&settings.claude_log_dir)
+    } else {
+        default_claude_log_dir(&home)
+    };
+    if claude.exists() {
+        roots.push(claude);
+    }
+
+    // Codex: 설정값 우선, 없으면 기본 경로(sessions + archived_sessions)
+    if !settings.codex_log_dir.is_empty() {
+        let codex = PathBuf::from(&settings.codex_log_dir);
+        if codex.exists() {
+            roots.push(codex);
         }
-        // Codex 세션 로그 (활성 + 보관)
-        let codex_path = Path::new(&home).join(".codex").join("sessions");
-        if codex_path.is_dir() {
-            roots.push(codex_path);
+    } else if !home.is_empty() {
+        let codex = default_codex_log_dir(&home);
+        if codex.is_dir() {
+            roots.push(codex);
         }
         let codex_archived = Path::new(&home).join(".codex").join("archived_sessions");
         if codex_archived.is_dir() {
             roots.push(codex_archived);
         }
-        // Antigravity state.vscdb (macOS)
-        let vscdb_path = Path::new(&home)
-            .join("Library")
-            .join("Application Support")
-            .join("Code")
-            .join("User")
-            .join("globalStorage")
-            .join("state.vscdb");
-        if vscdb_path.is_file() {
-            roots.push(vscdb_path);
-        }
+    }
+
+    // Antigravity: 설정값 우선, 없으면 기본 state.vscdb
+    let anti = if !settings.antigravity_log_dir.is_empty() {
+        PathBuf::from(&settings.antigravity_log_dir)
+    } else {
+        default_antigravity_log_dir(&home)
+    };
+    if anti.exists() {
+        roots.push(anti);
     }
 
     roots
+}
+
+/// 에이전트별 세션 로그 경로 자동 감지 결과 (연동 페이지 UI용)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DetectedLogPath {
+    pub agent: String,           // "claude_code" | "codex" | "antigravity"
+    pub label: String,           // 표시용 이름
+    pub default_path: String,    // OS 기본 경로(자동 감지)
+    pub configured_path: String, // 사용자가 지정한 경로("" = 기본 경로 사용 중)
+    pub active_path: String,     // 실제 사용 중인 경로(지정값 또는 기본값)
+    pub exists: bool,            // active_path가 실제 디스크에 존재하는지
+}
+
+/// 에이전트별 로그 경로를 자동 감지하여 반환한다 (크리덴셜 자동 감지와 동일한 UX).
+#[tauri::command]
+fn get_detected_log_paths(app_handle: AppHandle) -> Result<Vec<DetectedLogPath>, String> {
+    let settings = read_settings(&app_handle);
+    let home = std::env::var("HOME").unwrap_or_default();
+
+    let make = |agent: &str, label: &str, default: PathBuf, configured: &str| {
+        let active = if configured.is_empty() {
+            default.clone()
+        } else {
+            PathBuf::from(configured)
+        };
+        DetectedLogPath {
+            agent: agent.to_string(),
+            label: label.to_string(),
+            default_path: default.to_string_lossy().to_string(),
+            configured_path: configured.to_string(),
+            exists: active.exists(),
+            active_path: active.to_string_lossy().to_string(),
+        }
+    };
+
+    Ok(vec![
+        make("claude_code", "Claude Code", default_claude_log_dir(&home), &settings.claude_log_dir),
+        make("codex", "OpenAI Codex", default_codex_log_dir(&home), &settings.codex_log_dir),
+        make("antigravity", "Antigravity", default_antigravity_log_dir(&home), &settings.antigravity_log_dir),
+    ])
 }
 
 fn start_watch_loop(app_handle: AppHandle) -> Result<(), String> {
@@ -707,7 +794,16 @@ fn default_refresh_interval() -> u32 {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppSettings {
+    /// 공통(레거시) 추가 감시 경로. 특정 에이전트에 속하지 않는 임의 경로.
+    #[serde(default)]
     pub log_dir: String,
+    /// 에이전트별 세션 로그 경로 오버라이드 (비어있으면 OS 기본 경로 자동 감지)
+    #[serde(default)]
+    pub claude_log_dir: String,
+    #[serde(default)]
+    pub codex_log_dir: String,
+    #[serde(default)]
+    pub antigravity_log_dir: String,
     #[serde(default = "default_token_limit")]
     pub token_limit: u64,
     #[serde(default = "default_token_limit")]
@@ -742,6 +838,9 @@ fn get_config_path(app: &AppHandle) -> Result<PathBuf, String> {
 fn save_settings(
     app_handle: AppHandle,
     log_dir: String,
+    claude_log_dir: Option<String>,
+    codex_log_dir: Option<String>,
+    antigravity_log_dir: Option<String>,
     token_limit: u64,
     token_limit_claude: u64,
     token_limit_codex: u64,
@@ -762,6 +861,15 @@ fn save_settings(
     };
     let settings = AppSettings {
         log_dir,
+        claude_log_dir: claude_log_dir.unwrap_or_else(|| {
+            existing.as_ref().map(|s| s.claude_log_dir.clone()).unwrap_or_default()
+        }),
+        codex_log_dir: codex_log_dir.unwrap_or_else(|| {
+            existing.as_ref().map(|s| s.codex_log_dir.clone()).unwrap_or_default()
+        }),
+        antigravity_log_dir: antigravity_log_dir.unwrap_or_else(|| {
+            existing.as_ref().map(|s| s.antigravity_log_dir.clone()).unwrap_or_default()
+        }),
         token_limit,
         token_limit_claude,
         token_limit_codex,
@@ -792,6 +900,9 @@ fn load_settings(app_handle: AppHandle) -> Result<AppSettings, String> {
     if !path.exists() {
         return Ok(AppSettings {
             log_dir: "".to_string(),
+            claude_log_dir: "".to_string(),
+            codex_log_dir: "".to_string(),
+            antigravity_log_dir: "".to_string(),
             token_limit: 50_000_000,
             token_limit_claude: 50_000_000,
             token_limit_codex: 50_000_000,
@@ -2498,6 +2609,7 @@ fn main() {
             validate_stored_api_key,
             validate_api_key_value,
             validate_local_path,
+            get_detected_log_paths,
             sync_local_sessions,
             force_sync_local_sessions,
             get_hourly_token_usage,
