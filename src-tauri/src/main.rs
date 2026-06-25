@@ -49,6 +49,20 @@ pub struct DailyTokenUsage {
     pub antigravity_tokens: u64,
 }
 
+/// 캘린더 뷰용: 임의 날짜 범위의 일별 토큰 + 비용(에이전트별) 집계 결과
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DailyUsageDetail {
+    pub date: String, // "YYYY-MM-DD" (KST 기준)
+    pub total_tokens: u64,
+    pub claude_tokens: u64,
+    pub codex_tokens: u64,
+    pub antigravity_tokens: u64,
+    pub total_cost: f64,
+    pub claude_cost: f64,
+    pub codex_cost: f64,
+    pub antigravity_cost: f64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionDetails {
     pub messages: Vec<agent_token_tracker::model::Message>,
@@ -67,12 +81,16 @@ fn get_db_conn() -> Result<Connection, String> {
 // Tauri IPC Commands 구현
 // ════════════════════════════════════════════════════════════
 
-/// 1. 모든 세션 목록 획득
+/// 1. 세션 목록 획득 (days 지정 시 최근 N일 롤링 window로 필터, 미지정 시 전체)
 #[tauri::command]
-fn get_active_sessions() -> Result<Vec<Session>, String> {
+fn get_active_sessions(days: Option<u32>) -> Result<Vec<Session>, String> {
     let conn = get_db_conn()?;
-    let sessions = db::get_all_sessions(&conn)
-        .map_err(|e| format!("세션 로드 에러: {}", e))?;
+    let sessions = match days {
+        Some(d) => db::get_sessions_within_days(&conn, d)
+            .map_err(|e| format!("세션 로드 에러: {}", e))?,
+        None => db::get_all_sessions(&conn)
+            .map_err(|e| format!("세션 로드 에러: {}", e))?,
+    };
     Ok(sessions)
 }
 
@@ -136,12 +154,16 @@ fn get_agent_summaries() -> Result<Vec<AgentSummary>, String> {
     Ok(vec![cc_sum, cdx_sum, agy_sum])
 }
 
-/// 3. 탐지된 모든 이상 징후 세션 리스트 반환
+/// 3. 탐지된 이상 징후 세션 리스트 반환 (days 지정 시 최근 N일 세션만 대상)
 #[tauri::command]
-fn get_loop_signals() -> Result<Vec<LoopDetectionResult>, String> {
+fn get_loop_signals(days: Option<u32>) -> Result<Vec<LoopDetectionResult>, String> {
     let conn = get_db_conn()?;
-    let sessions = db::get_all_sessions(&conn)
-        .map_err(|e| format!("세션 로드 에러: {}", e))?;
+    let sessions = match days {
+        Some(d) => db::get_sessions_within_days(&conn, d)
+            .map_err(|e| format!("세션 로드 에러: {}", e))?,
+        None => db::get_all_sessions(&conn)
+            .map_err(|e| format!("세션 로드 에러: {}", e))?,
+    };
 
     let mut anomalies = Vec::new();
     let config = DetectorConfig::default();
@@ -161,24 +183,47 @@ fn get_loop_signals() -> Result<Vec<LoopDetectionResult>, String> {
     Ok(anomalies)
 }
 
+/// 사용자 PC 의 현재 로컬 타임존 오프셋을 SQLite date()/datetime()/strftime() 수정자로 반환합니다.
+///
+/// DB 에는 모든 시각이 UTC 로 저장되어 있으므로, "달력 일자/월" 버킷팅(일별·시간별·월별 집계)에서
+/// UTC → 사용자 로컬 일자로 변환하기 위해 사용합니다. 분 단위로 표현하여 +05:30(India),
+/// +05:45(Nepal) 같은 비정시(非正時) 오프셋도 정확히 처리합니다.
+///
+/// 주의: "최근 N시간/일" 같은 **롤링 윈도우** 비교(datetime('now', '-24 hours') 등)는 UTC 끼리의
+/// 비교라 타임존과 무관하므로 이 수정자를 적용하지 않습니다.
+///
+/// 예: KST(+09:00) → "+540 minutes", PST(-08:00) → "-480 minutes"
+fn local_tz_sql_modifier() -> String {
+    let offset_secs = chrono::Local::now().offset().local_minus_utc();
+    let minutes = offset_secs / 60;
+    if minutes >= 0 {
+        format!("+{} minutes", minutes)
+    } else {
+        format!("-{} minutes", -minutes)
+    }
+}
+
 /// 4. 최근 14일간의 일별 비용 집계
 #[tauri::command]
 fn get_daily_costs() -> Result<Vec<DailyCost>, String> {
     let conn = get_db_conn()?;
-    let mut stmt = conn.prepare(
+    let tz = local_tz_sql_modifier();
+    let sql = format!(
         "WITH RECURSIVE dates(date) AS (
-            SELECT date('now', '+9 hours', '-13 day')
+            SELECT date('now', '{tz}', '-13 day')
             UNION ALL
-            SELECT date(date, '+1 day') FROM dates WHERE date < date('now', '+9 hours')
+            SELECT date(date, '+1 day') FROM dates WHERE date < date('now', '{tz}')
          )
-         SELECT 
-            d.date, 
+         SELECT
+            d.date,
             COALESCE(SUM(m.cost_usd), 0.0) as total_cost
          FROM dates d
-         LEFT JOIN messages m ON date(m.created_at, '+9 hours') = d.date
+         LEFT JOIN messages m ON date(m.created_at, '{tz}') = d.date
          GROUP BY d.date
-         ORDER BY d.date ASC;"
-    ).map_err(|e| format!("SQL 쿼리 준비 에러: {}", e))?;
+         ORDER BY d.date ASC;",
+        tz = tz
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| format!("SQL 쿼리 준비 에러: {}", e))?;
 
     let rows = stmt.query_map([], |row| {
         Ok(DailyCost {
@@ -201,24 +246,26 @@ fn get_daily_token_usage(days: Option<u32>) -> Result<Vec<DailyTokenUsage>, Stri
     let conn = get_db_conn()?;
     let limit_days = days.unwrap_or(14).max(1);
     let offset_days = limit_days as i32 - 1;
+    let tz = local_tz_sql_modifier();
 
     let sql = format!(
         "WITH RECURSIVE dates(date) AS (
-            SELECT date('now', '+9 hours', '-{} day')
+            SELECT date('now', '{tz}', '-{offset} day')
             UNION ALL
-            SELECT date(date, '+1 day') FROM dates WHERE date < date('now', '+9 hours')
+            SELECT date(date, '+1 day') FROM dates WHERE date < date('now', '{tz}')
          )
-         SELECT 
-            d.date, 
+         SELECT
+            d.date,
             COALESCE(SUM(s.total_input_tokens + s.total_output_tokens), 0) as total_tokens,
             COALESCE(SUM(CASE WHEN s.agent_type = 'claude_code' THEN s.total_input_tokens + s.total_output_tokens ELSE 0 END), 0) as claude_tokens,
             COALESCE(SUM(CASE WHEN s.agent_type = 'codex' THEN s.total_input_tokens + s.total_output_tokens ELSE 0 END), 0) as codex_tokens,
             COALESCE(SUM(CASE WHEN s.agent_type = 'antigravity' THEN s.total_input_tokens + s.total_output_tokens ELSE 0 END), 0) as antigravity_tokens
          FROM dates d
-         LEFT JOIN sessions s ON date(s.started_at, '+9 hours') = d.date
+         LEFT JOIN sessions s ON date(s.started_at, '{tz}') = d.date
          GROUP BY d.date
          ORDER BY d.date ASC;",
-        offset_days
+        tz = tz,
+        offset = offset_days
     );
 
     let mut stmt = conn.prepare(&sql).map_err(|e| format!("SQL 쿼리 준비 에러: {}", e))?;
@@ -239,6 +286,260 @@ fn get_daily_token_usage(days: Option<u32>) -> Result<Vec<DailyTokenUsage>, Stri
     }
 
     Ok(daily_tokens)
+}
+
+/// 캘린더 뷰용: 임의 날짜 범위(start_date~end_date, 사용자 PC 로컬 타임존)의 일별 토큰·비용 집계
+///
+/// 기존 `get_daily_token_usage`는 "오늘"에 앵커링되어 과거 임의 월 조회가 불가하고 비용도 없다.
+/// 본 커맨드는 외부에서 받은 날짜 문자열을 **바인드 파라미터(?1, ?2)** 로 안전하게 전달하여
+/// 토큰(에이전트별, sessions.started_at 기준)과 비용(에이전트별, messages.created_at 기준)을 함께 반환한다.
+#[tauri::command]
+fn get_daily_usage_in_range(
+    start_date: String,
+    end_date: String,
+) -> Result<Vec<DailyUsageDetail>, String> {
+    let conn = get_db_conn()?;
+    let tz = local_tz_sql_modifier();
+
+    // 날짜 스파인(?1~?2)에 토큰/비용 두 집계를 각각 LEFT JOIN.
+    // 토큰은 세션 시작일(started_at), 비용은 메시지 생성일(created_at)을 사용자 PC 로컬 타임존으로 변환해 일자 그룹핑.
+    let sql = format!(
+        "WITH RECURSIVE dates(date) AS (
+            SELECT ?1
+            UNION ALL
+            SELECT date(date, '+1 day') FROM dates WHERE date < ?2
+         ),
+         tok AS (
+            SELECT date(s.started_at, '{tz}') AS d,
+                SUM(s.total_input_tokens + s.total_output_tokens) AS total_tokens,
+                SUM(CASE WHEN s.agent_type = 'claude_code' THEN s.total_input_tokens + s.total_output_tokens ELSE 0 END) AS claude_tokens,
+                SUM(CASE WHEN s.agent_type = 'codex' THEN s.total_input_tokens + s.total_output_tokens ELSE 0 END) AS codex_tokens,
+                SUM(CASE WHEN s.agent_type = 'antigravity' THEN s.total_input_tokens + s.total_output_tokens ELSE 0 END) AS antigravity_tokens
+            FROM sessions s
+            WHERE date(s.started_at, '{tz}') BETWEEN ?1 AND ?2
+            GROUP BY d
+         ),
+         cost AS (
+            -- 세션이 없는 고아 메시지(orphan)도 total_cost 에 포함되도록 LEFT JOIN.
+            -- 기존 get_daily_costs(조인 없음)와 일별 총 비용을 일치시키기 위함이다.
+            -- agent_type 이 NULL 인 고아 메시지는 어느 에이전트 버킷에도 귀속되지 않는다(ELSE 0).
+            SELECT date(m.created_at, '{tz}') AS d,
+                SUM(m.cost_usd) AS total_cost,
+                SUM(CASE WHEN s.agent_type = 'claude_code' THEN m.cost_usd ELSE 0 END) AS claude_cost,
+                SUM(CASE WHEN s.agent_type = 'codex' THEN m.cost_usd ELSE 0 END) AS codex_cost,
+                SUM(CASE WHEN s.agent_type = 'antigravity' THEN m.cost_usd ELSE 0 END) AS antigravity_cost
+            FROM messages m
+            LEFT JOIN sessions s ON m.session_id = s.session_id
+            WHERE date(m.created_at, '{tz}') BETWEEN ?1 AND ?2
+            GROUP BY d
+         )
+         SELECT
+            d.date,
+            COALESCE(tok.total_tokens, 0),
+            COALESCE(tok.claude_tokens, 0),
+            COALESCE(tok.codex_tokens, 0),
+            COALESCE(tok.antigravity_tokens, 0),
+            COALESCE(cost.total_cost, 0.0),
+            COALESCE(cost.claude_cost, 0.0),
+            COALESCE(cost.codex_cost, 0.0),
+            COALESCE(cost.antigravity_cost, 0.0)
+         FROM dates d
+         LEFT JOIN tok ON tok.d = d.date
+         LEFT JOIN cost ON cost.d = d.date
+         ORDER BY d.date ASC;",
+        tz = tz
+    );
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| format!("SQL 쿼리 준비 에러: {}", e))?;
+
+    let rows = stmt
+        .query_map([start_date.as_str(), end_date.as_str()], |row| {
+            Ok(DailyUsageDetail {
+                date: row.get(0)?,
+                total_tokens: row.get(1)?,
+                claude_tokens: row.get(2)?,
+                codex_tokens: row.get(3)?,
+                antigravity_tokens: row.get(4)?,
+                total_cost: row.get(5)?,
+                claude_cost: row.get(6)?,
+                codex_cost: row.get(7)?,
+                antigravity_cost: row.get(8)?,
+            })
+        })
+        .map_err(|e| format!("쿼리 실행 에러: {}", e))?;
+
+    let mut daily = Vec::new();
+    for r in rows {
+        daily.push(r.map_err(|e| format!("데이터 매핑 에러: {}", e))?);
+    }
+
+    Ok(daily)
+}
+
+/// "mcp__<server>__<method>" 형태에서 서버명을 추출 (앞의 plugin_ 접두사는 제거)
+fn mcp_server_name(tool_name: &str) -> Option<String> {
+    let rest = tool_name.strip_prefix("mcp__")?;
+    let server = rest.split("__").next()?;
+    let server = server.strip_prefix("plugin_").unwrap_or(server);
+    if server.is_empty() {
+        None
+    } else {
+        Some(server.to_string())
+    }
+}
+
+/// 도구 이름을 플러그인 그룹으로 분류.
+///
+/// 알려진 플러그인은 그룹으로 묶고, 그 외(과거 "other")는 **개별 식별자**로 분리한다:
+/// MCP 도구는 서버명(mcp__<server>__...), 그 외 도구는 도구명 자체로 분류한다.
+fn classify_plugin(tool_name: &str) -> String {
+    let t = tool_name.to_lowercase();
+    if t.contains("doxus") {
+        "doxus".to_string()
+    } else if t.contains("engram") {
+        "engram".to_string()
+    } else if t.contains("playwright") {
+        "playwright".to_string()
+    } else if t.contains("android-cli") || t.contains("android") {
+        "android-cli".to_string()
+    } else if t.contains("chrome-extensions") || t.contains("chrome") {
+        "chrome-extensions".to_string()
+    } else if t.contains("serena") {
+        "serena".to_string()
+    } else if t.contains("nexus") {
+        "nexus".to_string()
+    } else if [
+        "bash", "read", "edit", "write", "toolsearch", "agent", "askuserquestion", "webfetch",
+        "websearch", "exitplanmode", "skill", "taskupdate", "taskcreate", "read_file",
+        "write_to_file", "monitor", "lsp_document_symbols", "croncreate", "crondelete",
+        "schedulewakeup", "artifact", "glob", "grep",
+    ]
+    .iter()
+    .any(|&core_tool| t == core_tool || t.contains(core_tool))
+    {
+        "built-in".to_string()
+    } else {
+        // 과거 "other" → MCP 서버명 또는 도구명으로 개별 분리
+        mcp_server_name(tool_name).unwrap_or_else(|| tool_name.to_string())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CostRankItem {
+    pub name: String,
+    pub call_count: u64,
+    pub total_cost: f64,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DayCostBreakdown {
+    pub date: String,
+    pub plugins: Vec<CostRankItem>,
+    pub tools: Vec<CostRankItem>,
+}
+
+/// 캘린더 모달용: 특정 일자(사용자 PC 로컬 타임존)의 플러그인별·도구별 비용 랭킹
+///
+/// tool_calls 테이블에는 직접적인 비용이 없으므로(비용은 메시지 단위),
+/// 기존 get_token_usage_breakdown 과 동일하게 **세션 총비용을 해당 세션의 도구 호출 수로 균등 배분**하여 추정한다.
+/// 일자 범위는 세션 시작일(started_at)을 사용자 PC 로컬 타임존으로 변환한 기준이다.
+#[tauri::command]
+fn get_day_cost_breakdown(date: String) -> Result<DayCostBreakdown, String> {
+    let conn = get_db_conn()?;
+    let tz = local_tz_sql_modifier();
+
+    // 1) 해당 일자에 시작된 세션들의 총 비용(메시지 cost 합)과 총 토큰(세션 입출력 합)
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT s.session_id,
+                    COALESCE((SELECT SUM(cost_usd) FROM messages WHERE session_id = s.session_id), 0.0),
+                    s.total_input_tokens + s.total_output_tokens
+             FROM sessions s
+             WHERE date(s.started_at, '{tz}') = ?1",
+            tz = tz
+        ))
+        .map_err(|e| format!("SQL 준비 에러: {}", e))?;
+    let sess_rows = stmt
+        .query_map([date.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?, row.get::<_, u64>(2)?))
+        })
+        .map_err(|e| format!("쿼리 실행 에러: {}", e))?;
+    let mut sess_usage: std::collections::HashMap<String, (f64, u64)> =
+        std::collections::HashMap::new();
+    for r in sess_rows {
+        let (id, cost, tokens) = r.map_err(|e| format!("데이터 매핑 에러: {}", e))?;
+        sess_usage.insert(id, (cost, tokens));
+    }
+
+    // 2) 해당 일자 세션들의 도구 호출 목록
+    let mut stmt2 = conn
+        .prepare(&format!(
+            "SELECT t.session_id, t.tool_name
+             FROM tool_calls t JOIN sessions s ON t.session_id = s.session_id
+             WHERE date(s.started_at, '{tz}') = ?1",
+            tz = tz
+        ))
+        .map_err(|e| format!("SQL 준비 에러: {}", e))?;
+    let tool_rows = stmt2
+        .query_map([date.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("쿼리 실행 에러: {}", e))?;
+    let tool_list: Vec<(String, String)> = tool_rows.filter_map(|r| r.ok()).collect();
+
+    // 세션별 도구 호출 수(비례 배분 분모)
+    let mut tool_count: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for (sid, _) in &tool_list {
+        *tool_count.entry(sid.clone()).or_insert(0) += 1;
+    }
+
+    // 3) 세션 비용/토큰을 도구 호출에 균등 배분 → 도구별/플러그인별 집계 (call_count, cost, tokens)
+    let mut tool_agg: std::collections::HashMap<String, (u64, f64, u64)> =
+        std::collections::HashMap::new();
+    let mut plugin_agg: std::collections::HashMap<String, (u64, f64, u64)> =
+        std::collections::HashMap::new();
+    for (sid, tname) in &tool_list {
+        let (cost, tokens) = *sess_usage.get(sid).unwrap_or(&(0.0, 0));
+        let cnt = *tool_count.get(sid).unwrap_or(&1);
+        let attr_cost = if cnt > 0 { cost / cnt as f64 } else { cost };
+        let attr_tokens = if cnt > 0 { tokens / cnt } else { tokens };
+
+        let te = tool_agg.entry(tname.clone()).or_insert((0, 0.0, 0));
+        te.0 += 1;
+        te.1 += attr_cost;
+        te.2 += attr_tokens;
+
+        let pe = plugin_agg.entry(classify_plugin(tname)).or_insert((0, 0.0, 0));
+        pe.0 += 1;
+        pe.1 += attr_cost;
+        pe.2 += attr_tokens;
+    }
+
+    // 기본 정렬은 비용 내림차순(프론트가 표시 모드에 맞춰 재정렬·상위 N 선별). 도구는 절단하지 않고 전부 반환.
+    let to_items = |agg: std::collections::HashMap<String, (u64, f64, u64)>| {
+        let mut v: Vec<CostRankItem> = agg
+            .into_iter()
+            .map(|(name, (call_count, total_cost, total_tokens))| CostRankItem {
+                name,
+                call_count,
+                total_cost,
+                total_tokens,
+            })
+            .collect();
+        v.sort_by(|a, b| {
+            b.total_cost
+                .partial_cmp(&a.total_cost)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        v
+    };
+
+    Ok(DayCostBreakdown {
+        date,
+        plugins: to_items(plugin_agg),
+        tools: to_items(tool_agg),
+    })
 }
 
 // ────────────────────────────────────────────────────────────
@@ -638,8 +939,10 @@ fn interrupt_agent(agent_type: String, _cwd: String) -> Result<String, String> {
 }
 
 fn get_today_cost_and_health(conn: &Connection) -> Result<(f64, bool), String> {
+    // "오늘"은 사용자 PC 로컬 타임존 일자 기준으로 판단 (DB 는 UTC 저장)
+    let tz = local_tz_sql_modifier();
     let mut stmt = conn.prepare(
-        "SELECT COALESCE(SUM(cost_usd), 0.0) FROM messages WHERE date(created_at) = date('now');"
+        &format!("SELECT COALESCE(SUM(cost_usd), 0.0) FROM messages WHERE date(created_at, '{tz}') = date('now', '{tz}');", tz = tz)
     ).map_err(|e| e.to_string())?;
     
     let today_cost: f64 = stmt.query_row([], |row| row.get(0))
@@ -994,11 +1297,13 @@ fn get_rolling_window_usage() -> Result<u64, String> {
 /// 이번 달 OpenAI 누적 토큰 사용량 조회
 fn get_monthly_usage_openai() -> Result<u64, String> {
     let conn = get_db_conn()?;
+    // "이번 달"은 사용자 PC 로컬 타임존 월 기준으로 판단 (DB 는 UTC 저장)
+    let tz = local_tz_sql_modifier();
     let mut stmt = conn.prepare(
-        "SELECT COALESCE(SUM(total_input_tokens + total_output_tokens), 0)
+        &format!("SELECT COALESCE(SUM(total_input_tokens + total_output_tokens), 0)
          FROM sessions
          WHERE agent_type = 'codex'
-           AND strftime('%Y-%m', started_at) = strftime('%Y-%m', 'now')"
+           AND strftime('%Y-%m', started_at, '{tz}') = strftime('%Y-%m', 'now', '{tz}')", tz = tz)
     ).map_err(|e| e.to_string())?;
     let used: u64 = stmt.query_row([], |r| r.get(0))
         .map_err(|e| e.to_string())?;
@@ -2320,17 +2625,19 @@ async fn force_sync_local_sessions(app_handle: AppHandle) -> Result<SyncResult, 
 #[tauri::command]
 fn get_hourly_token_usage() -> Result<Vec<HourlyTokenUsage>, String> {
     let conn = get_db_conn()?;
+    // 시간대(0~23) 및 "오늘"을 사용자 PC 로컬 타임존 기준으로 산출 (DB 는 UTC 저장)
+    let tz = local_tz_sql_modifier();
     let mut stmt = conn.prepare(
-        "SELECT 
-            COALESCE(substr(datetime(started_at, '+9 hours'), 12, 2), '00') as hour, 
+        &format!("SELECT
+            COALESCE(substr(datetime(started_at, '{tz}'), 12, 2), '00') as hour,
             SUM(total_input_tokens + total_output_tokens) as tokens,
             SUM(CASE WHEN agent_type = 'claude_code' THEN total_input_tokens + total_output_tokens ELSE 0 END) as claude_tokens,
             SUM(CASE WHEN agent_type = 'codex' THEN total_input_tokens + total_output_tokens ELSE 0 END) as codex_tokens,
             SUM(CASE WHEN agent_type = 'antigravity' THEN total_input_tokens + total_output_tokens ELSE 0 END) as antigravity_tokens
          FROM sessions
-         WHERE date(started_at, '+9 hours') = date('now', '+9 hours')
+         WHERE date(started_at, '{tz}') = date('now', '{tz}')
          GROUP BY hour
-         ORDER BY hour ASC"
+         ORDER BY hour ASC", tz = tz)
     ).map_err(|e| e.to_string())?;
     
     let rows = stmt.query_map([], |row| {
@@ -2379,9 +2686,14 @@ fn get_hourly_token_usage() -> Result<Vec<HourlyTokenUsage>, String> {
 fn get_token_usage_breakdown(days: Option<u32>) -> Result<TokenUsageBreakdown, String> {
     let conn = get_db_conn()?;
 
-    // days = 0 또는 None이면 전체 기간, 그 외엔 KST 기준 N일 이내로 필터
+    // days = 0 또는 None이면 전체 기간, 그 외엔 사용자 PC 로컬 타임존 기준 N일 이내로 필터
+    let tz = local_tz_sql_modifier();
     let date_filter = match days {
-        Some(d) if d > 0 => format!("WHERE date(started_at, '+9 hours') >= date('now', '+9 hours', '-{} days')", d),
+        Some(d) if d > 0 => format!(
+            "WHERE date(started_at, '{tz}') >= date('now', '{tz}', '-{days} days')",
+            tz = tz,
+            days = d
+        ),
         _ => "".to_string(),
     };
 
@@ -2598,6 +2910,8 @@ fn main() {
             get_loop_signals,
             get_daily_costs,
             get_daily_token_usage,
+            get_daily_usage_in_range,
+            get_day_cost_breakdown,
             get_session_details,
             interrupt_agent,
             focus_main_window,
