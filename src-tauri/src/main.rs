@@ -548,6 +548,26 @@ fn toggle_tray_popover(app: &AppHandle, click_pos: tauri::PhysicalPosition<f64>)
         
         let _ = window.show();
         let _ = window.set_focus();
+        
+        // macOS 전체화면 및 Spaces 오버레이 처리를 위해 objc 크레이트를 사용하여 안전하게 네이티브 속성 주입
+        // (objc 크레이트는 objc2와 달리 메모리 수명 어설션으로 인한 강제 Abort가 발생하지 않아 런타임에 매우 안전합니다.)
+        #[cfg(target_os = "macos")]
+        {
+            use objc::{msg_send, sel, sel_impl};
+            
+            if let Ok(ns_window) = window.ns_window() {
+                let ns_window_ptr = ns_window as *mut objc::runtime::Object;
+                if !ns_window_ptr.is_null() {
+                    unsafe {
+                        // Window Level 설정: 25 (NSStatusWindowLevel - 상태 바 오버레이 가능 레벨)
+                        let _: () = msg_send![ns_window_ptr, setLevel: 25isize]; 
+                        
+                        // Collection Behavior 설정: CanJoinAllSpaces(1) | MoveToActiveSpace(2) | Stationary(16) | FullScreenAuxiliary(256) (합산 값 275)
+                        let _: () = msg_send![ns_window_ptr, setCollectionBehavior: 275usize];
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -555,6 +575,9 @@ fn toggle_tray_popover(app: &AppHandle, click_pos: tauri::PhysicalPosition<f64>)
 #[tauri::command]
 fn focus_main_window(app_handle: AppHandle, session_id: Option<String>) -> Result<(), String> {
     if let Some(main_window) = app_handle.get_webview_window("main") {
+        #[cfg(target_os = "macos")]
+        let _ = app_handle.set_activation_policy(tauri::ActivationPolicy::Regular);
+
         let _ = main_window.show();
         let _ = main_window.unminimize();
         let _ = main_window.set_focus();
@@ -2126,14 +2149,44 @@ fn main() {
         .setup(|app| {
             let app_handle = app.handle().clone();
 
+            // macOS의 경우 백그라운드 트레이 전용 모드(Accessory)로 시작
+            #[cfg(target_os = "macos")]
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // 메인 윈도우의 CloseRequested 이벤트를 가로채어 창을 숨기고 Accessory 모드로 복구
+            if let Some(main_win) = app.get_webview_window("main") {
+                let main_clone = main_win.clone();
+                let app_handle_clone = app_handle.clone();
+                main_win.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = main_clone.hide();
+                        #[cfg(target_os = "macos")]
+                        let _ = app_handle_clone.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                    }
+                });
+            }
+
+            // 팝오버 닫힘 시간 추적을 위한 스레드 안전 변수
+            let last_hide = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now() - std::time::Duration::from_secs(1)));
+            let last_hide_for_blur = last_hide.clone();
+            let last_hide_for_click = last_hide.clone();
+
             // 1. 트레이 팝오버 윈도우 획득 및 blur 이벤트 핸들링
             if let Some(popover) = app.get_webview_window("tray-popover") {
                 let popover_clone = popover.clone();
                 popover.on_window_event(move |event| {
                     if let tauri::WindowEvent::Focused(false) = event {
                         let _ = popover_clone.hide();
+                        if let Ok(mut last) = last_hide_for_blur.lock() {
+                            *last = std::time::Instant::now();
+                        }
                     }
                 });
+
+                // macOS의 경우 모든 가상 데스크톱(Spaces)에 창이 함께 참여하도록 활성화
+                #[cfg(target_os = "macos")]
+                let _ = popover.set_visible_on_all_workspaces(true);
             }
 
             // 2. 트레이 아이콘 초기 설정
@@ -2144,9 +2197,14 @@ fn main() {
             let _tray = tauri::tray::TrayIconBuilder::with_id("main-tray")
                 .icon(initial_icon)
                 .title("$0.00")
-                .on_tray_icon_event(|tray: &tauri::tray::TrayIcon, event: tauri::tray::TrayIconEvent| {
-                    if let tauri::tray::TrayIconEvent::Click { button, position, .. } = event {
-                        if button == tauri::tray::MouseButton::Left {
+                .on_tray_icon_event(move |tray: &tauri::tray::TrayIcon, event: tauri::tray::TrayIconEvent| {
+                    if let tauri::tray::TrayIconEvent::Click { button, button_state, position, .. } = event {
+                        if button == tauri::tray::MouseButton::Left && button_state == tauri::tray::MouseButtonState::Up {
+                            if let Ok(last) = last_hide_for_click.lock() {
+                                if last.elapsed() < std::time::Duration::from_millis(250) {
+                                    return;
+                                }
+                            }
                             let app = tray.app_handle();
                             toggle_tray_popover(app, position);
                         }

@@ -3,18 +3,21 @@
   "version": "0.1.0",
   "identifier": "com.atk.desktop",
   "build": {
-    "beforeDevCommand": "npm run --prefix ../frontend dev",
+    "beforeDevCommand": "echo 'Using manual dev server'",
     "beforeBuildCommand": "npm run --prefix ../frontend build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../frontend/dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
         "title": "Agent Token Tracker",
         "width": 1000,
         "height": 800,
+        "minWidth": 950,
+        "minHeight": 700,
         "resizable": true,
         "fullscreen": false
       },
@@ -28,6 +31,8 @@
         "alwaysOnTop": true,
         "visible": false,
         "transparent": true,
+        "skipTaskbar": true,
+        "visibleOnAllWorkspaces": true,
         "url": "index.html?mode=tray"
       }
     ],

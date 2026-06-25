@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities for ATK Desktop","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-close","core:window:allow-minimize","core:window:allow-maximize"]}}
+{"default":{"identifier":"default","description":"Default capabilities for ATK Desktop","local":true,"windows":["main","tray-popover"],"permissions":["core:default","core:window:allow-close","core:window:allow-minimize","core:window:allow-maximize","core:window:allow-set-visible-on-all-workspaces"]}}

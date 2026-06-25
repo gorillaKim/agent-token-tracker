@@ -7,7 +7,7 @@ edition = "2021"
 tauri-build = { version = "2.0.0-rc.0", features = [] }
 
 [dependencies]
-tauri = { version = "2.0.0-rc.0", features = ["tray-icon", "image-png"] }
+tauri = { version = "2.0.0-rc.0", features = ["macos-private-api", "tray-icon", "image-png"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -16,3 +16,8 @@ agent-token-tracker = { path = ".." }
 keyring = "3.2.1"
 reqwest = { version = "0.12", features = ["json"] }
 chrono = { version = "0.4", features = ["serde"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+cocoa = "0.26"
+objc = "0.2"
