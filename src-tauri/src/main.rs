@@ -564,21 +564,24 @@ fn toggle_tray_popover(app: &AppHandle, click_pos: tauri::PhysicalPosition<f64>)
         let _ = window.show();
         let _ = window.set_focus();
         
-        // macOS 전체화면 및 Spaces 오버레이 처리를 위해 objc 크레이트를 사용하여 안전하게 네이티브 속성 주입
-        // (objc 크레이트는 objc2와 달리 메모리 수명 어설션으로 인한 강제 Abort가 발생하지 않아 런타임에 매우 안전합니다.)
+        // 팝오버가 모든 Space(가상 데스크톱) 및 타 앱의 네이티브 전체화면 위에 표시되도록 설정
         #[cfg(target_os = "macos")]
         {
             use objc::{msg_send, sel, sel_impl};
+
+            // collectionBehavior(CanJoinAllSpaces 등)는 Tauri의 검증된 안전 API로 설정한다.
+            // raw setCollectionBehavior에 상호 배타적 플래그(CanJoinAllSpaces+MoveToActiveSpace)를
+            // 함께 전달하면 AppKit이 NSException을 던지고, 이 ObjC 예외가 Rust로 전파되며
+            // catch_unwind에서 foreign exception으로 처리되어 프로세스가 abort(앱 종료)됐었다.
+            let _ = window.set_visible_on_all_workspaces(true);
             
             if let Ok(ns_window) = window.ns_window() {
                 let ns_window_ptr = ns_window as *mut objc::runtime::Object;
                 if !ns_window_ptr.is_null() {
                     unsafe {
-                        // Window Level 설정: 25 (NSStatusWindowLevel - 상태 바 오버레이 가능 레벨)
-                        let _: () = msg_send![ns_window_ptr, setLevel: 25isize]; 
-                        
-                        // Collection Behavior 설정: CanJoinAllSpaces(1) | MoveToActiveSpace(2) | Stationary(16) | FullScreenAuxiliary(256) (합산 값 275)
-                        let _: () = msg_send![ns_window_ptr, setCollectionBehavior: 275usize];
+                        // 메뉴바/전체화면 위에 떠 있도록 NSStatusWindowLevel(25)로 윈도우 레벨 상향.
+                        // setLevel은 단일 NSInteger 스칼라 설정이라 예외를 던지지 않아 안전하다.
+                        let _: () = msg_send![ns_window_ptr, setLevel: 25isize];
                     }
                 }
             }
