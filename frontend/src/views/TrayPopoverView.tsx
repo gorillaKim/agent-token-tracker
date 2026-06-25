@@ -1,0 +1,151 @@
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { AgentSummary, LoopDetectionResult, PlanQuotaInfo } from "../types";
+import { formatTokens } from "../utils/formatters";
+import { AgentQuotaCard } from "../components/AgentQuotaCard";
+import { AlertTriangle, CheckCircle2 } from "lucide-react";
+
+/**
+ * 시스템 트레이 전용 팝오버 뷰 컴포넌트
+ *
+ * 트레이 아이콘을 클릭했을 때 나타나는 소형 팝업 UI를 담당하며,
+ * 실시간 오작동 상태 및 에이전트별 토큰 쿼터 상황을 콤팩트하게 제공합니다.
+ * (투명 윈도우 위에 렌더 — 이 컨테이너만 시각적으로 보인다. main.tsx의 html.tray 참조)
+ */
+export function TrayPopoverView() {
+  const [summaries, setSummaries] = useState<AgentSummary[]>([]);
+  const [anomalies, setAnomalies] = useState<LoopDetectionResult[]>([]);
+  const [quotas, setQuotas] = useState<PlanQuotaInfo[]>([]);
+  const [tokenDisplayMode, setTokenDisplayMode] = useState<string>("tokens");
+  const [refreshInterval, setRefreshInterval] = useState<number>(3);
+  const [loading, setLoading] = useState(true);
+
+  const loadData = async () => {
+    try {
+      const sums = await invoke<AgentSummary[]>("get_agent_summaries");
+      const anoms = await invoke<LoopDetectionResult[]>("get_loop_signals");
+      const qts = await invoke<PlanQuotaInfo[]>("get_subscription_quota");
+
+      try {
+        const appSettings = await invoke<any>("load_settings");
+        if (appSettings && appSettings.token_display_mode) {
+          setTokenDisplayMode(appSettings.token_display_mode);
+        }
+        if (appSettings && typeof appSettings.refresh_interval === "number") {
+          setRefreshInterval(appSettings.refresh_interval);
+        }
+      } catch (e) {
+        console.error("설정 로드 실패:", e);
+      }
+
+      setSummaries(sums);
+      setAnomalies(anoms);
+      setQuotas(qts);
+    } catch (e) {
+      console.error("데이터 로드 실패:", e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+    const unlistenPromise = listen("db-updated", () => {
+      loadData();
+    });
+    return () => {
+      unlistenPromise.then((fn) => fn());
+    };
+  }, []);
+
+  // 설정된 주기(분)마다 자동 갱신 (0이면 끔)
+  useEffect(() => {
+    if (!refreshInterval || refreshInterval <= 0) return;
+    const id = setInterval(() => {
+      loadData();
+    }, refreshInterval * 60 * 1000);
+    return () => clearInterval(id);
+  }, [refreshInterval]);
+
+  const totalAnomalies = anomalies.length;
+
+  const handleBannerClick = async () => {
+    if (anomalies.length > 0) {
+      const firstAnomalySessionId = anomalies[0].session_id;
+      try {
+        await invoke("focus_main_window", { sessionId: firstAnomalySessionId });
+      } catch (e) {
+        console.error("focus_main_window 호출 실패:", e);
+      }
+    }
+  };
+
+  return (
+    <div className="flex h-full flex-col gap-2.5 overflow-hidden rounded-xl border border-border bg-popover/95 p-3 text-foreground shadow-lg backdrop-blur-md">
+      {/* 헤더 */}
+      <div className="flex items-center justify-between">
+        <h4 className="text-sm font-semibold">에이전트 토큰 관측소</h4>
+        <span className="flex items-center gap-1 text-[11px] font-semibold text-success">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />
+          LIVE
+        </span>
+      </div>
+
+      {/* 상태 배너 */}
+      {totalAnomalies > 0 ? (
+        <button
+          onClick={handleBannerClick}
+          className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-left text-xs font-medium text-destructive transition-colors hover:bg-destructive/15"
+        >
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          <span>{totalAnomalies}개의 오작동 세션 감지됨</span>
+        </button>
+      ) : (
+        <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 px-3 py-2 text-xs font-medium text-success">
+          <CheckCircle2 className="h-4 w-4 shrink-0" />
+          <span>모든 프로세스 정상 작동 중</span>
+        </div>
+      )}
+
+      {/* 에이전트 쿼터 리스트 */}
+      <div className="flex flex-1 flex-col gap-2 overflow-y-auto">
+        {loading ? (
+          <div className="py-8 text-center text-xs text-muted-foreground">로드 중...</div>
+        ) : (
+          summaries.map((sum) => {
+            let providerKey = "antigravity";
+            if (sum.agent_type === "claude_code") providerKey = "anthropic";
+            else if (sum.agent_type === "codex") providerKey = "openai";
+
+            const quota = quotas.find((q) => q.provider === providerKey);
+
+            return (
+              <AgentQuotaCard
+                key={sum.agent_type}
+                sum={sum}
+                quota={quota}
+                tokenDisplayMode={tokenDisplayMode}
+                isDashboard={false}
+                isExpanded={false}
+                onToggleExpand={() => {}}
+              />
+            );
+          })
+        )}
+      </div>
+
+      {/* 푸터: 오늘 누적 토큰 */}
+      <div className="flex items-center justify-between border-t border-border pt-2 text-xs">
+        <span className="text-muted-foreground">오늘 누적 사용 토큰</span>
+        <span className="font-semibold tabular-nums text-primary">
+          {formatTokens(
+            summaries.reduce((acc, curr) => acc + (curr.total_input_tokens + curr.total_output_tokens), 0)
+          )}{" "}
+          Tokens
+        </span>
+      </div>
+    </div>
+  );
+}
+export default TrayPopoverView;

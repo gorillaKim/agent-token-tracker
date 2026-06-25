@@ -32,6 +32,7 @@ impl LogAdapter for ClaudeCodeAdapter {
         let mut model_id = None;
         let mut total_input_tokens = 0;
         let mut total_output_tokens = 0;
+        let mut session_name = None;
 
         let mut messages = Vec::new();
         let mut nodes = Vec::new();
@@ -50,6 +51,13 @@ impl LogAdapter for ClaudeCodeAdapter {
                 Err(_) => continue, // 포맷이 깨진 줄은 유연하게 스킵 (Graceful Degrade 정책)
             };
 
+            // session_meta가 유실된 로그의 경우 대비: 최초 발견된 유효 타임스탬프를 started_at으로 설정 (한국어 주석 적용)
+            if started_at == "1970-01-01T00:00:00Z" {
+                if let Some(ts) = log_val.get("timestamp").and_then(|t| t.as_str()) {
+                    started_at = ts.to_string();
+                }
+            }
+
             // type 필드 판별
             if let Some(log_type) = log_val.get("type").and_then(|t| t.as_str()) {
                 match log_type {
@@ -57,6 +65,12 @@ impl LogAdapter for ClaudeCodeAdapter {
                         // 세션 메타정보 획득
                         if let Some(id) = log_val.get("id").and_then(|i| i.as_str()) {
                             session_id = id.to_string();
+                        }
+                        // sessionId 키 변형도 지원 (서브에이전트 로그 호환)
+                        if session_id == file_name {
+                            if let Some(id) = log_val.get("sessionId").and_then(|i| i.as_str()) {
+                                session_id = id.to_string();
+                            }
                         }
                         if let Some(dir) = log_val.get("cwd").and_then(|c| c.as_str()) {
                             cwd = dir.to_string();
@@ -68,8 +82,20 @@ impl LogAdapter for ClaudeCodeAdapter {
                             agent_version = Some(ver.to_string());
                         }
                     }
-                    "message" => {
-                        // 메시지 및 블록 분석
+                    "message" | "user" | "assistant" | "attachment" => {
+                        // 서브에이전트 로그: session_meta 없이 user/attachment 이벤트에
+                        // 최상위로 cwd, sessionId가 포함된 경우 보완 파싱
+                        if cwd == "/Unknown" {
+                            if let Some(dir) = log_val.get("cwd").and_then(|c| c.as_str()) {
+                                cwd = dir.to_string();
+                            }
+                        }
+                        if session_id == file_name {
+                            if let Some(id) = log_val.get("sessionId").and_then(|i| i.as_str()) {
+                                session_id = id.to_string();
+                            }
+                        }
+                        // 메시지 및 블록 분석 (user, assistant, message 타입 지원)
                         if let Some(msg_obj) = log_val.get("message") {
                             let role = msg_obj
                                 .get("role")
@@ -80,12 +106,14 @@ impl LogAdapter for ClaudeCodeAdapter {
                                 .and_then(|t| t.as_str())
                                 .unwrap_or(&started_at);
 
-                            // 토큰 사용량(usage) 추출 (role == assistant 일 때 유효)
+                            // 토큰 사용량(usage) 추출 (최상위 usage를 우선 조회하며, 없을 시 message 내부 usage 폴백)
                             let mut input_tokens = 0;
                             let mut cache_read_tokens = 0;
                             let mut output_tokens = 0;
 
-                            if let Some(usage) = msg_obj.get("usage") {
+                            let usage_opt = log_val.get("usage").or_else(|| msg_obj.get("usage"));
+
+                            if let Some(usage) = usage_opt {
                                 input_tokens = usage
                                     .get("input_tokens")
                                     .and_then(|i| i.as_u64())
@@ -141,6 +169,16 @@ impl LogAdapter for ClaudeCodeAdapter {
                             } else {
                                 Some(text_content)
                             };
+
+                            if role == "user" && session_name.is_none() {
+                                if let Some(ref text) = msg_content_opt {
+                                    let clean_text = text.replace('\n', " ").trim().to_string();
+                                    let name_candidate: String = clean_text.chars().take(40).collect();
+                                    if !name_candidate.is_empty() {
+                                        session_name = Some(name_candidate);
+                                    }
+                                }
+                            }
 
                             // 턴 메시지 추가
                             let msg = Message::new(
@@ -235,7 +273,7 @@ impl LogAdapter for ClaudeCodeAdapter {
             total_input_tokens,
             total_output_tokens,
             "api".to_string(), // Claude Code는 실측 토큰 제공
-            None,
+            session_name,
             None,
         );
 
@@ -262,8 +300,8 @@ mod tests {
         let mut temp_file = File::create(&temp_path).expect("임시 파일 생성 실패");
 
         let log_data = r#"{"type": "session_meta", "id": "session-xyz", "cwd": "/Users/test/dir", "timestamp": "2026-06-23T10:00:00Z", "cli_version": "0.2.1"}
-{"type": "message", "timestamp": "2026-06-23T10:01:00Z", "message": {"role": "user", "content": [{"type": "text", "text": "안녕"}]}}
-{"type": "message", "timestamp": "2026-06-23T10:01:05Z", "message": {"role": "assistant", "model": "claude-3-5-sonnet", "usage": {"input_tokens": 100, "cache_read_input_tokens": 40, "output_tokens": 50}, "content": [{"type": "thinking", "thinking": "사용자 질문을 분석합니다."}, {"type": "tool_use", "name": "view_file", "input": {"AbsolutePath": "/test.txt"}}]}}
+{"type": "user", "timestamp": "2026-06-23T10:01:00Z", "message": {"role": "user", "content": [{"type": "text", "text": "안녕"}]}}
+{"type": "assistant", "timestamp": "2026-06-23T10:01:05Z", "message": {"role": "assistant", "model": "claude-3-5-sonnet", "content": [{"type": "thinking", "thinking": "사용자 질문을 분석합니다."}, {"type": "tool_use", "name": "view_file", "input": {"AbsolutePath": "/test.txt"}}]}, "usage": {"input_tokens": 100, "cache_read_input_tokens": 40, "output_tokens": 50}}
 {"type": "session_end", "timestamp": "2026-06-23T10:02:00Z"}
 "#;
 
@@ -317,5 +355,35 @@ mod tests {
         );
         // input_hash가 16진수 포맷인지 검증
         assert!(!result.tool_calls[0].input_hash.is_empty());
+    }
+
+    #[test]
+    fn test_claude_code_adapter_parsing_missing_session_meta() {
+        // session_meta가 없는 임시 JSONL 파일 생성 (한국어 주석)
+        let mut temp_path = std::env::temp_dir();
+        temp_path.push("test_claude_code_missing_meta.jsonl");
+
+        let mut temp_file = File::create(&temp_path).expect("임시 파일 생성 실패");
+
+        // 첫 번째 이벤트의 timestamp가 fallback으로 사용되어야 함
+        let log_data = r#"{"type": "message", "timestamp": "2026-06-24T12:00:00Z", "message": {"role": "user", "content": [{"type": "text", "text": "Hello"}]}}
+{"type": "message", "timestamp": "2026-06-24T12:01:00Z", "message": {"role": "assistant", "model": "claude-3-5-sonnet", "usage": {"input_tokens": 50, "cache_read_input_tokens": 0, "output_tokens": 20}, "content": [{"type": "text", "text": "World"}]}}
+"#;
+
+        write!(temp_file, "{}", log_data).expect("임시 파일 쓰기 실패");
+        drop(temp_file);
+
+        let path = temp_path.to_str().unwrap();
+        let adapter = ClaudeCodeAdapter;
+        let result = adapter.parse_session(path).expect("세션 파싱 실패");
+
+        // 임시 파일 삭제
+        let _ = std::fs::remove_file(&temp_path);
+
+        // 검증: started_at이 1970-01-01이 아닌 첫 번째 이벤트의 타임스탬프인 2026-06-24T12:00:00Z 여야 함
+        assert_eq!(result.session.started_at, "2026-06-24T12:00:00Z");
+        assert_eq!(result.session.total_input_tokens, 50);
+        assert_eq!(result.session.total_output_tokens, 20);
+        assert_eq!(result.messages.len(), 2);
     }
 }

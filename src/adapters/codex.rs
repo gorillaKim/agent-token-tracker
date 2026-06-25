@@ -39,10 +39,23 @@ impl LogAdapter for CodexAdapter {
                 continue;
             }
 
-            let log_val: Value = match serde_json::from_str(&line) {
+            let mut log_val: Value = match serde_json::from_str(&line) {
                 Ok(v) => v,
                 Err(_) => continue, // 포맷 오류 시 조용히 스킵 (degrade 정책)
             };
+
+            // 최상위 type이 "event_msg"이고, payload 필드가 존재하면 payload 내부 내용을 최상위로 끌어올림
+            if log_val.get("type").and_then(|t| t.as_str()) == Some("event_msg") {
+                if let Some(payload) = log_val.get("payload").cloned() {
+                    if let Some(payload_obj) = payload.as_object() {
+                        if let Some(log_obj) = log_val.as_object_mut() {
+                            for (k, v) in payload_obj {
+                                log_obj.insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
+                }
+            }
 
             let event_type = log_val.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
@@ -76,9 +89,14 @@ impl LogAdapter for CodexAdapter {
                 "token_count" => {
                     if let Some(info) = log_val.get("info") {
                         if let Some(last) = info.get("last_token_usage") {
-                            let in_t = last.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let mut in_t = last.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                             let cache_t = last.get("cached_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                             let out_t = last.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let tot_t = last.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                            if in_t == 0 && out_t == 0 && tot_t > 0 {
+                                in_t = tot_t;
+                            }
 
                             if in_t > 0 || out_t > 0 {
                                 let msg = Message::new(
@@ -97,8 +115,17 @@ impl LogAdapter for CodexAdapter {
                         }
 
                         if let Some(total) = info.get("total_token_usage") {
-                            total_input_tokens = total.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                            total_output_tokens = total.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let in_t = total.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let out_t = total.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let tot_t = total.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                            if in_t == 0 && out_t == 0 && tot_t > 0 {
+                                total_input_tokens = tot_t;
+                                total_output_tokens = 0;
+                            } else {
+                                total_input_tokens = in_t;
+                                total_output_tokens = out_t;
+                            }
                         }
                     }
                 }
@@ -278,9 +305,15 @@ mod tests {
             r#"{{"type":"turn_context","payload":{{"model":"claude-3-5-sonnet"}}}}"#
         ).unwrap();
         writeln!(temp_file, r#"{{"type":"task_started","turn_id":"t1"}}"#).unwrap();
+        // 1. 기존 token_count 포맷
         writeln!(
             temp_file,
             r#"{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":100,"cached_input_tokens":20,"output_tokens":50}},"total_token_usage":{{"input_tokens":100,"output_tokens":50}}}}}}"#
+        ).unwrap();
+        // 2. 신규 event_msg 래핑된 token_count 포맷
+        writeln!(
+            temp_file,
+            r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":150,"cached_input_tokens":30,"output_tokens":70}},"total_token_usage":{{"input_tokens":250,"output_tokens":120}}}}}}}}"#
         ).unwrap();
         writeln!(
             temp_file,
@@ -305,13 +338,17 @@ mod tests {
         assert_eq!(result.session.started_at, "2026-06-23T11:00:00Z");
         assert_eq!(result.session.cwd, "/work");
         assert_eq!(result.session.model_id, Some("claude-3-5-sonnet".to_string()));
-        assert_eq!(result.session.total_input_tokens, 100);
-        assert_eq!(result.session.total_output_tokens, 50);
+        assert_eq!(result.session.total_input_tokens, 250);
+        assert_eq!(result.session.total_output_tokens, 120);
 
-        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages.len(), 2);
         assert_eq!(result.messages[0].input_tokens, 100);
         assert_eq!(result.messages[0].cache_read_input_tokens, 20);
         assert_eq!(result.messages[0].output_tokens, 50);
+
+        assert_eq!(result.messages[1].input_tokens, 150);
+        assert_eq!(result.messages[1].cache_read_input_tokens, 30);
+        assert_eq!(result.messages[1].output_tokens, 70);
 
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].tool_name, "test_server/test_tool");

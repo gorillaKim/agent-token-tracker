@@ -311,6 +311,44 @@ pub fn get_all_sessions(conn: &Connection) -> Result<Vec<Session>, rusqlite::Err
     Ok(sessions)
 }
 
+/// started_at 기준 최근 N일 이내(롤링 window)의 세션만 조회합니다.
+/// SQLite datetime()으로 양쪽을 정규화해 'T'/space 구분자 차이에 안전합니다.
+pub fn get_sessions_within_days(conn: &Connection, days: u32) -> Result<Vec<Session>, rusqlite::Error> {
+    let days = days.max(1);
+    let sql = format!(
+        "SELECT session_id, agent_type, agent_version, started_at, ended_at, cwd, model_id,
+                total_input_tokens, total_output_tokens, token_source, session_name, parent_session_id
+         FROM sessions
+         WHERE datetime(started_at) >= datetime('now', '-{} days')
+         ORDER BY datetime(started_at) DESC",
+        days
+    );
+    let mut stmt = conn.prepare(&sql)?;
+
+    let sess_iter = stmt.query_map([], |row| {
+        Ok(Session::new(
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+            row.get(9)?,
+            row.get(10)?,
+            row.get(11)?,
+        ))
+    })?;
+
+    let mut sessions = Vec::new();
+    for sess in sess_iter {
+        sessions.push(sess?);
+    }
+    Ok(sessions)
+}
+
 /// 특정 세션의 메시지 리스트를 턴 인덱스 오름차순으로 조회합니다.
 pub fn get_messages_by_session(conn: &Connection, session_id: &str) -> Result<Vec<Message>, rusqlite::Error> {
     let mut stmt = conn.prepare(
@@ -623,7 +661,7 @@ mod tests {
             Some("1.0.0".to_string()),
             "2026-06-23T09:00:00Z".to_string(),
             None,
-            "/Users/madup/project".to_string(),
+            "/mock/project".to_string(),
             Some("gpt-4o".to_string()),
             1500,
             800,
@@ -753,7 +791,7 @@ mod tests {
                 None,
                 "2026-06-23T12:00:00Z".to_string(),
                 None,
-                "/Users/madup/fts".to_string(),
+                "/mock/fts".to_string(),
                 Some("claude-3-5-sonnet".to_string()),
                 100,
                 50,
