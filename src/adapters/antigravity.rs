@@ -303,4 +303,25 @@ mod tests {
         assert_eq!(git_remote, Some("https://github.com/madup-inc/front-core.git".to_string()));
         assert_eq!(git_branch, Some("feat/jake".to_string()));
     }
+
+    #[test]
+    fn test_parse_session_invalid_path_format() {
+        let adapter = AntigravityAdapter;
+        let res = adapter.parse_session("/invalid/path/to/state.vscdb");
+        assert!(res.is_err());
+        assert_eq!(
+            res.unwrap_err().to_string(),
+            "Antigravity 가상 경로 규격이 잘못되었습니다 (?session_id= 필요)"
+        );
+    }
+
+    #[test]
+    fn test_parse_session_nonexistent_db() {
+        let adapter = AntigravityAdapter;
+        let res = adapter.parse_session("/nonexistent/file.vscdb?session_id=mock-uuid");
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("unable to open database file") || err_msg.contains("cannot open file"));
+    }
 }
+
