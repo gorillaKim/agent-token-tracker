@@ -313,9 +313,60 @@ fn process_watch_file(
     Ok(())
 }
 
+/// 설정된 log_dir + OS별 기본 에이전트 로그 경로(존재하는 것만)를 자동 감지하여 반환한다.
+/// 수동 동기화(sync)와 백그라운드 파일 감시(watcher)가 공통으로 사용한다.
+/// 반환값: 디렉토리(Claude/Codex 세션 폴더) 또는 파일(Antigravity state.vscdb)들의 루트 경로.
+fn detect_log_paths(app_handle: &AppHandle) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+
+    // 1. 사용자가 설정에서 직접 지정한 log_dir
+    if let Ok(config_path) = get_config_path(app_handle) {
+        if config_path.exists() {
+            if let Ok(json) = std::fs::read_to_string(&config_path) {
+                if let Ok(settings) = serde_json::from_str::<AppSettings>(&json) {
+                    if !settings.log_dir.is_empty() {
+                        roots.push(PathBuf::from(&settings.log_dir));
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. OS별 기본 에이전트 로그 경로 자동 감지 (존재하는 것만)
+    let home = std::env::var("HOME").unwrap_or_default();
+    if !home.is_empty() {
+        // Claude Code 세션 로그
+        let claude_path = Path::new(&home).join(".claude").join("projects");
+        if claude_path.is_dir() {
+            roots.push(claude_path);
+        }
+        // Codex 세션 로그 (활성 + 보관)
+        let codex_path = Path::new(&home).join(".codex").join("sessions");
+        if codex_path.is_dir() {
+            roots.push(codex_path);
+        }
+        let codex_archived = Path::new(&home).join(".codex").join("archived_sessions");
+        if codex_archived.is_dir() {
+            roots.push(codex_archived);
+        }
+        // Antigravity state.vscdb (macOS)
+        let vscdb_path = Path::new(&home)
+            .join("Library")
+            .join("Application Support")
+            .join("Code")
+            .join("User")
+            .join("globalStorage")
+            .join("state.vscdb");
+        if vscdb_path.is_file() {
+            roots.push(vscdb_path);
+        }
+    }
+
+    roots
+}
+
 fn start_watch_loop(app_handle: AppHandle) -> Result<(), String> {
     let db_path = "../atk.db";
-    let watch_path = "../tests/fixtures";
 
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |res| {
@@ -324,15 +375,42 @@ fn start_watch_loop(app_handle: AppHandle) -> Result<(), String> {
         }
     }).map_err(|e| format!("파일 감시자 생성 실패: {}", e))?;
 
-    let target_dir = Path::new(watch_path);
-    if !target_dir.exists() {
-        return Err(format!("감시 경로가 존재하지 않습니다: {}", watch_path));
+    // 실제 세션 로그 경로를 자동 감지하여 감시 대상으로 등록한다.
+    let roots = detect_log_paths(&app_handle);
+    let mut watched: HashSet<PathBuf> = HashSet::new();
+    let mut watch_count = 0;
+    for root in roots {
+        // 파일(state.vscdb 등)은 부모 디렉토리를 비재귀로, 디렉토리는 재귀로 감시한다.
+        let (target, mode) = if root.is_file() {
+            match root.parent() {
+                Some(parent) => (parent.to_path_buf(), RecursiveMode::NonRecursive),
+                None => continue,
+            }
+        } else if root.is_dir() {
+            (root.clone(), RecursiveMode::Recursive)
+        } else {
+            continue;
+        };
+
+        // 중복 감시 방지
+        if !watched.insert(target.clone()) {
+            continue;
+        }
+
+        match watcher.watch(&target, mode) {
+            Ok(_) => {
+                watch_count += 1;
+                println!("[Watch] 감시 시작: {:?} ({:?})", target, mode);
+            }
+            Err(e) => eprintln!("[Watch] 감시 등록 실패 {:?}: {}", target, e),
+        }
     }
 
-    watcher.watch(target_dir, RecursiveMode::Recursive)
-        .map_err(|e| format!("파일 감시 시작 실패: {}", e))?;
-
-    println!("[Watch] Tauri 백그라운드 파일 감시 시작: {}", watch_path);
+    if watch_count == 0 {
+        println!("[Watch] 감시할 세션 로그 경로를 찾지 못했습니다. (수동 동기화만 동작합니다)");
+        return Ok(());
+    }
+    println!("[Watch] 총 {}개 경로 백그라운드 파일 감시 시작", watch_count);
 
     let mut last_event_time = Instant::now();
     let mut pending_files = HashSet::new();
@@ -1924,62 +2002,10 @@ async fn sync_local_sessions_impl(app_handle: AppHandle) -> Result<SyncResult, S
     }
     let db_path = "../atk.db";
     
-    // 1. 로드 설정 경로 및 기본 에이전트 경로들을 취합
-    let config_path = get_config_path(&app_handle)?;
-    println!("[Sync] config_path: {:?}", config_path);
-    let mut log_dir = "".to_string();
-    if config_path.exists() {
-        if let Ok(json) = std::fs::read_to_string(config_path) {
-            if let Ok(settings) = serde_json::from_str::<AppSettings>(&json) {
-                if !settings.log_dir.is_empty() {
-                    log_dir = settings.log_dir;
-                }
-            }
-        }
-    }
-    println!("[Sync] Final log_dir: {}", log_dir);
-    
-    let mut target_paths = Vec::new();
-    if !log_dir.is_empty() {
-        target_paths.push(PathBuf::from(&log_dir));
-    }
-    
-    // 기본 OS별 에이전트 경로 추가
-    let home = std::env::var("HOME").unwrap_or_default();
-    if !home.is_empty() {
-        // Claude Code 기본 경로
-        let claude_path = Path::new(&home).join(".claude").join("projects");
-        if claude_path.exists() && claude_path.is_dir() {
-            println!("[Sync] Added default Claude Code path: {:?}", claude_path);
-            target_paths.push(claude_path);
-        }
-        
-        // Codex 기본 경로
-        let codex_path = Path::new(&home).join(".codex").join("sessions");
-        if codex_path.exists() && codex_path.is_dir() {
-            println!("[Sync] Added default Codex path: {:?}", codex_path);
-            target_paths.push(codex_path);
-        }
-        let codex_archived = Path::new(&home).join(".codex").join("archived_sessions");
-        if codex_archived.exists() && codex_archived.is_dir() {
-            println!("[Sync] Added default Codex archived path: {:?}", codex_archived);
-            target_paths.push(codex_archived);
-        }
-        
-        // Antigravity 기본 state.vscdb 경로 (macOS)
-        let vscdb_path = Path::new(&home)
-            .join("Library")
-            .join("Application Support")
-            .join("Code")
-            .join("User")
-            .join("globalStorage")
-            .join("state.vscdb");
-        if vscdb_path.exists() && vscdb_path.is_file() {
-            println!("[Sync] Added default Antigravity path: {:?}", vscdb_path);
-            target_paths.push(vscdb_path);
-        }
-    }
-    
+    // 1. 설정 log_dir + OS별 기본 에이전트 경로를 자동 감지 (watcher와 동일 로직 공유)
+    let target_paths = detect_log_paths(&app_handle);
+    println!("[Sync] 감지된 로그 루트 {}개: {:?}", target_paths.len(), target_paths);
+
     let mut files = Vec::new();
     for p in target_paths {
         if p.is_file() {
