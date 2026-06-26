@@ -1,6 +1,30 @@
 @import "tailwindcss";
-@import "@fontsource-variable/inter";
 @plugin "tailwindcss-animate";
+
+/*
+ * Inter Variable — 라틴/라틴확장 서브셋만 동봉한다.
+ * 이 앱 UI는 영문+한글(한글 글리프는 Inter에 없어 system-ui 폴백)이며 키릴/그리스/베트남어는 미사용.
+ * 패키지 index.css는 7개 서브셋 woff2를 전부 번들에 동봉하므로(런타임은 unicode-range로 라틴만 받지만),
+ * 사용 서브셋만 직접 선언해 동봉 woff2 수를 줄인다. (font-display:swap 으로 폴백→스왑)
+ */
+@font-face {
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308,
+    U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("@fontsource-variable/inter/files/inter-latin-ext-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
 
 @custom-variant dark (&:is(.dark *));
 
