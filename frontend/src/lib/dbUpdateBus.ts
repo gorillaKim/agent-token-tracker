@@ -68,12 +68,11 @@ function scheduleNotify() {
   }
   debounceTimer = setTimeout(() => {
     debounceTimer = null;
-    if (isViewActive) {
-      // 보는 중 → 데이터 구독자는 호출하지 않고 dirty 플래그만 세운다(화면 동결).
-      setDirty(true);
-    } else {
-      notifySubscribers();
-    }
+    // 어떤 상태(포커스 중/비포커스/숨김)든 db-updated 만으로는 즉시 refetch 하지 않고 dirty 로 미룬다.
+    // 숨김/비포커스 상태의 두 창(메인+트레이)이 와치독 db-updated 폭주마다 백그라운드 refetch 를
+    // 돌려 백엔드와 경합하던 문제를 제거한다. 실제 refetch 는 창이 (다시) 포커스될 때 applyActive 에서
+    // 1회만 flush 하거나, 사용자가 새로고침을 누를 때(refreshNow) 수행한다.
+    setDirty(true);
   }, DEBOUNCE_MS);
 }
 
@@ -83,14 +82,11 @@ function applyActive() {
   const wasActive = isViewActive;
   isViewActive = next;
 
-  if (wasActive && !next) {
-    // active → inactive: 쌓인 변경을 flush 해 다음에 볼 때 최신이 되게 한다.
-    if (isDirty) {
-      setDirty(false);
-      notifySubscribers();
-    }
-  } else if (!wasActive && next) {
-    // inactive → active: 다시 보이는 순간 1회 최신화 후 다시 동결.
+  // 창이 (다시) 보이고 포커스되는 순간, 자리비움 동안 쌓인 변경이 있을 때만(dirty) 1회 flush refetch.
+  // - blur/hide(active→inactive) 시에는 아무 동작도 하지 않고 dirty 를 유지한다(아무도 안 보는데 refetch 불필요;
+  //   다음 show 때 어차피 flush).
+  // - 변경이 없으면(!isDirty) 캐시가 이미 최신이므로 show 해도 불필요한 refetch 를 하지 않는다.
+  if (!wasActive && next && isDirty) {
     setDirty(false);
     notifySubscribers();
   }
