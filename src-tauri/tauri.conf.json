@@ -10,32 +10,6 @@
   },
   "app": {
     "macOSPrivateApi": true,
-    "windows": [
-      {
-        "label": "main",
-        "title": "Agent Token Tracker",
-        "width": 1000,
-        "height": 800,
-        "minWidth": 950,
-        "minHeight": 700,
-        "resizable": true,
-        "fullscreen": false
-      },
-      {
-        "label": "tray-popover",
-        "title": "Tray Popover",
-        "width": 320,
-        "height": 360,
-        "resizable": false,
-        "decorations": false,
-        "alwaysOnTop": true,
-        "visible": false,
-        "transparent": true,
-        "skipTaskbar": true,
-        "visibleOnAllWorkspaces": true,
-        "url": "index.html?mode=tray"
-      }
-    ],
     "security": {
       "csp": null
     }

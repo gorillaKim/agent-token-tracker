@@ -10,6 +10,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use notify::{Watcher, RecursiveMode};
 use keyring::Entry;
 
+#[cfg(target_os = "macos")]
+use tauri_nspanel::{tauri_panel, ManagerExt, WebviewWindowExt};
+
 use agent_token_tracker::model::Session;
 use agent_token_tracker::db;
 use agent_token_tracker::pricing;
@@ -1005,54 +1008,64 @@ fn update_tray_status(app_handle: &AppHandle) {
     }
 }
 
-fn toggle_tray_popover(app: &AppHandle, click_pos: tauri::PhysicalPosition<f64>) {
-    let window = match app.get_webview_window("tray-popover") {
-        Some(w) => w,
-        None => {
-            eprintln!("[Tray] tray-popover 윈도우를 찾을 수 없습니다.");
-            return;
-        }
-    };
-
-    let is_visible = window.is_visible().unwrap_or(false);
-    if is_visible {
-        let _ = window.hide();
-    } else {
-        // macOS 상단 메뉴바 아래에 맞춰 위치 계산
-        // 가로 중앙 맞춤: click_pos.x - (윈도우 너비 320 / 2)
-        // 세로 위치: click_pos.y + 10px 마진
-        let x = click_pos.x - 160.0;
-        let y = click_pos.y + 10.0;
-        
-        let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-            x: x as i32,
-            y: y as i32,
-        }));
-        
-        let _ = window.show();
-        let _ = window.set_focus();
-        
-        // 팝오버가 모든 Space(가상 데스크톱) 및 타 앱의 네이티브 전체화면 위에 표시되도록 설정
-        #[cfg(target_os = "macos")]
-        {
-            use objc::{msg_send, sel, sel_impl};
-
-            // collectionBehavior(CanJoinAllSpaces 등)는 Tauri의 검증된 안전 API로 설정한다.
-            // raw setCollectionBehavior에 상호 배타적 플래그(CanJoinAllSpaces+MoveToActiveSpace)를
-            // 함께 전달하면 AppKit이 NSException을 던지고, 이 ObjC 예외가 Rust로 전파되며
-            // catch_unwind에서 foreign exception으로 처리되어 프로세스가 abort(앱 종료)됐었다.
-            let _ = window.set_visible_on_all_workspaces(true);
-            
-            if let Ok(ns_window) = window.ns_window() {
-                let ns_window_ptr = ns_window as *mut objc::runtime::Object;
-                if !ns_window_ptr.is_null() {
-                    unsafe {
-                        // 메뉴바/전체화면 위에 떠 있도록 NSStatusWindowLevel(25)로 윈도우 레벨 상향.
-                        // setLevel은 단일 NSInteger 스칼라 설정이라 예외를 던지지 않아 안전하다.
-                        let _: () = msg_send![ns_window_ptr, setLevel: 25isize];
-                    }
-                }
+fn toggle_tray_popover(app: &AppHandle, _click_pos: tauri::PhysicalPosition<f64>) {
+    #[cfg(target_os = "macos")]
+    {
+        let panel = match app.get_webview_panel("tray-popover") {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[Tray] tray-popover 패널을 찾을 수 없습니다. 에러: {:?}", e);
+                return;
             }
+        };
+
+        if panel.is_visible() {
+            panel.hide();
+        } else {
+            // macOS 앱 강제 활성화 (백그라운드에서 트레이 클릭 시 팝오버를 최상단으로 올리기 위함)
+            #[cfg(target_os = "macos")]
+            unsafe {
+                use objc2::msg_send;
+                let ns_app: objc2::rc::Retained<objc2::runtime::AnyObject> = msg_send![objc2::class!(NSApplication), sharedApplication];
+                let _: () = msg_send![&ns_app, activateIgnoringOtherApps: true];
+            }
+
+            if let Some(window) = app.get_webview_window("tray-popover") {
+                use tauri_plugin_positioner::{WindowExt, Position};
+                if let Err(e) = window.move_window(Position::TrayCenter) {
+                    eprintln!("[Tray] move_window 에러: {:?}", e);
+                }
+            } else {
+                eprintln!("[Tray] get_webview_window('tray-popover')가 None입니다.");
+            }
+            panel.show_and_make_key();
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let window = match app.get_webview_window("tray-popover") {
+            Some(w) => w,
+            None => {
+                eprintln!("[Tray] tray-popover 윈도우를 찾을 수 없습니다.");
+                return;
+            }
+        };
+
+        let is_visible = window.is_visible().unwrap_or(false);
+        if is_visible {
+            let _ = window.hide();
+        } else {
+            let x = click_pos.x - 160.0;
+            let y = click_pos.y + 10.0;
+            
+            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+                x: x as i32,
+                y: y as i32,
+            }));
+            
+            let _ = window.show();
+            let _ = window.set_focus();
         }
     }
 }
@@ -2825,50 +2838,128 @@ fn get_token_usage_breakdown(days: Option<u32>) -> Result<TokenUsageBreakdown, S
     })
 }
 
+#[cfg(target_os = "macos")]
+tauri_panel! {
+    panel!(Panel {
+        config: {
+            can_become_key_window: true,
+            can_become_main_window: false
+        }
+    })
+    panel_event!(PanelEventHandler {})
+}
+
 fn main() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.plugin(tauri_nspanel::init());
+    }
+
+    builder = builder.plugin(tauri_plugin_positioner::init());
+
+    builder
         .setup(|app| {
             let app_handle = app.handle().clone();
 
-            // macOS의 경우 백그라운드 트레이 전용 모드(Accessory)로 시작
+            // 1. macOS의 경우 백그라운드 트레이 전용 모드(Accessory)로 시작 (윈도우 생성 전 필수 적용)
             #[cfg(target_os = "macos")]
             let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // 2. 프로그램적으로 main 윈도우 생성
+            let main_win = tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::App("index.html".into())
+            )
+            .title("Agent Token Tracker")
+            .inner_size(1000.0, 800.0)
+            .min_inner_size(950.0, 700.0)
+            .resizable(true)
+            .fullscreen(false)
+            .build()
+            .expect("Failed to create main window");
+
             // 메인 윈도우의 CloseRequested 이벤트를 가로채어 창을 숨기고 Accessory 모드로 복구
-            if let Some(main_win) = app.get_webview_window("main") {
-                let main_clone = main_win.clone();
-                let app_handle_clone = app_handle.clone();
-                main_win.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = main_clone.hide();
-                        #[cfg(target_os = "macos")]
-                        let _ = app_handle_clone.set_activation_policy(tauri::ActivationPolicy::Accessory);
-                    }
-                });
-            }
+            let main_clone = main_win.clone();
+            let app_handle_clone = app_handle.clone();
+            main_win.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = main_clone.hide();
+                    #[cfg(target_os = "macos")]
+                    let _ = app_handle_clone.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                }
+            });
 
             // 팝오버 닫힘 시간 추적을 위한 스레드 안전 변수
             let last_hide = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now() - std::time::Duration::from_secs(1)));
             let last_hide_for_blur = last_hide.clone();
             let last_hide_for_click = last_hide.clone();
 
-            // 1. 트레이 팝오버 윈도우 획득 및 blur 이벤트 핸들링
-            if let Some(popover) = app.get_webview_window("tray-popover") {
-                let popover_clone = popover.clone();
-                popover.on_window_event(move |event| {
-                    if let tauri::WindowEvent::Focused(false) = event {
-                        let _ = popover_clone.hide();
-                        if let Ok(mut last) = last_hide_for_blur.lock() {
-                            *last = std::time::Instant::now();
-                        }
-                    }
-                });
+            // 3. 프로그램적으로 tray-popover 윈도우 생성
+            let popover_builder = tauri::WebviewWindowBuilder::new(
+                app,
+                "tray-popover",
+                tauri::WebviewUrl::App("index.html?mode=tray".into())
+            )
+            .title("Tray Popover")
+            .inner_size(320.0, 360.0)
+            .resizable(false)
+            .decorations(false)
+            .always_on_top(true)
+            .visible(false)
+            .transparent(true)
+            .skip_taskbar(true);
 
-                // macOS의 경우 모든 가상 데스크톱(Spaces)에 창이 함께 참여하도록 활성화
-                #[cfg(target_os = "macos")]
-                let _ = popover.set_visible_on_all_workspaces(true);
+            #[cfg(target_os = "macos")]
+            let popover_builder = popover_builder.visible_on_all_workspaces(true);
+
+            let popover = popover_builder.build().expect("Failed to create tray-popover window");
+            
+            #[cfg(target_os = "macos")]
+            {
+                match popover.to_panel::<Panel>() {
+                    Ok(panel) => {
+                        panel.set_hides_on_deactivate(true);
+                        panel.set_floating_panel(true);
+
+                        // 전체화면 및 모든 Spaces에서 보일 수 있도록 윈도우 레벨 설정 (Status 레벨 = 25)
+                        panel.set_level(tauri_nspanel::PanelLevel::Status.value());
+
+                        // 컬렉션 비헤이비어 설정 (모든 가상 화면, 전체화면 공간 지원 및 고정)
+                        let mut behavior = tauri_nspanel::CollectionBehavior::new();
+                        behavior = behavior.can_join_all_spaces().full_screen_auxiliary().stationary();
+                        panel.set_collection_behavior(behavior.into());
+                    }
+                    Err(e) => {
+                        eprintln!("[Tray] Failed to convert window to NSPanel: {:?}", e);
+                    }
+                }
             }
+
+            let popover_clone = popover.clone();
+            popover.on_window_event(move |event| {
+                if let tauri::WindowEvent::Focused(false) = event {
+                    #[cfg(target_os = "macos")]
+                    {
+                        // hides_on_deactivate가 처리하지만, tauri 윈도우 가시성 동기화를 명시적으로 hide
+                        let _ = popover_clone.hide();
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        let _ = popover_clone.hide();
+                    }
+                    if let Ok(mut last) = last_hide_for_blur.lock() {
+                        *last = std::time::Instant::now();
+                    }
+                }
+            });
+
+            // macOS의 경우 모든 가상 데스크톱(Spaces)에 창이 함께 참여하도록 활성화
+            #[cfg(target_os = "macos")]
+            let _ = popover.set_visible_on_all_workspaces(true);
 
             // 2. 트레이 아이콘 초기 설정
             let icon_green_bytes = include_bytes!("../icons/icon_green.png");
@@ -2879,6 +2970,8 @@ fn main() {
                 .icon(initial_icon)
                 .title("$0.00")
                 .on_tray_icon_event(move |tray: &tauri::tray::TrayIcon, event: tauri::tray::TrayIconEvent| {
+                    tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
+
                     if let tauri::tray::TrayIconEvent::Click { button, button_state, position, .. } = event {
                         if button == tauri::tray::MouseButton::Left && button_state == tauri::tray::MouseButtonState::Up {
                             if let Ok(last) = last_hide_for_click.lock() {
