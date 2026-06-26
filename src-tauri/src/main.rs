@@ -75,9 +75,36 @@ pub struct SessionDetails {
 // ────────────────────────────────────────────────────────────
 // 헬퍼: 데이터베이스 커넥션 획득
 // ────────────────────────────────────────────────────────────
+/// 앱 DB 절대경로 (시작 시 1회 결정). 릴리즈: app_config_dir/atk.db, 디버그(dev): repo 의 ../atk.db.
+static DB_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// 시작 시 DB 경로를 결정한다. 설치된 .app 은 작업 디렉토리(cwd)가 불확실하므로 절대경로를 써야 한다.
+/// (상대경로 "../atk.db" 는 dev 에서만 동작하고 설치 앱에서는 "unable to open database file" 로 실패)
+fn resolve_db_path(app: &AppHandle) -> String {
+    if cfg!(debug_assertions) {
+        // dev(cargo tauri dev): cwd 가 repo 라 기존 ../atk.db 를 그대로 사용(누적 dev DB 유지)
+        "../atk.db".to_string()
+    } else {
+        match app.path().app_config_dir() {
+            Ok(dir) => {
+                let _ = std::fs::create_dir_all(&dir);
+                dir.join("atk.db").to_string_lossy().to_string()
+            }
+            Err(e) => {
+                eprintln!("[DB] app_config_dir 획득 실패, 폴백(atk.db) 사용: {}", e);
+                "atk.db".to_string()
+            }
+        }
+    }
+}
+
+/// 전역 DB 경로 조회 (DB_PATH 미설정 시 안전 폴백).
+fn current_db_path() -> String {
+    DB_PATH.get().cloned().unwrap_or_else(|| "../atk.db".to_string())
+}
+
 fn get_db_conn() -> Result<Connection, String> {
-    // 로컬 작업 경로 내의 atk.db 커넥션 연결
-    db::init_db("../atk.db").map_err(|e| format!("DB 연결 실패: {}", e))
+    db::init_db(&current_db_path()).map_err(|e| format!("DB 연결 실패: {}", e))
 }
 
 // ════════════════════════════════════════════════════════════
@@ -785,7 +812,7 @@ fn get_detected_log_paths(app_handle: AppHandle) -> Result<Vec<DetectedLogPath>,
 }
 
 fn start_watch_loop(app_handle: AppHandle) -> Result<(), String> {
-    let db_path = "../atk.db";
+    let db_path = current_db_path();
 
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |res| {
@@ -865,7 +892,7 @@ fn start_watch_loop(app_handle: AppHandle) -> Result<(), String> {
                         println!("[Watch] 감시 대상 파일 수정 감지, 증분 갱신 및 UI 업데이트 중...");
 
                         // 배치당 단일 커넥션을 열고 pragma 도 여기서 1회만 설정한다.
-                        let conn = match Connection::open(db_path) {
+                        let conn = match Connection::open(&db_path) {
                             Ok(c) => c,
                             Err(e) => {
                                 eprintln!("DB 연결 실패: {}", e);
@@ -2695,7 +2722,7 @@ async fn sync_local_sessions_impl(app_handle: AppHandle) -> Result<SyncResult, S
     if let Ok(cwd) = std::env::current_dir() {
         println!("[Sync] Current working directory: {:?}", cwd);
     }
-    let db_path = "../atk.db";
+    let db_path = current_db_path();
     
     // 1. 설정 log_dir + OS별 기본 에이전트 경로를 자동 감지 (watcher와 동일 로직 공유)
     let target_paths = detect_log_paths(&app_handle);
@@ -2711,7 +2738,7 @@ async fn sync_local_sessions_impl(app_handle: AppHandle) -> Result<SyncResult, S
     }
     println!("[Sync] Collected {} files total", files.len());
     
-    let conn = Connection::open(db_path)
+    let conn = Connection::open(&db_path)
         .map_err(|e| format!("DB 연결 실패: {}", e))?;
     // process_watch_file 이 CASCADE 삭제를 트랜잭션으로 수행하므로 pragma 를 1회 설정한다.
     let _ = conn.pragma_update(None, "foreign_keys", "ON");
@@ -3119,6 +3146,13 @@ fn main() {
     builder
         .setup(|app| {
             let app_handle = app.handle().clone();
+
+            // 0. DB 경로를 시작 시 1회 결정한다(설치 앱은 cwd 불확실 → 절대경로 필요).
+            //    워치 루프/동기화/모든 커맨드가 이 경로를 공유하며, 스키마를 미리 보장한다.
+            let _ = DB_PATH.set(resolve_db_path(&app_handle));
+            if let Err(e) = get_db_conn() {
+                eprintln!("[DB] 초기 스키마 보장 실패: {}", e);
+            }
 
             // 1. macOS의 경우 백그라운드 트레이 전용 모드(Accessory)로 시작 (윈도우 생성 전 필수 적용)
             #[cfg(target_os = "macos")]
