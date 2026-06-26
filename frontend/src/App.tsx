@@ -268,10 +268,7 @@ function App() {
             interruptMessage={interruptMessage}
           />
         ) : (
-          <SettingsView
-            onSettingsSaved={invalidateData}
-            activeSection={activeTab}
-          />
+          <SettingsView activeSection={activeTab} />
         )}
       </main>
 

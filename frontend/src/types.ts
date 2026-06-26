@@ -128,8 +128,18 @@ export interface SessionDetails {
   tool_calls: ToolCall[];
 }
 
-/** 백엔드 load_settings 반환 중 프론트가 사용하는 핵심 필드(나머지는 SettingsView 가 직접 다룸) */
+/** 백엔드 load_settings 반환 구조 */
 export interface SettingsDto {
+  log_dir: string;
+  claude_log_dir: string;
+  codex_log_dir: string;
+  antigravity_log_dir: string;
+  token_limit: number;
+  token_limit_claude: number;
+  token_limit_codex: number;
+  token_limit_antigravity: number;
+  claude_plan: string;
+  openai_plan: string;
   token_display_mode: string;
   refresh_interval: number;
 }
