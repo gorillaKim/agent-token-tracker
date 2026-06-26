@@ -819,7 +819,7 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
                       <Input
                         type="password"
                         placeholder={
-                          keysStatus.openai ? "••••••••••••••••••••••••" : "OpenAI API 키 수동 입력 (sk-...)"
+                          keysStatus.openai ? "••••••••••••••••••••••••" : "Admin API 키 입력 (sk-admin-...)"
                         }
                         value={openaiKey}
                         onChange={(e) => setOpenAIKey(e.target.value)}
@@ -833,6 +833,11 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
                         </Button>
                       )}
                     </div>
+                    <p className="mt-1.5 text-xs text-muted-foreground">
+                      실시간 사용량 조회에는 <span className="font-medium">Admin API 키(sk-admin-…)</span>가
+                      필요합니다. platform.openai.com → Organization → Admin keys 에서 발급하세요. 일반 키나
+                      미설정 시 로컬 DB 집계로 표시됩니다.
+                    </p>
                   </div>
 
                   {keysStatus.openai && openaiValid && (

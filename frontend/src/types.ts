@@ -128,6 +128,20 @@ export interface SessionDetails {
   tool_calls: ToolCall[];
 }
 
+/** 백엔드 load_settings 반환 중 프론트가 사용하는 핵심 필드(나머지는 SettingsView 가 직접 다룸) */
+export interface SettingsDto {
+  token_display_mode: string;
+  refresh_interval: number;
+}
+
+/** sync_local_sessions / force_sync_local_sessions 반환 */
+export interface SyncResult {
+  files_total: number;
+  sessions_inserted: number;
+  sessions_skipped: number;
+  sessions_failed: number;
+}
+
 export interface PlanQuotaInfo {
   provider: string;
   plan_key: string;

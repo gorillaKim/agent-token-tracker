@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { DailyUsageDetail, DayCostBreakdown } from "../types";
 import { monthRange } from "../utils/calendar";
+import { dbUpdateBus } from "../lib/dbUpdateBus";
 
 /**
  * 캘린더 뷰 데이터 훅
@@ -41,13 +41,12 @@ export function useCalendarData(year: number, month: number) {
 
     load();
 
-    const unlistenPromise = listen("db-updated", () => {
-      load();
-    });
+    // db-updated(증분/강제 동기화, 로그 변경 감지)는 디바운스 버스를 통해 갱신
+    const unsubscribe = dbUpdateBus.subscribe(load);
 
     return () => {
       cancelled = true;
-      unlistenPromise.then((fn) => fn());
+      unsubscribe();
     };
   }, [year, month]);
 

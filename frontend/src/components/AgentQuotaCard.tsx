@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { AgentSummary, PlanQuotaInfo } from "../types";
 import { formatTokens, formatUsd, formatResetTime } from "../utils/formatters";
 import { cn } from "@/lib/utils";
@@ -7,7 +8,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, RefreshCw } from "lucide-react";
 
 interface AgentQuotaCardProps {
   sum: AgentSummary;
@@ -16,6 +17,7 @@ interface AgentQuotaCardProps {
   isDashboard?: boolean;
   isExpanded: boolean;
   onToggleExpand: () => void;
+  onRefresh?: () => void | Promise<void>;
 }
 
 /**
@@ -30,7 +32,22 @@ export function AgentQuotaCard({
   isDashboard = false,
   isExpanded,
   onToggleExpand,
+  onRefresh,
 }: AgentQuotaCardProps) {
+  const [refreshing, setRefreshing] = useState(false);
+
+  const handleRefresh = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (refreshing || !onRefresh) return;
+    setRefreshing(true);
+    try {
+      await onRefresh();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setTimeout(() => setRefreshing(false), 600);
+    }
+  };
   // 에이전트별 식별: 이름 + 색 토큰 클래스 (텍스트 / Progress 인디케이터)
   let agentName = "Antigravity";
   let agentText = "text-agent-antigravity";
@@ -110,7 +127,7 @@ export function AgentQuotaCard({
         isDashboard ? "gap-4 p-5" : "gap-2.5 rounded-lg bg-card/50 p-3"
       )}
     >
-      {/* 헤더: 에이전트명 + 잔여 */}
+      {/* 헤더: 에이전트명 + 잔여 & 새로고침 */}
       <div className="flex items-center justify-between">
         <div className="flex items-baseline gap-1.5">
           <span className={cn("font-semibold", agentText, isDashboard ? "text-base" : "text-sm")}>
@@ -120,9 +137,21 @@ export function AgentQuotaCard({
             <span className="text-[11px] text-muted-foreground">({sum.session_count} Sessions)</span>
           )}
         </div>
-        <span className={cn("font-medium text-muted-foreground", isDashboard ? "text-sm" : "text-xs")}>
-          {headerRemainingLabel}
-        </span>
+        <div className="flex items-center gap-1.5">
+          <span className={cn("font-medium text-muted-foreground", isDashboard ? "text-sm" : "text-xs")}>
+            {headerRemainingLabel}
+          </span>
+          {onRefresh && (
+            <button
+              onClick={handleRefresh}
+              disabled={refreshing}
+              className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors disabled:opacity-50"
+              title="새로고침"
+            >
+              <RefreshCw className={cn("h-3 w-3", refreshing && "animate-spin")} />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* 세션 사용량 (5시간 롤링 / 일간) */}
@@ -155,7 +184,7 @@ export function AgentQuotaCard({
               {sum.agent_type === "claude_code"
                 ? "모든 모델 (주간)"
                 : sum.agent_type === "codex"
-                  ? "모든 모델 (월간)"
+                  ? "모든 모델 (주간)"
                   : "모든 모델 (주간)"}
             </span>
             <span className="font-semibold tabular-nums text-foreground">

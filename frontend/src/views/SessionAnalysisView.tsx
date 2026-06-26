@@ -99,9 +99,11 @@ export function SessionAnalysisView({
 
   return (
     <TooltipProvider delayDuration={200}>
-      <div className="flex h-[calc(100vh-8rem)] gap-6 overflow-hidden">
-        {/* 1. 좌측 세션 목록 */}
-        <Card className="flex w-80 shrink-0 flex-col gap-3 p-4">
+      <div className="flex h-[calc(100vh-8rem)] flex-col gap-6 overflow-hidden lg:flex-row">
+        {/* 1. 좌측 세션 목록 (좁은 폭에서는 상단으로 쌓임)
+            overflow-hidden + 내부 ScrollArea min-h-0 → 목록이 카드 박스를 넘쳐 하단 패널과
+            겹치는 현상(세로 좁을 때)을 방지하고 내부 스크롤로 가둔다. */}
+        <Card className="flex w-full shrink-0 flex-col gap-3 overflow-hidden p-4 max-lg:max-h-[38%] lg:w-80">
           <h3 className="flex items-center gap-2 text-base font-semibold">
             <FolderOpen className="h-4 w-4 text-muted-foreground" />
             세션 히스토리
@@ -158,7 +160,7 @@ export function SessionAnalysisView({
             </div>
           </div>
 
-          <ScrollArea className="-mr-2 flex-1 pr-2">
+          <ScrollArea className="-mr-2 min-h-0 flex-1 pr-2">
             <div className="flex flex-col gap-2">
               {filteredSessions.map((s) => {
                 const isSelected = s.session_id === analysisSessionId;
@@ -216,33 +218,34 @@ export function SessionAnalysisView({
           </ScrollArea>
         </Card>
 
-        {/* 2. 우측 분석 상세 패널 */}
-        <Card className="flex flex-1 flex-col overflow-y-auto p-6">
+        {/* 2. 우측 분석 상세 패널 (@container: 패널 자체 너비 기준으로 내부 반응형)
+            min-w-0: 넓은 내부 콘텐츠가 좌측 목록을 밀어내며 겹치는 현상 방지 */}
+        <Card className="@container flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-6">
           {analysisLoading ? (
             <div className="flex flex-col gap-6">
               <Skeleton className="h-8 w-2/3" />
-              <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+              <div className="grid grid-cols-2 gap-4 @2xl:grid-cols-4">
                 <Skeleton className="h-20" />
                 <Skeleton className="h-20" />
                 <Skeleton className="h-20" />
                 <Skeleton className="h-20" />
               </div>
               <Skeleton className="h-48 w-full" />
-              <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+              <div className="grid grid-cols-1 gap-6 @2xl:grid-cols-2">
                 <Skeleton className="h-40" />
                 <Skeleton className="h-40" />
               </div>
             </div>
           ) : analysisData ? (
             <div className="flex flex-col gap-6">
-              {/* 세션 개요 헤더 */}
-              <div className="flex items-start justify-between gap-4 border-b border-border pb-4">
-                <div>
+              {/* 세션 개요 헤더 (좁은 폭에서는 제목/액션이 세로로 쌓임) */}
+              <div className="flex flex-col gap-4 border-b border-border pb-4 @lg:flex-row @lg:items-start @lg:justify-between">
+                <div className="min-w-0">
                   <h2 className="flex items-center gap-2 text-xl font-semibold">
-                    <Search className="h-5 w-5 text-primary" />
-                    세션 분석 보고서
+                    <Search className="h-5 w-5 shrink-0 text-primary" />
+                    <span className="min-w-0">세션 분석 보고서</span>
                     {sessions.find((s) => s.session_id === analysisSessionId)?.parent_session_id && (
-                      <Badge variant="secondary" className="text-[10px]">
+                      <Badge variant="secondary" className="shrink-0 text-[10px]">
                         서브에이전트
                       </Badge>
                     )}
@@ -255,7 +258,7 @@ export function SessionAnalysisView({
                   </div>
                 </div>
 
-                <div className="flex shrink-0 items-center gap-2">
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
                   <Badge
                     variant={analysisData.is_anomaly ? "destructive" : "secondary"}
                     className="gap-1"
@@ -283,7 +286,7 @@ export function SessionAnalysisView({
               </div>
 
               {/* 기본 수치 요약 */}
-              <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+              <div className="grid grid-cols-2 gap-4 @2xl:grid-cols-4">
                 <div className="rounded-xl border border-border bg-muted/30 p-4">
                   <div className="text-xs text-muted-foreground">총 소비 비용</div>
                   <div className="mt-1 text-xl font-semibold tabular-nums text-primary">
@@ -317,7 +320,7 @@ export function SessionAnalysisView({
                 {analysisData.turns.length > 0 ? (
                   <div className="flex flex-col gap-2">
                     {/* Legend */}
-                    <div className="flex justify-end gap-4 text-xs text-muted-foreground">
+                    <div className="flex flex-wrap justify-end gap-x-4 gap-y-1 text-xs text-muted-foreground">
                       <div className="flex items-center gap-1.5">
                         <span className="h-2.5 w-2.5 rounded-sm bg-chart-2" />
                         <span>Input Tokens</span>
@@ -434,7 +437,7 @@ export function SessionAnalysisView({
               </div>
 
               {/* 하단 2단: 캐시 도넛 차트 & 도구 비용 랭킹 */}
-              <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+              <div className="grid grid-cols-1 gap-6 @2xl:grid-cols-2">
                 {/* 캐시 히트율 도넛 차트 카드 */}
                 <div className="rounded-xl border border-border bg-muted/30 p-5">
                   <div className="mb-4 flex items-center gap-1.5">

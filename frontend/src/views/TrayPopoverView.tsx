@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { AgentSummary, LoopDetectionResult, PlanQuotaInfo } from "../types";
+import { dbUpdateBus, useDbDirty } from "../lib/dbUpdateBus";
 import { formatTokens } from "../utils/formatters";
 import { AgentQuotaCard } from "../components/AgentQuotaCard";
-import { AlertTriangle, CheckCircle2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, RefreshCw } from "lucide-react";
 
 /**
  * 시스템 트레이 전용 팝오버 뷰 컴포넌트
@@ -20,6 +20,8 @@ export function TrayPopoverView() {
   const [tokenDisplayMode, setTokenDisplayMode] = useState<string>("tokens");
   const [refreshInterval, setRefreshInterval] = useState<number>(3);
   const [loading, setLoading] = useState(true);
+  // 보는 중 동결 상태에서 새 변경이 쌓이면 dirty=true → "새로고침" 어포던스 노출
+  const { dirty, refresh } = useDbDirty();
 
   const loadData = async () => {
     try {
@@ -51,12 +53,8 @@ export function TrayPopoverView() {
 
   useEffect(() => {
     loadData();
-    const unlistenPromise = listen("db-updated", () => {
-      loadData();
-    });
-    return () => {
-      unlistenPromise.then((fn) => fn());
-    };
+    // db-updated 는 디바운스 버스 경유로 갱신
+    return dbUpdateBus.subscribe(loadData);
   }, []);
 
   // 설정된 주기(분)마다 자동 갱신 (0이면 끔)
@@ -86,10 +84,21 @@ export function TrayPopoverView() {
       {/* 헤더 */}
       <div className="flex items-center justify-between">
         <h4 className="text-sm font-semibold">에이전트 토큰 관측소</h4>
-        <span className="flex items-center gap-1 text-[11px] font-semibold text-success">
-          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />
-          LIVE
-        </span>
+        {dirty ? (
+          <button
+            onClick={refresh}
+            className="flex items-center gap-1 rounded-md px-1 text-[11px] font-semibold text-primary transition-opacity hover:opacity-80"
+            title="보는 동안 멈춰둔 새 변경을 반영합니다"
+          >
+            <RefreshCw className="h-3 w-3" />
+            새로고침
+          </button>
+        ) : (
+          <span className="flex items-center gap-1 text-[11px] font-semibold text-success">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />
+            LIVE
+          </span>
+        )}
       </div>
 
       {/* 상태 배너 */}
@@ -129,6 +138,7 @@ export function TrayPopoverView() {
                 isDashboard={false}
                 isExpanded={false}
                 onToggleExpand={() => {}}
+                onRefresh={loadData}
               />
             );
           })

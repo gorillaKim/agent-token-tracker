@@ -1,11 +1,15 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 // 1. 공통 타입 및 유틸리티 임포트
 import { formatTokens, formatUsd } from "./utils/formatters";
 
-// 2. 커스텀 훅 임포트
-import { useTrackerData } from "./hooks/useTrackerData";
+// 2. 커스텀 훅 임포트 (React Query 기반)
 import { useSessionDetails } from "./hooks/useSessionDetails";
+import { useQueryClient } from "@tanstack/react-query";
+import { useActiveSessions, useAgentSummaries, useLoopSignals } from "./hooks/queries/useDbQueries";
+import { useSyncSessions, useForceSync } from "./hooks/mutations/useSyncMutations";
+import { useDbInvalidation } from "./hooks/useDbInvalidation";
+import { queryKeys } from "./lib/queryKeys";
 
 // 3. 분리된 화면 뷰 컴포넌트 임포트
 import { DashboardView } from "./views/DashboardView";
@@ -34,7 +38,6 @@ import {
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Toaster } from "@/components/ui/sonner";
-import { toast } from "sonner";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -82,25 +85,33 @@ function App() {
   // 대시보드 활성 탭
   const [activeTab, setActiveTab] = useState<TabKey>("dashboard");
   
-  // 1. 비즈니스 로직 훅 활용
-  const {
-    tokenDisplayMode,
-    sessions,
-    summaries,
-    anomalies,
-    dailyTokenUsage,
-    hourlyTokenUsage,
-    quotaInfo,
-    error,
-    syncLoading,
-    syncStatus,
-    setSyncStatus,
-    showConfirmModal,
-    setShowConfirmModal,
-    loadData,
-    handleSyncSessions,
-    startForceSync,
-  } = useTrackerData();
+  // 1. 헤더/공유 데이터 — React Query (각 섹션 독립 로딩·캐싱)
+  const queryClient = useQueryClient();
+  const sessions = useActiveSessions().data ?? [];
+  const summaries = useAgentSummaries().data ?? [];
+  const anomalies = useLoopSignals().data ?? [];
+
+  // db-updated → DB 파생 쿼리 무효화 (freeze-while-viewing 게이팅 유지)
+  useDbInvalidation();
+
+  // 세션 인터럽트/설정 저장 후 호출할 데이터 갱신(=무효화) 콜백
+  const invalidateData = useCallback(async () => {
+    await queryClient.invalidateQueries({ predicate: (q) => q.queryKey[0] === "db" });
+    queryClient.invalidateQueries({ queryKey: queryKeys.subscriptionQuota() });
+    queryClient.invalidateQueries({ queryKey: queryKeys.settings() });
+  }, [queryClient]);
+
+  // 동기화 mutation (loading/토스트는 mutation 내부에서 처리)
+  const syncMutation = useSyncSessions();
+  const forceSyncMutation = useForceSync();
+  const syncLoading = syncMutation.isPending || forceSyncMutation.isPending;
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+
+  const handleSyncSessions = () => syncMutation.mutate();
+  const startForceSync = () => {
+    setShowConfirmModal(false);
+    forceSyncMutation.mutate();
+  };
 
   const {
     analysisSessionId,
@@ -114,33 +125,12 @@ function App() {
     interruptLoading,
     handleSelectAnalysisSession,
     handleInterruptAgent,
-  } = useSessionDetails(sessions, loadData);
+  } = useSessionDetails(sessions, invalidateData);
 
   const totalSessionsOverall = sessions.length;
   const totalTokensOverall = summaries.reduce((acc, curr) => acc + curr.total_input_tokens + curr.total_output_tokens, 0);
 
-  // 동기화 상태/오류를 Sonner 토스트로 노출 (기존 손수 토스트 대체)
-  // 완료 메시지는 "...실패: N개"를 포함하므로 단순 includes("실패")로 분기하면
-  // 성공도 에러색으로 표시되는 버그가 있다 → 실패 '건수'로 정확히 분기.
-  useEffect(() => {
-    if (!syncStatus) return;
-    const failedMatch = syncStatus.match(/실패:\s*(\d+)\s*개/);
-    if (failedMatch) {
-      const failed = Number(failedMatch[1]);
-      if (failed > 0) toast.warning(syncStatus);
-      else toast.success(syncStatus);
-    } else if (syncStatus.includes("실패")) {
-      // "동기화 실패: <에러>" 형태의 실제 예외 메시지
-      toast.error(syncStatus);
-    } else {
-      toast.success(syncStatus);
-    }
-    setSyncStatus(null);
-  }, [syncStatus, setSyncStatus]);
-
-  useEffect(() => {
-    if (error) toast.error(`오류: ${error}`);
-  }, [error]);
+  // 동기화 성공/실패 토스트는 sync mutation(useSyncMutations) 내부에서 직접 노출한다.
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
@@ -262,14 +252,7 @@ function App() {
 
         {/* 탭 분기 렌더링 */}
         {activeTab === "dashboard" ? (
-          <DashboardView
-            summaries={summaries}
-            dailyTokenUsage={dailyTokenUsage}
-            hourlyTokenUsage={hourlyTokenUsage}
-            quotaInfo={quotaInfo}
-            tokenDisplayMode={tokenDisplayMode}
-            setSelectedSessionId={setSelectedSessionId}
-          />
+          <DashboardView setSelectedSessionId={setSelectedSessionId} />
         ) : activeTab === "calendar" ? (
           <CalendarView />
         ) : activeTab === "analysis" ? (
@@ -285,9 +268,9 @@ function App() {
             interruptMessage={interruptMessage}
           />
         ) : (
-          <SettingsView 
-            onSettingsSaved={loadData} 
-            activeSection={activeTab} 
+          <SettingsView
+            onSettingsSaved={invalidateData}
+            activeSection={activeTab}
           />
         )}
       </main>
