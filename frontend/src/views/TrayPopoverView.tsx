@@ -32,7 +32,9 @@ export function TrayPopoverView() {
   const summaries = summariesQ.data ?? [];
   const anomalies = anomaliesQ.data ?? [];
   const quotas = quotasQ.data ?? [];
-  const loading = summariesQ.isLoading || quotasQ.isLoading;
+  // 느린 외부 쿼터(quotasQ)는 로딩 게이트에서 제외 — 빠른 DB 요약이 오면 카드를 즉시 표시하고,
+  // 쿼터 게이지는 도착 시 카드 내부에서 따로 채워진다(AgentQuotaCard 는 quota undefined 허용).
+  const loading = summariesQ.isLoading;
 
   // 보는 중 동결 상태에서 새 변경이 쌓이면 dirty=true → "새로고침" 어포던스 노출
   const { dirty, refresh } = useDbDirty();
