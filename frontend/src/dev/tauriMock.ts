@@ -232,6 +232,7 @@ const sessionDetails: SessionDetails = {
     tool_name: i % 2 === 0 ? "Read" : "Edit",
     input_hash: `h${i}`,
     success: i !== 5,
+    is_mcp: i % 3 === 0,
     cost_usd: 0.4 + (i % 3) * 0.2,
     created_at: "2026-06-25T09:12:03",
     tool_input: `{"file_path":"/Users/dev/projects/web-core/src/auth/handler-${i}.ts"}`,

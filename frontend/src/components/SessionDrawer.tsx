@@ -199,14 +199,21 @@ export function SessionDrawer({
                       {sessionDetails.tool_calls.map((tc, idx) => (
                         <div key={idx} className="rounded-lg border border-border bg-muted/30 p-3 text-xs">
                           <div className="mb-1 flex items-center justify-between">
-                            <span
-                              className={cn(
-                                "font-semibold",
-                                tc.success ? "text-primary" : "text-destructive"
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className={cn(
+                                  "font-semibold",
+                                  tc.success ? "text-primary" : "text-destructive"
+                                )}
+                              >
+                                {tc.tool_name}
+                              </span>
+                              {tc.is_mcp && (
+                                <span className="inline-flex items-center rounded-full bg-indigo-500/10 px-1.5 py-0.2 text-[9px] font-semibold text-indigo-400 border border-indigo-500/20">
+                                  MCP
+                                </span>
                               )}
-                            >
-                              {tc.tool_name}
-                            </span>
+                            </div>
                             <span className="font-mono text-[11px] text-muted-foreground">
                               {formatLocalTime(tc.created_at)}
                             </span>

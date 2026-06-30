@@ -118,6 +118,7 @@ export interface ToolCall {
   tool_name: string;
   input_hash: string;
   success: boolean;
+  is_mcp: boolean;
   cost_usd: number;
   created_at: string;
   tool_input: string;
