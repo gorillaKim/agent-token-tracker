@@ -540,14 +540,15 @@ fn test_antigravity_adapter_parsing() {
     let virtual_path = format!("{}?session_id={}", temp_db_path, conversation_id);
     let parsed_res = adapter.parse_session(&virtual_path).expect("Antigravity mock 파싱 실패");
 
-    // 6. 결과 단언문(Assertion) 검증
+    // 6. 결과 단언문(Assertion) 검증 (폴백에 의해 5 step 기준 estimated 25,000 / 5,000 토큰 추정치 산출)
     assert_eq!(parsed_res.session.session_id, conversation_id);
     assert_eq!(parsed_res.session.agent_type, "antigravity");
-    assert_eq!(parsed_res.session.token_source, "unavailable");
-    assert_eq!(parsed_res.session.total_input_tokens, 0);
-    assert_eq!(parsed_res.session.total_output_tokens, 0);
+    assert_eq!(parsed_res.session.token_source, "estimated");
+    assert_eq!(parsed_res.session.total_input_tokens, 25000);
+    assert_eq!(parsed_res.session.total_output_tokens, 5000);
     assert_eq!(parsed_res.session.cwd, "/Users/mock/project");
     assert_eq!(parsed_res.session.session_name, Some("Mock Conversation Title".to_string()));
+    assert_eq!(parsed_res.messages.len(), 5);
     assert_eq!(parsed_res.nodes.len(), 5);
     for node in parsed_res.nodes {
         assert_eq!(node.session_id, conversation_id);
@@ -557,4 +558,118 @@ fn test_antigravity_adapter_parsing() {
 
     // 7. 임시 파일 정리
     let _ = std::fs::remove_file(&temp_db_path);
+}
+
+/// [AGY-P-02] Antigravity 로그 파일 존재 시 글자 수 기반 토큰 및 대화 메시지 복원 검증
+#[test]
+fn test_antigravity_log_character_counting() {
+    use agent_token_tracker::adapters::antigravity::{
+        AntigravityAdapter, UnifiedState, TrajectorySummary, InnerSummary,
+        TrajectorySummaryDetail
+    };
+    use agent_token_tracker::adapters::LogAdapter;
+    use std::fs;
+    use prost::Message;
+    use base64::Engine;
+
+    // 1. 임시 디렉토리 설정 및 HOME 환경 변수 스푸핑
+    let temp_dir = std::env::temp_dir().join("mock_home_for_test");
+    let _ = fs::remove_dir_all(&temp_dir); // 기존 자산 제거
+    fs::create_dir_all(&temp_dir).unwrap();
+    
+    // 원래 HOME 백업
+    let original_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", &temp_dir);
+
+    let conversation_id = "test-session-uuid-56789";
+    let log_dir = temp_dir
+        .join(".gemini")
+        .join("antigravity-ide")
+        .join("brain")
+        .join(conversation_id)
+        .join(".system_generated")
+        .join("logs");
+    fs::create_dir_all(&log_dir).unwrap();
+
+    let log_file = log_dir.join("transcript_full.jsonl");
+
+    // 2. 가상 대화 데이터 작성
+    // 한글: 10글자 (10 * 1.6 = 16)
+    // 영어/ASCII: 20글자 (20 / 4.0 = 5)
+    // 합산: 입력 21 tokens
+    let dummy_log = r#"{"type":"USER_INPUT","content":"한글열글자다EnglishTwentyChar"}
+{"type":"PLANNER_RESPONSE","content":"답변도한글다섯자EngTen"}"#;
+    fs::write(&log_file, dummy_log).unwrap();
+
+    // 3. state.vscdb 생성
+    let mut temp_db = std::env::temp_dir();
+    temp_db.push("mock_antigravity_state_2.vscdb");
+    let temp_db_path = temp_db.to_str().unwrap().to_string();
+    let _ = fs::remove_file(&temp_db_path);
+
+    let conn = rusqlite::Connection::open(&temp_db_path).unwrap();
+    conn.execute(
+        "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)",
+        [],
+    ).unwrap();
+
+    let detail = TrajectorySummaryDetail {
+        title: "Mock Real Log Title".to_string(),
+        step_count: 2,
+        created_at: None,
+        conversation_id: conversation_id.to_string(),
+        started_at: None,
+        workspace_info: None,
+        updated_at: None,
+    };
+    let mut detail_buf = Vec::new();
+    detail.encode(&mut detail_buf).unwrap();
+    let detail_b64 = base64::engine::general_purpose::STANDARD.encode(&detail_buf);
+
+    let unified_state = UnifiedState {
+        summaries: vec![TrajectorySummary {
+            conversation_id: conversation_id.to_string(),
+            inner: Some(InnerSummary { detail_b64 }),
+        }],
+    };
+    let mut state_buf = Vec::new();
+    unified_state.encode(&mut state_buf).unwrap();
+    let value_b64 = base64::engine::general_purpose::STANDARD.encode(&state_buf);
+
+    conn.execute(
+        "INSERT INTO ItemTable (key, value) VALUES ('antigravityUnifiedStateSync.trajectorySummaries', ?1)",
+        rusqlite::params![value_b64],
+    ).unwrap();
+    drop(conn);
+
+    // 4. 실행 및 검증
+    let adapter = AntigravityAdapter;
+    let virtual_path = format!("{}?session_id={}", temp_db_path, conversation_id);
+    let parsed_res = adapter.parse_session(&virtual_path).expect("Antigravity mock 파싱 실패");
+
+    // 5. 복구 및 정리
+    if let Some(h) = original_home {
+        std::env::set_var("HOME", h);
+    } else {
+        std::env::remove_var("HOME");
+    }
+    let _ = fs::remove_dir_all(&temp_dir);
+    let _ = fs::remove_file(&temp_db_path);
+
+    // 6. 단언문 검증
+    assert_eq!(parsed_res.session.session_id, conversation_id);
+    assert_eq!(parsed_res.session.token_source, "estimated");
+    // 입력 (USER_INPUT): 한글 6자 (9) + 영어 17자 (4) = 13 tokens
+    assert_eq!(parsed_res.session.total_input_tokens, 13);
+    // 출력 (PLANNER_RESPONSE): 한글 8자 (12) + 영어 6자 (1) = 13 tokens
+    assert_eq!(parsed_res.session.total_output_tokens, 13);
+    assert_eq!(parsed_res.messages.len(), 2);
+    assert_eq!(parsed_res.messages[0].role, "user");
+    assert_eq!(parsed_res.messages[0].input_tokens, 13);
+    assert_eq!(parsed_res.messages[0].output_tokens, 0);
+    assert_eq!(parsed_res.messages[0].content, Some("한글열글자다EnglishTwentyChar".to_string()));
+    assert_eq!(parsed_res.messages[1].role, "agent");
+    assert_eq!(parsed_res.messages[1].input_tokens, 0);
+    assert_eq!(parsed_res.messages[1].output_tokens, 13);
+    assert_eq!(parsed_res.messages[1].content, Some("답변도한글다섯자EngTen".to_string()));
 }

@@ -5,7 +5,7 @@
 use rusqlite::params;
 use base64::Engine;
 use prost::Message;
-use crate::model::{Session, Node};
+use crate::model::{Session, Node, Message as AppMessage};
 use super::{LogAdapter, NormalizedSession};
 
 // 1. Prost Protobuf 구조체 선언
@@ -195,7 +195,126 @@ impl LogAdapter for AntigravityAdapter {
             final_title = format!("[{}] {}", branch, final_title);
         }
 
-        // 6. 세션 정보 맵핑
+        // 6. 실시간 대화 로그 파일 탐색 및 글자 수 기반 토큰/비용 추정
+        let mut messages = Vec::new();
+        let mut total_input_tokens = 0u64;
+        let mut total_output_tokens = 0u64;
+        let mut _total_cost_usd = 0.0f64;
+        let mut token_source = "unavailable".to_string();
+
+        let home_dir = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        
+        let log_file_path = std::path::Path::new(&home_dir)
+            .join(".gemini")
+            .join("antigravity-ide")
+            .join("brain")
+            .join(target_session_id)
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript_full.jsonl");
+
+        let mut parsed_from_log = false;
+
+        if !home_dir.is_empty() && log_file_path.exists() {
+            if let Ok(file_content) = std::fs::read_to_string(&log_file_path) {
+                let mut turn_index = 1u64;
+                for line in file_content.lines() {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                        let step_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        let content_str = val.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                        
+                        if step_type == "USER_INPUT" || step_type == "PLANNER_RESPONSE" {
+                            let role = if step_type == "USER_INPUT" {
+                                "user".to_string()
+                            } else {
+                                "agent".to_string()
+                            };
+
+                            let (ascii_tok, non_ascii_tok) = count_tokens_from_str(content_str);
+                            let msg_text_tokens = ascii_tok + non_ascii_tok;
+                            
+                            // tool_calls 가 있는 경우 입력 토큰 가중치 적용
+                            let mut tool_tokens = 0u64;
+                            if let Some(tool_calls) = val.get("tool_calls").and_then(|tc| tc.as_array()) {
+                                for tc in tool_calls {
+                                    let tool_name = tc.get("toolAction").and_then(|n| n.as_str()).unwrap_or("");
+                                    let tool_summary = tc.get("toolSummary").and_then(|s| s.as_str()).unwrap_or("");
+                                    let cmd_line = tc.get("CommandLine").and_then(|c| c.as_str()).unwrap_or("");
+                                    let args = tc.get("Arguments").and_then(|a| a.as_str()).unwrap_or("");
+                                    
+                                    let (ti_in, ti_out) = count_tokens_from_str(tool_name);
+                                    let (ts_in, ts_out) = count_tokens_from_str(tool_summary);
+                                    let (tc_in, tc_out) = count_tokens_from_str(cmd_line);
+                                    let (ta_in, ta_out) = count_tokens_from_str(args);
+                                    
+                                    tool_tokens += ti_in + ti_out + ts_in + ts_out + tc_in + tc_out + ta_in + ta_out;
+                                }
+                            }
+
+                            let (msg_input, msg_output) = if step_type == "USER_INPUT" {
+                                (msg_text_tokens + tool_tokens, 0u64)
+                            } else {
+                                (0u64, msg_text_tokens + tool_tokens)
+                            };
+
+                            let msg_cost = (msg_input as f64 / 1_000_000.0) * 3.0 
+                                         + (msg_output as f64 / 1_000_000.0) * 15.0;
+
+                            total_input_tokens += msg_input;
+                            total_output_tokens += msg_output;
+                            _total_cost_usd += msg_cost;
+
+                            let msg = AppMessage::new(
+                                target_session_id.to_string(),
+                                turn_index,
+                                role,
+                                msg_input,
+                                0,
+                                msg_output,
+                                msg_cost,
+                                started_at.clone(),
+                                Some(content_str.to_string()),
+                            );
+                            messages.push(msg);
+                            turn_index += 1;
+                        }
+                    }
+                }
+                if !messages.is_empty() {
+                    parsed_from_log = true;
+                    token_source = "estimated".to_string();
+                }
+            }
+        }
+
+        // 폴백 모드: 로그가 없거나 파싱 실패 시 step_count 기반 가상 추정
+        if !parsed_from_log {
+            total_input_tokens = detail.step_count * 5000;
+            total_output_tokens = detail.step_count * 1000;
+            _total_cost_usd = (total_input_tokens as f64 / 1_000_000.0) * 3.0
+                            + (total_output_tokens as f64 / 1_000_000.0) * 15.0;
+            token_source = "estimated".to_string();
+
+            for i in 0..detail.step_count {
+                let role = if i % 2 == 0 { "user".to_string() } else { "agent".to_string() };
+                let msg = AppMessage::new(
+                    target_session_id.to_string(),
+                    (i + 1) as u64,
+                    role,
+                    5000,
+                    0,
+                    1000,
+                    0.03,
+                    started_at.clone(),
+                    Some(format!("가상 대화 단계 #{}", i + 1)),
+                );
+                messages.push(msg);
+            }
+        }
+
+        // 7. 세션 정보 맵핑
         let session = Session::new(
             target_session_id.to_string(),
             "antigravity".to_string(),
@@ -204,14 +323,14 @@ impl LogAdapter for AntigravityAdapter {
             ended_at,
             cwd,
             None,
-            0,
-            0,
-            "unavailable".to_string(),
+            total_input_tokens,
+            total_output_tokens,
+            token_source,
             Some(final_title),
             None,
         );
 
-        // 7. 활동(step_count)만큼 빈 Node들을 가상 턴으로 생성 (시각화/루프 탐지용)
+        // 8. 활동(step_count)만큼 빈 Node들을 가상 턴으로 생성 (시각화/루프 탐지용)
         let mut nodes = Vec::new();
         for _ in 0..detail.step_count {
             let node = Node::new(
@@ -225,11 +344,27 @@ impl LogAdapter for AntigravityAdapter {
 
         Ok(NormalizedSession {
             session,
-            messages: Vec::new(),
+            messages,
             nodes,
             tool_calls: Vec::new(),
         })
     }
+}
+
+/// 문자열의 글자 수(ASCII vs 한글/비ASCII)별 가중치 기반 토큰 카운트 함수
+fn count_tokens_from_str(s: &str) -> (u64, u64) {
+    let mut ascii_chars = 0u64;
+    let mut non_ascii_chars = 0u64;
+    for c in s.chars() {
+        if c.is_ascii() {
+            ascii_chars += 1;
+        } else {
+            non_ascii_chars += 1;
+        }
+    }
+    let ascii_tokens = (ascii_chars as f64 / 4.0) as u64;
+    let non_ascii_tokens = (non_ascii_chars as f64 * 1.6) as u64;
+    (ascii_tokens, non_ascii_tokens)
 }
 
 /// unix_sec 타임스탬프를 ISO8601 표준 포맷 문자열로 변환하는 헬퍼 함수
