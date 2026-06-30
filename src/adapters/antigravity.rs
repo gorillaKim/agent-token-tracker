@@ -240,25 +240,58 @@ impl LogAdapter for AntigravityAdapter {
                             let mut tool_tokens = 0u64;
                             if let Some(tool_calls_arr) = val.get("tool_calls").and_then(|tc| tc.as_array()) {
                                 for tc in tool_calls_arr {
-                                    let tool_name = tc.get("toolAction").and_then(|n| n.as_str()).unwrap_or("unknown_tool").to_string();
-                                    let tool_summary = tc.get("toolSummary").and_then(|s| s.as_str()).unwrap_or("");
-                                    let cmd_line = tc.get("CommandLine").and_then(|c| c.as_str()).unwrap_or("");
-                                    let args = tc.get("Arguments").and_then(|a| a.as_str()).unwrap_or("");
+                                    // name 필드 획득 및 정제
+                                    let tool_name_raw = tc.get("name").and_then(|n| n.as_str()).unwrap_or("unknown_tool");
+                                    let tool_name_clean = tool_name_raw.trim_matches('"');
                                     
-                                    let tool_input_str = if !args.is_empty() {
-                                        args.to_string()
-                                    } else if !cmd_line.is_empty() {
-                                        cmd_line.to_string()
+                                    // args 객체 획득
+                                    let empty_map = serde_json::Map::new();
+                                    let args_obj = tc.get("args").and_then(|a| a.as_object()).unwrap_or(&empty_map);
+                                    
+                                    let tool_action_val = args_obj.get("toolAction").and_then(|n| n.as_str()).unwrap_or("");
+                                    let tool_action_clean = tool_action_val.trim_matches('"');
+                                    
+                                    let tool_summary_val = args_obj.get("toolSummary").and_then(|s| s.as_str()).unwrap_or("");
+                                    let tool_summary_clean = tool_summary_val.trim_matches('"');
+                                    
+                                    let cmd_line_val = args_obj.get("CommandLine").and_then(|c| c.as_str()).unwrap_or("");
+                                    let cmd_line_clean = cmd_line_val.trim_matches('"');
+                                    
+                                    let args_val = args_obj.get("Arguments").and_then(|a| a.as_str()).unwrap_or("");
+                                    let args_clean = args_val.trim_matches('"');
+                                    
+                                    // call_mcp_tool 의 경우 ServerName/ToolName 형식으로 최종 도구명 도출
+                                    let final_tool_name = if tool_name_clean == "call_mcp_tool" {
+                                        let server = args_obj.get("ServerName").and_then(|s| s.as_str()).unwrap_or("").trim_matches('"');
+                                        let mcp_tool = args_obj.get("ToolName").and_then(|t| t.as_str()).unwrap_or("").trim_matches('"');
+                                        if !server.is_empty() && !mcp_tool.is_empty() {
+                                            format!("{}/{}", server, mcp_tool)
+                                        } else if !mcp_tool.is_empty() {
+                                            mcp_tool.to_string()
+                                        } else {
+                                            tool_name_clean.to_string()
+                                        }
                                     } else {
-                                        "".to_string()
+                                        tool_name_clean.to_string()
                                     };
+
+                                    // 따옴표가 정제된 새로운 args 객체 구성
+                                    let tool_input_val = serde_json::Value::Object(
+                                        args_obj.iter().map(|(k, v)| {
+                                            let v_clean = match v {
+                                                serde_json::Value::String(s) => serde_json::Value::String(s.trim_matches('"').to_string()),
+                                                other => other.clone(),
+                                            };
+                                            (k.clone(), v_clean)
+                                        }).collect()
+                                    );
                                     
-                                    let tool_input_val = serde_json::Value::String(tool_input_str.clone());
+                                    let tool_input_str = serde_json::to_string(&tool_input_val).unwrap_or_default();
                                     let input_hash = calculate_input_hash(&tool_input_val);
                                     
                                     let tool_call = AppToolCall::new(
                                         target_session_id.to_string(),
-                                        tool_name,
+                                        final_tool_name,
                                         Some(tool_input_str),
                                         input_hash,
                                         true, // 성공 기본값
@@ -267,10 +300,10 @@ impl LogAdapter for AntigravityAdapter {
                                     );
                                     session_tool_calls.push(tool_call);
                                     
-                                    let (ti_in, ti_out) = count_tokens_from_str(&tc.get("toolAction").and_then(|n| n.as_str()).unwrap_or(""));
-                                    let (ts_in, ts_out) = count_tokens_from_str(tool_summary);
-                                    let (tc_in, tc_out) = count_tokens_from_str(cmd_line);
-                                    let (ta_in, ta_out) = count_tokens_from_str(args);
+                                    let (ti_in, ti_out) = count_tokens_from_str(tool_action_clean);
+                                    let (ts_in, ts_out) = count_tokens_from_str(tool_summary_clean);
+                                    let (tc_in, tc_out) = count_tokens_from_str(cmd_line_clean);
+                                    let (ta_in, ta_out) = count_tokens_from_str(args_clean);
                                     
                                     tool_tokens += ti_in + ti_out + ts_in + ts_out + tc_in + tc_out + ta_in + ta_out;
                                 }

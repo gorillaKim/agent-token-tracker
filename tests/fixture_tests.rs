@@ -598,7 +598,7 @@ fn test_antigravity_log_character_counting() {
     // 영어/ASCII: 20글자 (20 / 4.0 = 5)
     // 합산: 입력 21 tokens
     let dummy_log = r#"{"type":"USER_INPUT","content":"한글열글자다EnglishTwentyChar"}
-{"type":"PLANNER_RESPONSE","content":"답변도한글다섯자EngTen","tool_calls":[{"toolAction":"view_file","toolSummary":"View file contents","CommandLine":"","Arguments":"{\"AbsolutePath\":\"/mock/file\"}"}]}"#;
+{"type":"PLANNER_RESPONSE","content":"답변도한글다섯자EngTen","tool_calls":[{"name":"view_file","args":{"toolAction":"view_file","toolSummary":"View file contents","CommandLine":"","Arguments":"{\"AbsolutePath\":\"/mock/file\"}"}}]}"#;
     fs::write(&log_file, dummy_log).unwrap();
 
     // 3. state.vscdb 생성
@@ -676,5 +676,5 @@ fn test_antigravity_log_character_counting() {
     // 6-2. 도구 호출 이력 검증
     assert_eq!(parsed_res.tool_calls.len(), 1);
     assert_eq!(parsed_res.tool_calls[0].tool_name, "view_file");
-    assert_eq!(parsed_res.tool_calls[0].tool_input, Some("{\"AbsolutePath\":\"/mock/file\"}".to_string()));
+    assert_eq!(parsed_res.tool_calls[0].tool_input, Some("{\"Arguments\":\"{\\\"AbsolutePath\\\":\\\"/mock/file\\\"}\",\"CommandLine\":\"\",\"toolAction\":\"view_file\",\"toolSummary\":\"View file contents\"}".to_string()));
 }
