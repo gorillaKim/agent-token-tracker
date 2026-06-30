@@ -261,18 +261,31 @@ impl LogAdapter for AntigravityAdapter {
                                     let args_clean = args_val.trim_matches('"');
                                     
                                     // call_mcp_tool 의 경우 ServerName/ToolName 형식으로 최종 도구명 도출
-                                    let final_tool_name = if tool_name_clean == "call_mcp_tool" {
+                                    let (final_tool_name, is_mcp, mcp_server, mcp_tool) = if tool_name_clean == "call_mcp_tool" {
                                         let server = args_obj.get("ServerName").and_then(|s| s.as_str()).unwrap_or("").trim_matches('"');
-                                        let mcp_tool = args_obj.get("ToolName").and_then(|t| t.as_str()).unwrap_or("").trim_matches('"');
-                                        if !server.is_empty() && !mcp_tool.is_empty() {
-                                            format!("{}/{}", server, mcp_tool)
-                                        } else if !mcp_tool.is_empty() {
-                                            mcp_tool.to_string()
+                                        let mcp_t = args_obj.get("ToolName").and_then(|t| t.as_str()).unwrap_or("").trim_matches('"');
+                                        if !server.is_empty() && !mcp_t.is_empty() {
+                                            (format!("{}/{}", server, mcp_t), true, Some(server.to_string()), Some(mcp_t.to_string()))
+                                        } else if !mcp_t.is_empty() {
+                                            (mcp_t.to_string(), true, Some("unknown_server".to_string()), Some(mcp_t.to_string()))
                                         } else {
-                                            tool_name_clean.to_string()
+                                            (tool_name_clean.to_string(), false, None, None)
+                                        }
+                                    } else if tool_name_clean.starts_with("mcp__") {
+                                        let remains = &tool_name_clean["mcp__".len()..];
+                                        if let Some((srv, tl)) = remains.split_once("__") {
+                                            (format!("{}/{}", srv, tl), true, Some(srv.to_string()), Some(tl.to_string()))
+                                        } else {
+                                            (tool_name_clean.to_string(), true, Some("unknown_server".to_string()), Some(remains.to_string()))
+                                        }
+                                    } else if tool_name_clean.contains('/') {
+                                        if let Some((srv, tl)) = tool_name_clean.split_once('/') {
+                                            (tool_name_clean.to_string(), true, Some(srv.to_string()), Some(tl.to_string()))
+                                        } else {
+                                            (tool_name_clean.to_string(), true, Some("unknown_server".to_string()), Some(tool_name_clean.to_string()))
                                         }
                                     } else {
-                                        tool_name_clean.to_string()
+                                        (tool_name_clean.to_string(), false, None, None)
                                     };
 
                                     // 따옴표가 정제된 새로운 args 객체 구성
@@ -289,7 +302,6 @@ impl LogAdapter for AntigravityAdapter {
                                     let tool_input_str = serde_json::to_string(&tool_input_val).unwrap_or_default();
                                     let input_hash = calculate_input_hash(&tool_input_val);
                                     
-                                    let is_mcp = tool_name_clean == "call_mcp_tool" || final_tool_name.contains('/');
                                     let tool_call = AppToolCall::new(
                                         target_session_id.to_string(),
                                         final_tool_name,
@@ -298,6 +310,8 @@ impl LogAdapter for AntigravityAdapter {
                                         true, // 성공 기본값
                                         false,
                                         is_mcp,
+                                        mcp_server,
+                                        mcp_tool,
                                         started_at.clone(),
                                     );
                                     session_tool_calls.push(tool_call);

@@ -127,8 +127,10 @@ pub struct ToolCall {
     pub tool_input: Option<String>, // JSON 직렬화된 문자열
     pub input_hash: String,
     pub success: bool,
-    pub is_loop_suspect: bool, // 루프 오작동 의심 플래그
-    pub is_mcp: bool,          // MCP 도구 여부 플래그
+    pub is_loop_suspect: bool,       // 루프 오작동 의심 플래그
+    pub is_mcp: bool,                // MCP 도구 여부 플래그
+    pub mcp_server: Option<String>,  // MCP 서버명 (예: "engram")
+    pub mcp_tool: Option<String>,    // MCP 원천 도구명 (예: "epic_create")
     pub created_at: String,
 }
 
@@ -141,6 +143,8 @@ impl ToolCall {
         success: bool,
         is_loop_suspect: bool,
         is_mcp: bool,
+        mcp_server: Option<String>,
+        mcp_tool: Option<String>,
         created_at: String,
     ) -> Self {
         Self {
@@ -152,6 +156,8 @@ impl ToolCall {
             success,
             is_loop_suspect,
             is_mcp,
+            mcp_server,
+            mcp_tool,
             created_at,
         }
     }

@@ -127,6 +127,8 @@ pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
             success INTEGER NOT NULL DEFAULT 1,
             is_loop_suspect INTEGER NOT NULL DEFAULT 0,
             is_mcp INTEGER NOT NULL DEFAULT 0,
+            mcp_server TEXT,
+            mcp_tool TEXT,
             created_at TEXT NOT NULL
         );",
         [],
@@ -134,6 +136,8 @@ pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
 
     // 멱등적으로 컬럼 추가 (ALTER TABLE 에러 무시)
     conn.execute("ALTER TABLE tool_calls ADD COLUMN is_mcp INTEGER NOT NULL DEFAULT 0;", []).ok();
+    conn.execute("ALTER TABLE tool_calls ADD COLUMN mcp_server TEXT;", []).ok();
+    conn.execute("ALTER TABLE tool_calls ADD COLUMN mcp_tool TEXT;", []).ok();
 
     // 5. pricing 테이블 생성
     conn.execute(
@@ -238,8 +242,8 @@ pub fn insert_node(conn: &Connection, node: &Node) -> Result<(), rusqlite::Error
 /// 도구 호출 정보를 데이터베이스에 적재합니다.
 pub fn insert_tool_call(conn: &Connection, tc: &ToolCall) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "INSERT INTO tool_calls (session_id, tool_name, tool_input, input_hash, success, is_loop_suspect, is_mcp, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO tool_calls (session_id, tool_name, tool_input, input_hash, success, is_loop_suspect, is_mcp, mcp_server, mcp_tool, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             tc.session_id,
             tc.tool_name,
@@ -248,6 +252,8 @@ pub fn insert_tool_call(conn: &Connection, tc: &ToolCall) -> Result<(), rusqlite
             if tc.success { 1 } else { 0 },
             if tc.is_loop_suspect { 1 } else { 0 },
             if tc.is_mcp { 1 } else { 0 },
+            tc.mcp_server,
+            tc.mcp_tool,
             tc.created_at
         ],
     )?;
@@ -453,7 +459,7 @@ pub fn get_nodes_by_session(conn: &Connection, session_id: &str) -> Result<Vec<N
 /// 특정 세션의 도구 호출 기록을 ID 순으로 조회합니다.
 pub fn get_tool_calls_by_session(conn: &Connection, session_id: &str) -> Result<Vec<ToolCall>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, session_id, tool_name, tool_input, input_hash, success, is_loop_suspect, is_mcp, created_at
+        "SELECT id, session_id, tool_name, tool_input, input_hash, success, is_loop_suspect, is_mcp, mcp_server, mcp_tool, created_at
          FROM tool_calls WHERE session_id = ?1 ORDER BY id ASC",
     )?;
 
@@ -470,6 +476,8 @@ pub fn get_tool_calls_by_session(conn: &Connection, session_id: &str) -> Result<
             loop_suspect_val == 1,
             mcp_val == 1,
             row.get(8)?,
+            row.get(9)?,
+            row.get(10)?,
         );
         tc.id = Some(row.get(0)?);
         Ok(tc)
@@ -775,6 +783,8 @@ mod tests {
             true,
             false,
             false, // is_mcp
+            None,  // mcp_server
+            None,  // mcp_tool
             "2026-06-23T09:03:00Z".to_string(),
         );
         insert_tool_call(&conn, &tc).expect("ToolCall 삽입 실패");

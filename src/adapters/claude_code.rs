@@ -233,21 +233,27 @@ impl LogAdapter for ClaudeCodeAdapter {
                                                 let input_hash =
                                                     super::calculate_input_hash(tool_input_val);
 
-                                                let local_tools = [
-                                                    "read_file", "write_file", "grep_search", "glob_search",
-                                                    "run_command", "bash", "view_file", "list_dir",
-                                                    "make_dir", "delete_file"
-                                                ];
-                                                let is_mcp = !local_tools.contains(&tool_name);
+                                                let (is_mcp, mcp_server, mcp_tool, final_tool_name) = if tool_name.starts_with("mcp__") {
+                                                    let remains = &tool_name["mcp__".len()..];
+                                                    if let Some((srv, tl)) = remains.split_once("__") {
+                                                        (true, Some(srv.to_string()), Some(tl.to_string()), format!("{}/{}", srv, tl))
+                                                    } else {
+                                                        (true, Some("unknown_server".to_string()), Some(remains.to_string()), tool_name.to_string())
+                                                    }
+                                                } else {
+                                                    (false, None, None, tool_name.to_string())
+                                                };
 
                                                 tool_calls.push(ToolCall::new(
                                                     session_id.clone(),
-                                                    tool_name.to_string(),
+                                                    final_tool_name,
                                                     Some(normalized_input_str),
                                                     input_hash,
                                                     true,
                                                     false,
                                                     is_mcp,
+                                                    mcp_server,
+                                                    mcp_tool,
                                                     timestamp.to_string(),
                                                 ));
                                             }

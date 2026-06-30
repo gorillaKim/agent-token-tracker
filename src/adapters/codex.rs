@@ -163,6 +163,8 @@ impl LogAdapter for CodexAdapter {
                             success,
                             false,
                             true, // is_mcp
+                            Some(server.to_string()),
+                            Some(tool.to_string()),
                             started_at.clone(),
                         );
                         tool_calls.push(tc);
