@@ -2357,7 +2357,7 @@ fn get_session_analysis(session_id: String) -> Result<SessionAnalysis, String> {
     let mut mcp_tool_raw = 0u64;
 
     for tc in &tool_calls {
-        let t_tok = count_tokens_from_text(&tc.tool_input) + count_tokens_from_text(&tc.tool_name);
+        let t_tok = count_tokens_from_text(tc.tool_input.as_deref().unwrap_or("")) + count_tokens_from_text(&tc.tool_name);
         if tc.is_mcp {
             mcp_tool_raw += t_tok;
         } else {
