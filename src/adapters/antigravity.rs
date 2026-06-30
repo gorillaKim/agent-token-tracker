@@ -5,8 +5,8 @@
 use rusqlite::params;
 use base64::Engine;
 use prost::Message;
-use crate::model::{Session, Node, Message as AppMessage};
-use super::{LogAdapter, NormalizedSession};
+use crate::model::{Session, Node, Message as AppMessage, ToolCall as AppToolCall};
+use super::{LogAdapter, NormalizedSession, calculate_input_hash};
 
 // 1. Prost Protobuf 구조체 선언
 #[derive(Clone, PartialEq, prost::Message)]
@@ -197,6 +197,7 @@ impl LogAdapter for AntigravityAdapter {
 
         // 6. 실시간 대화 로그 파일 탐색 및 글자 수 기반 토큰/비용 추정
         let mut messages = Vec::new();
+        let mut session_tool_calls = Vec::new();
         let mut total_input_tokens = 0u64;
         let mut total_output_tokens = 0u64;
         let mut _total_cost_usd = 0.0f64;
@@ -235,16 +236,38 @@ impl LogAdapter for AntigravityAdapter {
                             let (ascii_tok, non_ascii_tok) = count_tokens_from_str(content_str);
                             let msg_text_tokens = ascii_tok + non_ascii_tok;
                             
-                            // tool_calls 가 있는 경우 입력 토큰 가중치 적용
+                            // tool_calls 가 있는 경우 입력 토큰 가중치 적용 및 도구 호출 이력 복원
                             let mut tool_tokens = 0u64;
-                            if let Some(tool_calls) = val.get("tool_calls").and_then(|tc| tc.as_array()) {
-                                for tc in tool_calls {
-                                    let tool_name = tc.get("toolAction").and_then(|n| n.as_str()).unwrap_or("");
+                            if let Some(tool_calls_arr) = val.get("tool_calls").and_then(|tc| tc.as_array()) {
+                                for tc in tool_calls_arr {
+                                    let tool_name = tc.get("toolAction").and_then(|n| n.as_str()).unwrap_or("unknown_tool").to_string();
                                     let tool_summary = tc.get("toolSummary").and_then(|s| s.as_str()).unwrap_or("");
                                     let cmd_line = tc.get("CommandLine").and_then(|c| c.as_str()).unwrap_or("");
                                     let args = tc.get("Arguments").and_then(|a| a.as_str()).unwrap_or("");
                                     
-                                    let (ti_in, ti_out) = count_tokens_from_str(tool_name);
+                                    let tool_input_str = if !args.is_empty() {
+                                        args.to_string()
+                                    } else if !cmd_line.is_empty() {
+                                        cmd_line.to_string()
+                                    } else {
+                                        "".to_string()
+                                    };
+                                    
+                                    let tool_input_val = serde_json::Value::String(tool_input_str.clone());
+                                    let input_hash = calculate_input_hash(&tool_input_val);
+                                    
+                                    let tool_call = AppToolCall::new(
+                                        target_session_id.to_string(),
+                                        tool_name,
+                                        Some(tool_input_str),
+                                        input_hash,
+                                        true, // 성공 기본값
+                                        false,
+                                        started_at.clone(),
+                                    );
+                                    session_tool_calls.push(tool_call);
+                                    
+                                    let (ti_in, ti_out) = count_tokens_from_str(&tc.get("toolAction").and_then(|n| n.as_str()).unwrap_or(""));
                                     let (ts_in, ts_out) = count_tokens_from_str(tool_summary);
                                     let (tc_in, tc_out) = count_tokens_from_str(cmd_line);
                                     let (ta_in, ta_out) = count_tokens_from_str(args);
@@ -346,7 +369,7 @@ impl LogAdapter for AntigravityAdapter {
             session,
             messages,
             nodes,
-            tool_calls: Vec::new(),
+            tool_calls: session_tool_calls,
         })
     }
 }

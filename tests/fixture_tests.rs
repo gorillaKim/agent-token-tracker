@@ -598,7 +598,7 @@ fn test_antigravity_log_character_counting() {
     // 영어/ASCII: 20글자 (20 / 4.0 = 5)
     // 합산: 입력 21 tokens
     let dummy_log = r#"{"type":"USER_INPUT","content":"한글열글자다EnglishTwentyChar"}
-{"type":"PLANNER_RESPONSE","content":"답변도한글다섯자EngTen"}"#;
+{"type":"PLANNER_RESPONSE","content":"답변도한글다섯자EngTen","tool_calls":[{"toolAction":"view_file","toolSummary":"View file contents","CommandLine":"","Arguments":"{\"AbsolutePath\":\"/mock/file\"}"}]}"#;
     fs::write(&log_file, dummy_log).unwrap();
 
     // 3. state.vscdb 생성
@@ -661,8 +661,8 @@ fn test_antigravity_log_character_counting() {
     assert_eq!(parsed_res.session.token_source, "estimated");
     // 입력 (USER_INPUT): 한글 6자 (9) + 영어 17자 (4) = 13 tokens
     assert_eq!(parsed_res.session.total_input_tokens, 13);
-    // 출력 (PLANNER_RESPONSE): 한글 8자 (12) + 영어 6자 (1) = 13 tokens
-    assert_eq!(parsed_res.session.total_output_tokens, 13);
+    // 출력 (PLANNER_RESPONSE): 한글 8자 (12) + 영어 6자 (1) = 13 tokens + 도구 토큰 13 = 26 tokens
+    assert_eq!(parsed_res.session.total_output_tokens, 26);
     assert_eq!(parsed_res.messages.len(), 2);
     assert_eq!(parsed_res.messages[0].role, "user");
     assert_eq!(parsed_res.messages[0].input_tokens, 13);
@@ -670,6 +670,11 @@ fn test_antigravity_log_character_counting() {
     assert_eq!(parsed_res.messages[0].content, Some("한글열글자다EnglishTwentyChar".to_string()));
     assert_eq!(parsed_res.messages[1].role, "agent");
     assert_eq!(parsed_res.messages[1].input_tokens, 0);
-    assert_eq!(parsed_res.messages[1].output_tokens, 13);
+    assert_eq!(parsed_res.messages[1].output_tokens, 26);
     assert_eq!(parsed_res.messages[1].content, Some("답변도한글다섯자EngTen".to_string()));
+
+    // 6-2. 도구 호출 이력 검증
+    assert_eq!(parsed_res.tool_calls.len(), 1);
+    assert_eq!(parsed_res.tool_calls[0].tool_name, "view_file");
+    assert_eq!(parsed_res.tool_calls[0].tool_input, Some("{\"AbsolutePath\":\"/mock/file\"}".to_string()));
 }
