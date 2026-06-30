@@ -223,6 +223,13 @@ const analysis: SessionAnalysis = {
     { tool_name: "Grep", call_count: 22, success_count: 22, estimated_tokens: 1_800_000, total_cost_usd: 0.9 },
   ],
   anomaly_signals: anomalies[0].signals,
+  token_distribution: {
+    input_tokens: 104_200_000,
+    output_tokens: 6_200_000,
+    thinking_tokens: 4_100_000,
+    core_tool_tokens: 38_000_000,
+    mcp_tool_tokens: 44_100_000,
+  },
 };
 
 const sessionDetails: SessionDetails = {

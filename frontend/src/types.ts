@@ -215,6 +215,14 @@ export interface ToolCostRank {
   total_cost_usd: number;
 }
 
+export interface SessionTokenDistribution {
+  input_tokens: number;
+  output_tokens: number;
+  thinking_tokens: number;
+  core_tool_tokens: number;
+  mcp_tool_tokens: number;
+}
+
 export interface SessionAnalysis {
   session_id: string;
   session_name?: string;
@@ -231,4 +239,5 @@ export interface SessionAnalysis {
   tool_cost_rank: ToolCostRank[];
   anomaly_signals: LoopSignal[];
   is_anomaly: boolean;
+  token_distribution: SessionTokenDistribution;
 }

@@ -88,6 +88,47 @@ export function SessionAnalysisView({
       });
   }, [sessions, filterAgent, filterAnomaly, sortBy, anomalyMap]);
 
+  const tokenDistributionData = useMemo(() => {
+    if (!analysisData || !analysisData.token_distribution) {
+      return { items: [], total: 0 };
+    }
+    const dist = analysisData.token_distribution;
+    const total =
+      dist.input_tokens +
+      dist.output_tokens +
+      dist.thinking_tokens +
+      dist.core_tool_tokens +
+      dist.mcp_tool_tokens;
+    
+    if (total === 0) {
+      return { items: [], total: 0 };
+    }
+
+    const segments = [
+      { label: "생각 (Thinking)", value: dist.thinking_tokens, color: "hsl(var(--primary))" },
+      { label: "MCP 도구 (MCP Tools)", value: dist.mcp_tool_tokens, color: "hsl(200 95% 42%)" },
+      { label: "기본 도구 (Core Tools)", value: dist.core_tool_tokens, color: "hsl(160 80% 40%)" },
+      { label: "사용자 입력 (Input)", value: dist.input_tokens, color: "hsl(35 95% 55%)" },
+      { label: "최종 답변 (Output)", value: dist.output_tokens, color: "hsl(340 85% 60%)" },
+    ].filter((s) => s.value > 0);
+
+    let accumulated = 0;
+    const items = segments.map((seg) => {
+      const percent = (seg.value / total) * 100;
+      const strokeDash = `${percent} ${100 - percent}`;
+      const strokeOffset = 100 - accumulated + 25; // 12시 방향 시작 (+25 보정)
+      accumulated += percent;
+      return {
+        ...seg,
+        percent,
+        strokeDash,
+        strokeOffset,
+      };
+    });
+
+    return { items, total };
+  }, [analysisData]);
+
   const agentLabel = (type: string) =>
     type === "claude_code"
       ? "Claude Code"
@@ -436,8 +477,8 @@ export function SessionAnalysisView({
                 )}
               </div>
 
-              {/* 하단 2단: 캐시 도넛 차트 & 도구 비용 랭킹 */}
-              <div className="grid grid-cols-1 gap-6 @2xl:grid-cols-2">
+              {/* 하단 3단: 캐시 도넛, 토큰 영역 도넛 & 도구 비용 랭킹 */}
+              <div className="grid grid-cols-1 gap-6 @3xl:grid-cols-3">
                 {/* 캐시 히트율 도넛 차트 카드 */}
                 <div className="rounded-xl border border-border bg-muted/30 p-5">
                   <div className="mb-4 flex items-center gap-1.5">
@@ -486,6 +527,75 @@ export function SessionAnalysisView({
                         </div>
                       </div>
                     </div>
+                  </div>
+                </div>
+
+                {/* 토큰 소모 영역별 분포 도넛 차트 카드 */}
+                <div className="rounded-xl border border-border bg-muted/30 p-5">
+                  <div className="mb-4 flex items-center gap-1.5">
+                    <h4 className="text-sm font-semibold">토큰 소모 영역별 분포</h4>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="cursor-help text-muted-foreground">
+                          <Info className="h-3.5 w-3.5" />
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-[285px]">
+                        세션 내에서 소비된 토큰이 생각 과정, 기본 로컬 도구, 외부 MCP 도구, 사용자의 순수 입력 및 답변 영역 중 어디에서 가장 많이 소모되었는지 시각화합니다.
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <div className="flex flex-col items-center gap-6 sm:flex-row sm:justify-start sm:gap-6">
+                    {/* SVG 멀티 세그먼트 도넛 */}
+                    {tokenDistributionData.total > 0 ? (
+                      <>
+                        <div className="relative h-[120px] w-[120px] shrink-0">
+                          <svg width="100%" height="100%" viewBox="0 0 42 42" className="-rotate-90">
+                            {/* 백그라운드 기본 원 */}
+                            <circle cx="21" cy="21" r="15.915" fill="transparent" stroke="hsl(var(--muted)/0.3)" strokeWidth="4.5" />
+                            {tokenDistributionData.items.map((item, idx) => (
+                              <circle
+                                key={idx}
+                                cx="21"
+                                cy="21"
+                                r="15.915"
+                                fill="transparent"
+                                stroke={item.color}
+                                strokeWidth="4.5"
+                                strokeDasharray={item.strokeDash}
+                                strokeDashoffset={item.strokeOffset}
+                                style={{ transition: "stroke-dasharray 0.5s ease" }}
+                              />
+                            ))}
+                          </svg>
+                          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-center w-full px-1">
+                            <div className="text-[11px] font-bold tabular-nums text-foreground truncate">
+                              {formatTokens(tokenDistributionData.total)}
+                            </div>
+                            <div className="text-[9px] uppercase text-muted-foreground">Tokens</div>
+                          </div>
+                        </div>
+
+                        {/* 범례 리스트 */}
+                        <div className="flex flex-1 flex-col gap-1.5 text-xs w-full">
+                          {tokenDistributionData.items.map((item, idx) => (
+                            <div key={idx} className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-1.5">
+                                <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: item.color }} />
+                                <span className="text-muted-foreground truncate max-w-[100px]">{item.label}</span>
+                              </div>
+                              <div className="font-mono font-medium text-[11px] tabular-nums text-foreground/80">
+                                {item.percent.toFixed(0)}%
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="flex flex-1 h-[120px] items-center justify-center text-xs text-muted-foreground">
+                        토큰 정보 없음
+                      </div>
+                    )}
                   </div>
                 </div>
 

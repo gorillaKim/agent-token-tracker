@@ -2222,6 +2222,17 @@ pub struct SessionAnalysis {
     pub anomaly_signals: Vec<agent_token_tracker::detect::loops::LoopSignal>,
     /// 이상 탐지 여부
     pub is_anomaly: bool,
+    /// 토큰 소모 영역별 분포 정보
+    pub token_distribution: SessionTokenDistribution,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SessionTokenDistribution {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub thinking_tokens: u64,
+    pub core_tool_tokens: u64,
+    pub mcp_tool_tokens: u64,
 }
 
 #[tauri::command]
@@ -2301,6 +2312,81 @@ fn get_session_analysis(session_id: String) -> Result<SessionAnalysis, String> {
     tool_cost_rank.sort_by(|a, b| b.call_count.cmp(&a.call_count));
     tool_cost_rank.truncate(10);
 
+    // --- 토큰 소모 영역별 분포 계산 (Donut Chart 용) ---
+    let count_tokens_from_text = |s: &str| -> u64 {
+        let mut eng_chars = 0;
+        let mut kor_chars = 0;
+        for c in s.chars() {
+            if c.is_ascii() {
+                eng_chars += 1;
+            } else {
+                kor_chars += 1;
+            }
+        }
+        let tokens = (eng_chars as f64 * 0.25) + (kor_chars as f64 * 1.6);
+        tokens.round() as u64
+    };
+
+    let mut input_raw = 0u64;
+    let mut output_raw = 0u64;
+    let mut thinking_raw = 0u64;
+
+    for m in &messages {
+        let content_str = m.content.as_deref().unwrap_or("");
+        if m.role == "user" {
+            input_raw += count_tokens_from_text(content_str);
+        } else if m.role == "assistant" {
+            if content_str.contains("[Thinking]") {
+                if let Some(idx) = content_str.find("[Thinking]") {
+                    let thinking_part = &content_str[idx + "[Thinking]".len()..];
+                    let thinking_len = count_tokens_from_text(thinking_part);
+                    thinking_raw += thinking_len;
+                    
+                    // 생각 접두사 이전의 텍스트도 아웃풋 본문으로 간주
+                    let before_thinking = &content_str[..idx];
+                    let before_len = count_tokens_from_text(before_thinking);
+                    output_raw += before_len;
+                }
+            } else {
+                output_raw += count_tokens_from_text(content_str);
+            }
+        }
+    }
+
+    let mut core_tool_raw = 0u64;
+    let mut mcp_tool_raw = 0u64;
+
+    for tc in &tool_calls {
+        let t_tok = count_tokens_from_text(&tc.tool_input) + count_tokens_from_text(&tc.tool_name);
+        if tc.is_mcp {
+            mcp_tool_raw += t_tok;
+        } else {
+            core_tool_raw += t_tok;
+        }
+    }
+
+    let sum_parts = input_raw + output_raw + thinking_raw + core_tool_raw + mcp_tool_raw;
+    let total_actual = total_input + total_output;
+
+    let token_distribution = if sum_parts > 0 {
+        let scale = total_actual as f64 / sum_parts as f64;
+        SessionTokenDistribution {
+            input_tokens: (input_raw as f64 * scale).round() as u64,
+            output_tokens: (output_raw as f64 * scale).round() as u64,
+            thinking_tokens: (thinking_raw as f64 * scale).round() as u64,
+            core_tool_tokens: (core_tool_raw as f64 * scale).round() as u64,
+            mcp_tool_tokens: (mcp_tool_raw as f64 * scale).round() as u64,
+        }
+    } else {
+        SessionTokenDistribution {
+            input_tokens: total_input,
+            output_tokens: total_output,
+            thinking_tokens: 0,
+            core_tool_tokens: 0,
+            mcp_tool_tokens: 0,
+        }
+    };
+
     // 이상 탐지
     let config = DetectorConfig::default();
     let detect_result = detect_session_anomalies(&sess, &messages, &tool_calls, &config);
@@ -2321,6 +2407,7 @@ fn get_session_analysis(session_id: String) -> Result<SessionAnalysis, String> {
         tool_cost_rank,
         anomaly_signals: detect_result.signals,
         is_anomaly: detect_result.is_anomaly,
+        token_distribution,
     })
 }
 
