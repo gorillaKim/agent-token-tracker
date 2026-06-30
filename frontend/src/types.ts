@@ -106,6 +106,14 @@ export interface SkillTokenUsage {
   total_tokens: number;
 }
 
+export interface McpUsageTrend {
+  label: string;
+  engram_calls: number;
+  doxus_calls: number;
+  playwright_calls: number;
+  other_calls: number;
+}
+
 export interface TokenUsageBreakdown {
   models: ModelTokenUsage[];
   plugins: PluginTokenUsage[];

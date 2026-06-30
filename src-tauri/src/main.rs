@@ -2937,6 +2937,15 @@ pub struct SkillTokenUsage {
     pub total_tokens: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct McpUsageTrend {
+    pub label: String,
+    pub engram_calls: u32,
+    pub doxus_calls: u32,
+    pub playwright_calls: u32,
+    pub other_calls: u32,
+}
+
 #[tauri::command]
 async fn force_sync_local_sessions(app_handle: AppHandle) -> Result<SyncResult, String> {
     println!("[Sync] force_sync_local_sessions command triggered!");
@@ -3015,6 +3024,78 @@ fn get_hourly_token_usage() -> Result<Vec<HourlyTokenUsage>, String> {
     }
     
     Ok(interpolated)
+}
+
+/// MCP 종류별 호출 추이 집계 (1d = 시간대별, 그 외 = N일간 일자별)
+#[tauri::command]
+fn get_mcp_usage_trend(days: Option<u32>) -> Result<Vec<McpUsageTrend>, String> {
+    let conn = get_db_conn()?;
+    let limit_days = days.unwrap_or(7).max(1);
+    let tz = local_tz_sql_modifier();
+
+    let sql = if limit_days == 1 {
+        // 1일 필터: 시간대별(24시간) 호출 집계
+        format!(
+            "WITH RECURSIVE hours(hour) AS (
+                SELECT 0
+                UNION ALL
+                SELECT hour + 1 FROM hours WHERE hour < 23
+             )
+             SELECT
+                printf('%02d', h.hour) as hr,
+                COALESCE(SUM(CASE WHEN t.mcp_server = 'engram' THEN 1 ELSE 0 END), 0) as engram,
+                COALESCE(SUM(CASE WHEN t.mcp_server = 'doxus' THEN 1 ELSE 0 END), 0) as doxus,
+                COALESCE(SUM(CASE WHEN t.mcp_server = 'playwright' OR t.mcp_server = 'puppeteer' THEN 1 ELSE 0 END), 0) as playwright,
+                COALESCE(SUM(CASE WHEN t.is_mcp = 1 AND t.mcp_server NOT IN ('engram', 'doxus', 'playwright', 'puppeteer') THEN 1 ELSE 0 END), 0) as other
+             FROM hours h
+             LEFT JOIN tool_calls t ON date(t.created_at, '{tz}') = date('now', '{tz}')
+                                   AND CAST(substr(datetime(t.created_at, '{tz}'), 12, 2) AS INTEGER) = h.hour
+             GROUP BY hr
+             ORDER BY hr ASC;",
+            tz = tz
+        )
+    } else {
+        // N일 필터: 일자별 호출 집계
+        let offset_days = limit_days as i32 - 1;
+        format!(
+            "WITH RECURSIVE dates(date) AS (
+                SELECT date('now', '{tz}', '-{offset} day')
+                UNION ALL
+                SELECT date(date, '+1 day') FROM dates WHERE date < date('now', '{tz}')
+             )
+             SELECT
+                d.date,
+                COALESCE(SUM(CASE WHEN t.mcp_server = 'engram' THEN 1 ELSE 0 END), 0) as engram,
+                COALESCE(SUM(CASE WHEN t.mcp_server = 'doxus' THEN 1 ELSE 0 END), 0) as doxus,
+                COALESCE(SUM(CASE WHEN t.mcp_server = 'playwright' OR t.mcp_server = 'puppeteer' THEN 1 ELSE 0 END), 0) as playwright,
+                COALESCE(SUM(CASE WHEN t.is_mcp = 1 AND t.mcp_server NOT IN ('engram', 'doxus', 'playwright', 'puppeteer') THEN 1 ELSE 0 END), 0) as other
+             FROM dates d
+             LEFT JOIN tool_calls t ON date(t.created_at, '{tz}') = d.date
+             GROUP BY d.date
+             ORDER BY d.date ASC;",
+            tz = tz,
+            offset = offset_days
+        )
+    };
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| format!("SQL 쿼리 준비 에러: {}", e))?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(McpUsageTrend {
+            label: row.get(0)?,
+            engram_calls: row.get(1)?,
+            doxus_calls: row.get(2)?,
+            playwright_calls: row.get(3)?,
+            other_calls: row.get(4)?,
+        })
+    }).map_err(|e| format!("쿼리 실행 에러: {}", e))?;
+
+    let mut trends = Vec::new();
+    for r in rows {
+        trends.push(r.map_err(|e| format!("데이터 매핑 에러: {}", e))?);
+    }
+
+    Ok(trends)
 }
 
 #[tauri::command]
@@ -3412,6 +3493,7 @@ fn main() {
             sync_local_sessions,
             force_sync_local_sessions,
             get_hourly_token_usage,
+            get_mcp_usage_trend,
             get_token_usage_breakdown,
             get_subscription_quota,
             get_rolling_window_usage,

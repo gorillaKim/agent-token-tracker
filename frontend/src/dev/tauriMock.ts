@@ -309,6 +309,34 @@ const handlers: Record<string, (args?: any) => unknown> = {
   },
   get_daily_token_usage: () => dailyTokenUsage,
   get_hourly_token_usage: () => hourlyTokenUsage,
+  get_mcp_usage_trend: (args?: any) => {
+    const days = (args?.days as number | undefined) ?? 7;
+    if (days === 1) {
+      return Array.from({ length: 24 }, (_, i) => {
+        const hourStr = String(i).padStart(2, "0");
+        return {
+          label: hourStr,
+          engram_calls: Math.max(0, Math.floor(Math.sin(i / 3) * 10 + 12)),
+          doxus_calls: Math.max(0, Math.floor(Math.cos(i / 4) * 5 + 6)),
+          playwright_calls: i % 4 === 0 ? 3 : 0,
+          other_calls: i % 6 === 0 ? 1 : 0,
+        };
+      });
+    } else {
+      return Array.from({ length: days }, (_, i) => {
+        const d = new Date();
+        d.setDate(d.getDate() - (days - 1 - i));
+        const dateStr = d.toISOString().split("T")[0];
+        return {
+          label: dateStr,
+          engram_calls: Math.max(0, Math.floor(Math.sin(i + 1) * 20 + 35)),
+          doxus_calls: Math.max(0, Math.floor(Math.cos(i + 2) * 10 + 15)),
+          playwright_calls: Math.max(0, Math.floor(Math.sin(i * 1.5) * 5 + 8)),
+          other_calls: i % 3 === 0 ? 3 : 1,
+        };
+      });
+    }
+  },
   get_subscription_quota: () => quotas,
   get_session_analysis: () => analysis,
   get_session_details: () => sessionDetails,

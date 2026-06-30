@@ -1,5 +1,6 @@
 import { AgentQuotaCard } from "../components/AgentQuotaCard";
 import { SplineChart } from "../components/SplineChart";
+import { McpTrendChart } from "../components/McpTrendChart";
 import { formatCwd, formatTokens } from "../utils/formatters";
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -134,6 +135,9 @@ export function DashboardView({ setSelectedSessionId }: DashboardViewProps) {
 
       {/* 개선된 인터랙티브 차트 컴포넌트 마운트 */}
       <SplineChart dailyTokenUsage={dailyQ.data ?? []} hourlyTokenUsage={hourlyQ.data ?? []} />
+
+      {/* MCP 종류별 호출 추이 차트 마운트 */}
+      <McpTrendChart />
 
       {/* 대시보드 하단: 활성 세션 & 이상 세션 (1d/3d/7d 필터) */}
       <div className="flex flex-col gap-3">

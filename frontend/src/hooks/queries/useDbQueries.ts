@@ -6,6 +6,7 @@ import {
   LoopDetectionResult,
   DailyTokenUsage,
   HourlyTokenUsage,
+  McpUsageTrend,
 } from "../../types";
 import { queryKeys } from "../../lib/queryKeys";
 import { GC_TIME, STALE_TIME } from "../../lib/queryConfig";
@@ -69,5 +70,17 @@ export function useHourlyTokenUsage() {
     staleTime: STALE_TIME.USAGE,
     gcTime: GC_TIME.DEFAULT,
     refetchInterval,
+  });
+}
+
+export function useMcpUsageTrend(days: number) {
+  const refetchInterval = usePollMs();
+  return useQuery({
+    queryKey: ["db", "mcpUsageTrend", days],
+    queryFn: () => invoke<McpUsageTrend[]>("get_mcp_usage_trend", { days }),
+    staleTime: STALE_TIME.USAGE,
+    gcTime: GC_TIME.DEFAULT,
+    refetchInterval,
+    placeholderData: keepPreviousData,
   });
 }
