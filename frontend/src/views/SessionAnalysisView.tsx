@@ -577,14 +577,19 @@ export function SessionAnalysisView({
                         </div>
 
                         {/* 범례 리스트 */}
-                        <div className="flex flex-1 flex-col gap-1.5 text-xs w-full">
+                        <div className="flex flex-1 flex-col gap-1.5 text-xs w-full min-w-0">
                           {tokenDistributionData.items.map((item, idx) => (
-                            <div key={idx} className="flex items-center justify-between gap-2">
-                              <div className="flex items-center gap-1.5">
+                            <div key={idx} className="flex items-center justify-between gap-2 min-w-0">
+                              <div className="flex items-center gap-1.5 min-w-0 overflow-hidden">
                                 <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: item.color }} />
-                                <span className="text-muted-foreground truncate max-w-[100px]">{item.label}</span>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <span className="text-muted-foreground truncate">{item.label}</span>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="top">{item.label}</TooltipContent>
+                                </Tooltip>
                               </div>
-                              <div className="font-mono font-medium text-[11px] tabular-nums text-foreground/80">
+                              <div className="font-mono font-medium text-[11px] tabular-nums text-foreground/80 shrink-0">
                                 {item.percent.toFixed(0)}%
                               </div>
                             </div>
