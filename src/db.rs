@@ -349,6 +349,45 @@ pub fn get_sessions_within_days(conn: &Connection, days: u32) -> Result<Vec<Sess
     Ok(sessions)
 }
 
+/// started_at 이 "오늘"(사용자 로컬 일자)인 세션만 조회합니다.
+///
+/// `tz_modifier` 는 `local_tz_sql_modifier()` 가 만드는 SQLite date() 수정자
+/// (예: "+540 minutes") 입니다. DB 는 UTC 저장이므로 date(started_at, tz) 로 로컬 일자 버킷팅 후
+/// date('now', tz)(로컬 오늘)와 비교합니다. 트레이 헬스 체크처럼 "오늘" 범위만 필요한 곳에서 사용.
+pub fn get_sessions_today(conn: &Connection, tz_modifier: &str) -> Result<Vec<Session>, rusqlite::Error> {
+    let sql = format!(
+        "SELECT session_id, agent_type, agent_version, started_at, ended_at, cwd, model_id,
+                total_input_tokens, total_output_tokens, token_source, session_name, parent_session_id
+         FROM sessions
+         WHERE date(started_at, '{tz}') = date('now', '{tz}')",
+        tz = tz_modifier
+    );
+    let mut stmt = conn.prepare(&sql)?;
+
+    let sess_iter = stmt.query_map([], |row| {
+        Ok(Session::new(
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+            row.get(9)?,
+            row.get(10)?,
+            row.get(11)?,
+        ))
+    })?;
+
+    let mut sessions = Vec::new();
+    for sess in sess_iter {
+        sessions.push(sess?);
+    }
+    Ok(sessions)
+}
+
 /// 특정 세션의 메시지 리스트를 턴 인덱스 오름차순으로 조회합니다.
 pub fn get_messages_by_session(conn: &Connection, session_id: &str) -> Result<Vec<Message>, rusqlite::Error> {
     let mut stmt = conn.prepare(

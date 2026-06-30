@@ -10,6 +10,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use notify::{Watcher, RecursiveMode};
 use keyring::Entry;
 
+#[cfg(target_os = "macos")]
+use tauri_nspanel::{tauri_panel, ManagerExt, WebviewWindowExt};
+
 use agent_token_tracker::model::Session;
 use agent_token_tracker::db;
 use agent_token_tracker::pricing;
@@ -72,9 +75,36 @@ pub struct SessionDetails {
 // ────────────────────────────────────────────────────────────
 // 헬퍼: 데이터베이스 커넥션 획득
 // ────────────────────────────────────────────────────────────
+/// 앱 DB 절대경로 (시작 시 1회 결정). 릴리즈: app_config_dir/atk.db, 디버그(dev): repo 의 ../atk.db.
+static DB_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// 시작 시 DB 경로를 결정한다. 설치된 .app 은 작업 디렉토리(cwd)가 불확실하므로 절대경로를 써야 한다.
+/// (상대경로 "../atk.db" 는 dev 에서만 동작하고 설치 앱에서는 "unable to open database file" 로 실패)
+fn resolve_db_path(app: &AppHandle) -> String {
+    if cfg!(debug_assertions) {
+        // dev(cargo tauri dev): cwd 가 repo 라 기존 ../atk.db 를 그대로 사용(누적 dev DB 유지)
+        "../atk.db".to_string()
+    } else {
+        match app.path().app_config_dir() {
+            Ok(dir) => {
+                let _ = std::fs::create_dir_all(&dir);
+                dir.join("atk.db").to_string_lossy().to_string()
+            }
+            Err(e) => {
+                eprintln!("[DB] app_config_dir 획득 실패, 폴백(atk.db) 사용: {}", e);
+                "atk.db".to_string()
+            }
+        }
+    }
+}
+
+/// 전역 DB 경로 조회 (DB_PATH 미설정 시 안전 폴백).
+fn current_db_path() -> String {
+    DB_PATH.get().cloned().unwrap_or_else(|| "../atk.db".to_string())
+}
+
 fn get_db_conn() -> Result<Connection, String> {
-    // 로컬 작업 경로 내의 atk.db 커넥션 연결
-    db::init_db("../atk.db").map_err(|e| format!("DB 연결 실패: {}", e))
+    db::init_db(&current_db_path()).map_err(|e| format!("DB 연결 실패: {}", e))
 }
 
 // ════════════════════════════════════════════════════════════
@@ -98,8 +128,6 @@ fn get_active_sessions(days: Option<u32>) -> Result<Vec<Session>, String> {
 #[tauri::command]
 fn get_agent_summaries() -> Result<Vec<AgentSummary>, String> {
     let conn = get_db_conn()?;
-    let sessions = db::get_all_sessions(&conn)
-        .map_err(|e| format!("세션 로드 에러: {}", e))?;
 
     let mut cc_sum = AgentSummary {
         agent_type: "claude_code".to_string(),
@@ -123,30 +151,60 @@ fn get_agent_summaries() -> Result<Vec<AgentSummary>, String> {
         total_cost_usd: 0.0,
     };
 
-    for s in sessions {
-        let msgs = db::get_messages_by_session(&conn, &s.session_id)
-            .unwrap_or_default();
-        let cost: f64 = msgs.iter().map(|m| m.cost_usd).sum();
+    // 기존 N+1(세션마다 메시지 조회)을 집계 쿼리 2개로 대체한다.
+    // sessions 와 messages 를 LEFT JOIN 하면 토큰 합이 메시지 수만큼 중복 집계되므로,
+    // 토큰/세션수는 sessions 단독, 비용은 messages 단독으로 각각 GROUP BY 후 합산한다.
 
-        match s.agent_type.as_str() {
-            "claude_code" => {
-                cc_sum.session_count += 1;
-                cc_sum.total_input_tokens += s.total_input_tokens;
-                cc_sum.total_output_tokens += s.total_output_tokens;
-                cc_sum.total_cost_usd += cost;
-            }
-            "codex" => {
-                cdx_sum.session_count += 1;
-                cdx_sum.total_input_tokens += s.total_input_tokens;
-                cdx_sum.total_output_tokens += s.total_output_tokens;
-                cdx_sum.total_cost_usd += cost;
-            }
-            "antigravity" => {
-                agy_sum.session_count += 1;
-                agy_sum.total_input_tokens += s.total_input_tokens;
-                agy_sum.total_output_tokens += s.total_output_tokens;
-                agy_sum.total_cost_usd += cost;
-            }
+    // 1) 세션 수 + 토큰 합 (sessions 단독)
+    let mut stmt = conn.prepare(
+        "SELECT agent_type,
+                COUNT(*) AS session_count,
+                COALESCE(SUM(total_input_tokens), 0)  AS total_input,
+                COALESCE(SUM(total_output_tokens), 0) AS total_output
+         FROM sessions
+         GROUP BY agent_type",
+    ).map_err(|e| format!("SQL 쿼리 준비 에러: {}", e))?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)? as usize,
+            row.get::<_, i64>(2)? as u64,
+            row.get::<_, i64>(3)? as u64,
+        ))
+    }).map_err(|e| format!("쿼리 실행 에러: {}", e))?;
+
+    for r in rows {
+        let (agent_type, session_count, total_input, total_output) =
+            r.map_err(|e| format!("데이터 매핑 에러: {}", e))?;
+        let target = match agent_type.as_str() {
+            "claude_code" => &mut cc_sum,
+            "codex" => &mut cdx_sum,
+            "antigravity" => &mut agy_sum,
+            _ => continue,
+        };
+        target.session_count = session_count;
+        target.total_input_tokens = total_input;
+        target.total_output_tokens = total_output;
+    }
+
+    // 2) 에이전트별 비용 합 (messages 를 sessions 로 조인해 agent_type 귀속)
+    let mut cost_stmt = conn.prepare(
+        "SELECT s.agent_type, COALESCE(SUM(m.cost_usd), 0.0) AS total_cost
+         FROM sessions s JOIN messages m ON m.session_id = s.session_id
+         GROUP BY s.agent_type",
+    ).map_err(|e| format!("SQL 쿼리 준비 에러: {}", e))?;
+
+    let cost_rows = cost_stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+    }).map_err(|e| format!("쿼리 실행 에러: {}", e))?;
+
+    for r in cost_rows {
+        let (agent_type, total_cost) = r.map_err(|e| format!("데이터 매핑 에러: {}", e))?;
+        match agent_type.as_str() {
+            "claude_code" => cc_sum.total_cost_usd = total_cost,
+            "codex" => cdx_sum.total_cost_usd = total_cost,
+            "antigravity" => agy_sum.total_cost_usd = total_cost,
             _ => {}
         }
     }
@@ -158,12 +216,11 @@ fn get_agent_summaries() -> Result<Vec<AgentSummary>, String> {
 #[tauri::command]
 fn get_loop_signals(days: Option<u32>) -> Result<Vec<LoopDetectionResult>, String> {
     let conn = get_db_conn()?;
-    let sessions = match days {
-        Some(d) => db::get_sessions_within_days(&conn, d)
-            .map_err(|e| format!("세션 로드 에러: {}", e))?,
-        None => db::get_all_sessions(&conn)
-            .map_err(|e| format!("세션 로드 에러: {}", e))?,
-    };
+    // 2N+1 부담을 줄이기 위해 SQL 단계에서 후보 세션을 먼저 좁힌다.
+    // days 미지정 시에도 전체 스캔 대신 최근 14일 윈도우로 제한한다(이상 탐지는 최근/활성 세션이면 충분).
+    let window_days = days.unwrap_or(14);
+    let sessions = db::get_sessions_within_days(&conn, window_days)
+        .map_err(|e| format!("세션 로드 에러: {}", e))?;
 
     let mut anomalies = Vec::new();
     let config = DetectorConfig::default();
@@ -549,7 +606,7 @@ fn get_day_cost_breakdown(date: String) -> Result<DayCostBreakdown, String> {
 fn process_watch_file(
     file_path: &Path,
     pricing_cache: &HashMap<String, agent_token_tracker::model::Pricing>,
-    db_path: &str,
+    conn: &Connection,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path_str = file_path.to_str().unwrap_or("");
     let is_vscdb = path_str.contains("state.vscdb");
@@ -594,22 +651,23 @@ fn process_watch_file(
     }
 
     // DB 갱신 (기존 세션 CASCADE 삭제 후 재생성)
-    let conn = Connection::open(db_path)?;
-    let _ = conn.pragma_update(None, "foreign_keys", "ON");
-    let _ = conn.pragma_update(None, "journal_mode", "WAL");
-    let _ = conn.pragma_update(None, "busy_timeout", &5000);
+    // 파일별 모든 쓰기를 단일 트랜잭션으로 묶어 N+ 회의 autocommit fsync 를
+    // 커밋 1회로 축소한다. 커넥션과 pragma 는 배치 루프에서 1회만 설정한다.
+    let tx = conn.unchecked_transaction()?;
 
-    db::delete_session(&conn, &parsed_session.session.session_id)?;
-    db::insert_session(&conn, &parsed_session.session)?;
+    db::delete_session(conn, &parsed_session.session.session_id)?;
+    db::insert_session(conn, &parsed_session.session)?;
     for msg in &parsed_session.messages {
-        db::insert_message(&conn, msg)?;
+        db::insert_message(conn, msg)?;
     }
     for node in &parsed_session.nodes {
-        db::insert_node(&conn, node)?;
+        db::insert_node(conn, node)?;
     }
     for tc in &parsed_session.tool_calls {
-        db::insert_tool_call(&conn, tc)?;
+        db::insert_tool_call(conn, tc)?;
     }
+
+    tx.commit()?;
 
     Ok(())
 }
@@ -649,15 +707,53 @@ fn default_claude_log_dir(home: &str) -> PathBuf {
 fn default_codex_log_dir(home: &str) -> PathBuf {
     Path::new(home).join(".codex").join("sessions")
 }
-/// Antigravity state.vscdb 기본 경로 (macOS)
+/// Antigravity state.vscdb 기본 경로 (OS별 후보 자동 탐색)
 fn default_antigravity_log_dir(home: &str) -> PathBuf {
-    Path::new(home)
-        .join("Library")
-        .join("Application Support")
-        .join("Code")
-        .join("User")
-        .join("globalStorage")
-        .join("state.vscdb")
+    let mut candidates = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        let base = Path::new(home).join("Library").join("Application Support");
+        candidates.push(base.join("Antigravity IDE").join("User").join("globalStorage").join("state.vscdb"));
+        candidates.push(base.join("Antigravity").join("User").join("globalStorage").join("state.vscdb"));
+        candidates.push(base.join("Code").join("User").join("globalStorage").join("state.vscdb"));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let base = Path::new(&appdata);
+            candidates.push(base.join("Antigravity IDE").join("User").join("globalStorage").join("state.vscdb"));
+            candidates.push(base.join("Antigravity").join("User").join("globalStorage").join("state.vscdb"));
+            candidates.push(base.join("Code").join("User").join("globalStorage").join("state.vscdb"));
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let base = Path::new(home).join(".config");
+        candidates.push(base.join("Antigravity IDE").join("User").join("globalStorage").join("state.vscdb"));
+        candidates.push(base.join("Antigravity").join("User").join("globalStorage").join("state.vscdb"));
+        candidates.push(base.join("Code").join("User").join("globalStorage").join("state.vscdb"));
+    }
+
+    for path in &candidates {
+        if path.exists() {
+            return path.clone();
+        }
+    }
+
+    if let Some(first) = candidates.first() {
+        first.clone()
+    } else {
+        Path::new(home)
+            .join("Library")
+            .join("Application Support")
+            .join("Code")
+            .join("User")
+            .join("globalStorage")
+            .join("state.vscdb")
+    }
 }
 
 /// 에이전트별 로그 경로(설정값 우선 → 없으면 OS 기본 경로 자동 감지)를 취합한다.
@@ -754,7 +850,7 @@ fn get_detected_log_paths(app_handle: AppHandle) -> Result<Vec<DetectedLogPath>,
 }
 
 fn start_watch_loop(app_handle: AppHandle) -> Result<(), String> {
-    let db_path = "../atk.db";
+    let db_path = current_db_path();
 
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |res| {
@@ -801,13 +897,21 @@ fn start_watch_loop(app_handle: AppHandle) -> Result<(), String> {
     println!("[Watch] 총 {}개 경로 백그라운드 파일 감시 시작", watch_count);
 
     let mut last_event_time = Instant::now();
-    let mut pending_files = HashSet::new();
+    let mut pending_files: HashSet<PathBuf> = HashSet::new();
+    // 디바운스 배치가 시작된 시각(첫 파일이 빈 pending_files 에 들어온 순간). 상한(max-wait) 판정에 사용.
+    let mut batch_start: Option<Instant> = None;
+    // 파일별 마지막 처리 시점의 (크기, mtime). notify(특히 macOS FSEvents)의 허위 이벤트를 걸러낸다.
+    let mut last_seen: HashMap<PathBuf, (u64, std::time::SystemTime)> = HashMap::new();
 
     loop {
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(event) => {
                 for p in event.paths {
                     if p.is_file() {
+                        // 빈 pending_files 에 첫 파일이 들어오는 순간 배치 시작 시각을 기록한다.
+                        if pending_files.is_empty() && batch_start.is_none() {
+                            batch_start = Some(Instant::now());
+                        }
                         pending_files.insert(p);
                     }
                 }
@@ -816,43 +920,75 @@ fn start_watch_loop(app_handle: AppHandle) -> Result<(), String> {
             Err(e) => {
                 let err_str = format!("{:?}", e);
                 if err_str.contains("Timeout") {
-                    if !pending_files.is_empty() && last_event_time.elapsed() >= Duration::from_millis(500) {
+                    // 디바운스: 마지막 이벤트 후 500ms 정적 상태이거나, 배치 시작 후 1500ms 상한(max-wait)에
+                    // 도달하면 flush 한다. 상한이 없으면 연속 로깅 상황에서 flush 가 무한정 지연될 수 있다.
+                    let should_flush = !pending_files.is_empty()
+                        && (last_event_time.elapsed() >= Duration::from_millis(500)
+                            || batch_start.map_or(false, |t| t.elapsed() >= Duration::from_millis(1500)));
+
+                    if should_flush {
                         println!("[Watch] 감시 대상 파일 수정 감지, 증분 갱신 및 UI 업데이트 중...");
-                        
-                        let conn = match Connection::open(db_path) {
+
+                        // 배치당 단일 커넥션을 열고 pragma 도 여기서 1회만 설정한다.
+                        let conn = match Connection::open(&db_path) {
                             Ok(c) => c,
                             Err(e) => {
                                 eprintln!("DB 연결 실패: {}", e);
                                 pending_files.clear();
+                                batch_start = None;
                                 continue;
                             }
                         };
+                        let _ = conn.pragma_update(None, "foreign_keys", "ON");
+                        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+                        let _ = conn.pragma_update(None, "busy_timeout", &5000);
 
                         let pricing_map = match db::get_all_pricings(&conn) {
                             Ok(p) => p,
                             Err(e) => {
                                 eprintln!("Pricing 데이터 조회 실패: {}", e);
                                 pending_files.clear();
+                                batch_start = None;
                                 continue;
                             }
                         };
 
+                        let batch_t0 = Instant::now();
+                        let mut processed_count = 0usize;
                         let mut updated_any = false;
                         for file in pending_files.drain() {
                             let path_str = file.to_str().unwrap_or("");
                             let is_vscdb = path_str.contains("state.vscdb");
                             let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
-                            
+
                             if ext != "jsonl" && !is_vscdb {
                                 continue;
                             }
+
+                            // 변경 없는 파일(크기·mtime 동일) 스킵: notify 의 허위 이벤트를 걸러낸다.
+                            // vscdb 는 `?session_id=` 가상 경로가 아닌 실제 파일(file)을 stat 한다.
+                            match std::fs::metadata(&file) {
+                                Ok(meta) => {
+                                    let size = meta.len();
+                                    let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                                    if last_seen.get(&file) == Some(&(size, mtime)) {
+                                        // 실제 변경이 없으므로 파싱·DB 작업 모두 생략
+                                        continue;
+                                    }
+                                    last_seen.insert(file.clone(), (size, mtime));
+                                }
+                                // metadata 실패 시에는 안전하게 처리 진행(누락 방지)
+                                Err(_) => {}
+                            }
+
+                            processed_count += 1;
 
                             if is_vscdb {
                                 if let Ok(ids) = agent_token_tracker::adapters::antigravity::get_vscdb_session_ids(path_str) {
                                     for id in ids {
                                         let virtual_path_str = format!("{}?session_id={}", path_str, id);
                                         let virtual_path = PathBuf::from(virtual_path_str);
-                                        if let Err(e) = process_watch_file(&virtual_path, &pricing_map, db_path) {
+                                        if let Err(e) = process_watch_file(&virtual_path, &pricing_map, &conn) {
                                             eprintln!("vscdb 파일 적재 중 에러: {}", e);
                                         } else {
                                             updated_any = true;
@@ -860,13 +996,23 @@ fn start_watch_loop(app_handle: AppHandle) -> Result<(), String> {
                                     }
                                 }
                             } else {
-                                if let Err(e) = process_watch_file(&file, &pricing_map, db_path) {
+                                if let Err(e) = process_watch_file(&file, &pricing_map, &conn) {
                                     eprintln!("JSONL 파일 적재 중 에러: {}", e);
                                 } else {
                                     updated_any = true;
                                 }
                             }
                         }
+
+                        // 배치 처리 시간 로깅(검증 시 배치당 소요 시간 관측용)
+                        println!(
+                            "[Watch] batch processed {} files in {}ms",
+                            processed_count,
+                            batch_t0.elapsed().as_millis()
+                        );
+
+                        // 다음 배치를 위해 상한 타이머 리셋
+                        batch_start = None;
 
                         if updated_any {
                             println!("[Watch] 증분 갱신 완료. 프론트엔드로 db-updated 이벤트 전송!");
@@ -948,7 +1094,9 @@ fn get_today_cost_and_health(conn: &Connection) -> Result<(f64, bool), String> {
     let today_cost: f64 = stmt.query_row([], |row| row.get(0))
         .map_err(|e| e.to_string())?;
 
-    let sessions = db::get_all_sessions(conn)
+    // 헬스 플래그: 전체 세션을 스캔하지 않고 "오늘"(로컬 일자) 시작 세션만 대상으로 이상 탐지한다.
+    // 트레이 아이콘 색상은 현재 진행 중/최근 세션의 이상 여부만 반영하면 충분하다.
+    let sessions = db::get_sessions_today(conn, &tz)
         .map_err(|e| format!("세션 로드 에러: {}", e))?;
 
     let config = DetectorConfig::default();
@@ -1005,54 +1153,60 @@ fn update_tray_status(app_handle: &AppHandle) {
     }
 }
 
-fn toggle_tray_popover(app: &AppHandle, click_pos: tauri::PhysicalPosition<f64>) {
-    let window = match app.get_webview_window("tray-popover") {
-        Some(w) => w,
-        None => {
-            eprintln!("[Tray] tray-popover 윈도우를 찾을 수 없습니다.");
-            return;
-        }
-    };
-
-    let is_visible = window.is_visible().unwrap_or(false);
-    if is_visible {
-        let _ = window.hide();
-    } else {
-        // macOS 상단 메뉴바 아래에 맞춰 위치 계산
-        // 가로 중앙 맞춤: click_pos.x - (윈도우 너비 320 / 2)
-        // 세로 위치: click_pos.y + 10px 마진
-        let x = click_pos.x - 160.0;
-        let y = click_pos.y + 10.0;
-        
-        let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-            x: x as i32,
-            y: y as i32,
-        }));
-        
-        let _ = window.show();
-        let _ = window.set_focus();
-        
-        // 팝오버가 모든 Space(가상 데스크톱) 및 타 앱의 네이티브 전체화면 위에 표시되도록 설정
-        #[cfg(target_os = "macos")]
-        {
-            use objc::{msg_send, sel, sel_impl};
-
-            // collectionBehavior(CanJoinAllSpaces 등)는 Tauri의 검증된 안전 API로 설정한다.
-            // raw setCollectionBehavior에 상호 배타적 플래그(CanJoinAllSpaces+MoveToActiveSpace)를
-            // 함께 전달하면 AppKit이 NSException을 던지고, 이 ObjC 예외가 Rust로 전파되며
-            // catch_unwind에서 foreign exception으로 처리되어 프로세스가 abort(앱 종료)됐었다.
-            let _ = window.set_visible_on_all_workspaces(true);
-            
-            if let Ok(ns_window) = window.ns_window() {
-                let ns_window_ptr = ns_window as *mut objc::runtime::Object;
-                if !ns_window_ptr.is_null() {
-                    unsafe {
-                        // 메뉴바/전체화면 위에 떠 있도록 NSStatusWindowLevel(25)로 윈도우 레벨 상향.
-                        // setLevel은 단일 NSInteger 스칼라 설정이라 예외를 던지지 않아 안전하다.
-                        let _: () = msg_send![ns_window_ptr, setLevel: 25isize];
-                    }
-                }
+fn toggle_tray_popover(app: &AppHandle, _click_pos: tauri::PhysicalPosition<f64>) {
+    #[cfg(target_os = "macos")]
+    {
+        let panel = match app.get_webview_panel("tray-popover") {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[Tray] tray-popover 패널을 찾을 수 없습니다. 에러: {:?}", e);
+                return;
             }
+        };
+
+        if panel.is_visible() {
+            panel.hide();
+        } else {
+            // 주의: 여기서 NSApplication.activateIgnoringOtherApps 를 호출하면 액세서리 앱이 강제
+            // 활성화되며, 다른 앱이 네이티브 전체화면(별도 Space)일 때 그 Space 에서 벗어나
+            // 팝오버가 보이지 않는다. NonactivatingPanel + show_and_make_key(orderFrontRegardless)
+            // 조합이 앱 활성화 없이 현재 Space 위로 팝오버를 올려주므로 활성화 호출은 하지 않는다.
+            if let Some(window) = app.get_webview_window("tray-popover") {
+                use tauri_plugin_positioner::{WindowExt, Position};
+                if let Err(e) = window.move_window(Position::TrayCenter) {
+                    eprintln!("[Tray] move_window 에러: {:?}", e);
+                }
+            } else {
+                eprintln!("[Tray] get_webview_window('tray-popover')가 None입니다.");
+            }
+            panel.show_and_make_key();
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let window = match app.get_webview_window("tray-popover") {
+            Some(w) => w,
+            None => {
+                eprintln!("[Tray] tray-popover 윈도우를 찾을 수 없습니다.");
+                return;
+            }
+        };
+
+        let is_visible = window.is_visible().unwrap_or(false);
+        if is_visible {
+            let _ = window.hide();
+        } else {
+            let x = click_pos.x - 160.0;
+            let y = click_pos.y + 10.0;
+            
+            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+                x: x as i32,
+                y: y as i32,
+            }));
+            
+            let _ = window.show();
+            let _ = window.set_focus();
         }
     }
 }
@@ -1310,20 +1464,6 @@ fn get_monthly_usage_openai() -> Result<u64, String> {
     Ok(used)
 }
 
-/// 오늘(24시간) OpenAI Codex 토큰 사용량 조회
-fn get_today_usage_openai() -> Result<u64, String> {
-    let conn = get_db_conn()?;
-    let mut stmt = conn.prepare(
-        "SELECT COALESCE(SUM(total_input_tokens + total_output_tokens), 0)
-         FROM sessions
-         WHERE agent_type = 'codex'
-           AND started_at >= datetime('now', '-24 hours')"
-    ).map_err(|e| e.to_string())?;
-    let used: u64 = stmt.query_row([], |r| r.get(0))
-        .map_err(|e| e.to_string())?;
-    Ok(used)
-}
-
 /// 최근 7일(주간) Antigravity 토큰 사용량 조회
 fn get_weekly_usage_antigravity() -> Result<u64, String> {
     let conn = get_db_conn()?;
@@ -1500,52 +1640,240 @@ async fn fetch_claude_usage_from_api(session_key: &str, org_id: &str) -> Result<
     Ok((five_hour_util, five_hour_reset, weekly_util, weekly_reset))
 }
 
+// 모던 OpenAI Usage API(/v1/organization/usage/completions) 응답 구조
+// data[] -> bucket -> results[] (input_tokens/output_tokens), 페이지네이션은 next_page 커서
 #[derive(Debug, Deserialize)]
 struct OpenAIUsageResponse {
-    data: Option<Vec<OpenAIUsageItem>>,
+    data: Option<Vec<OpenAIUsageBucket>>,
+    #[serde(default)]
+    next_page: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenAIUsageItem {
-    n_context_tokens_total: Option<u64>,
-    n_generated_tokens_total: Option<u64>,
+struct OpenAIUsageBucket {
+    results: Option<Vec<OpenAIUsageResult>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIUsageResult {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
 }
 
 async fn fetch_openai_usage_from_api(api_key: &str) -> Result<u64, String> {
+    use chrono::{Datelike, TimeZone};
+
+    // 이번 달 1일 00:00(로컬) 의 unix timestamp(초) 계산 → start_time 파라미터
     let now = chrono::Local::now();
-    let start_date = now.format("%Y-%m-01").to_string();
-    let end_date = now.format("%Y-%m-%d").to_string();
+    let start_naive = chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .ok_or_else(|| "월 시작 시각 계산 실패".to_string())?;
+    let start_ts = chrono::Local
+        .from_local_datetime(&start_naive)
+        .single()
+        .map(|dt| dt.timestamp())
+        .unwrap_or_else(|| now.timestamp());
 
     let client = reqwest::Client::new();
-    let url = format!(
-        "https://api.openai.com/v1/usage?start_date={}&end_date={}",
-        start_date, end_date
-    );
+    let mut total_tokens: u64 = 0;
+    let mut page: Option<String> = None;
 
-    let response = client.get(&url)
-        .bearer_auth(api_key)
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|e| format!("OpenAI API 호출 실패: {}", e))?;
+    // 한 달치(일 단위 버킷, 최대 31개)를 next_page 커서로 페이지네이션하며 합산
+    loop {
+        let mut req = client
+            .get("https://api.openai.com/v1/organization/usage/completions")
+            .bearer_auth(api_key)
+            .header("Accept", "application/json")
+            .query(&[
+                ("start_time", start_ts.to_string()),
+                ("bucket_width", "1d".to_string()),
+                ("limit", "31".to_string()),
+            ]);
+        if let Some(ref p) = page {
+            req = req.query(&[("page", p.as_str())]);
+        }
 
-    if !response.status().is_success() {
-        return Err(format!("OpenAI API 응답 에러, status: {}", response.status()));
-    }
+        let response = req
+            .send()
+            .await
+            .map_err(|e| format!("OpenAI usage API 호출 실패: {}", e))?;
 
-    let usage_res: OpenAIUsageResponse = response.json()
-        .await
-        .map_err(|e| format!("OpenAI JSON 파싱 실패: {}", e))?;
+        let status = response.status();
+        if !status.is_success() {
+            // 401/403 은 대개 일반 키(sk-...)로 Admin 전용 usage 엔드포인트에 접근한 경우
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                return Err(format!(
+                    "OpenAI usage API 권한 없음 (status: {}). 실시간 사용량 조회에는 Admin API 키(sk-admin-...)가 필요합니다.",
+                    status
+                ));
+            }
+            return Err(format!("OpenAI usage API 응답 에러, status: {}", status));
+        }
 
-    let mut total_tokens = 0;
-    if let Some(items) = usage_res.data {
-        for item in items {
-            total_tokens += item.n_context_tokens_total.unwrap_or(0);
-            total_tokens += item.n_generated_tokens_total.unwrap_or(0);
+        let usage_res: OpenAIUsageResponse = response
+            .json()
+            .await
+            .map_err(|e| format!("OpenAI usage JSON 파싱 실패: {}", e))?;
+
+        if let Some(buckets) = usage_res.data {
+            for bucket in buckets {
+                if let Some(results) = bucket.results {
+                    for r in results {
+                        total_tokens += r.input_tokens + r.output_tokens;
+                    }
+                }
+            }
+        }
+
+        match usage_res.next_page {
+            Some(p) if !p.is_empty() => page = Some(p),
+            _ => break,
         }
     }
 
     Ok(total_tokens)
+}
+
+/// Codex rate_limits 단일 윈도우(5시간 또는 주간) 스냅샷
+#[derive(Debug, Clone)]
+struct CodexRateWindow {
+    used_percent: f64,
+    resets_at: i64, // unix seconds
+}
+
+/// Codex 세션 로그(token_count 이벤트)에 기록된 rate_limits 스냅샷
+#[derive(Debug, Clone)]
+struct CodexRateSnapshot {
+    primary: Option<CodexRateWindow>,   // 5시간 롤링 (window_minutes ≈ 300)
+    secondary: Option<CodexRateWindow>, // 주간 롤링 (window_minutes ≈ 10080)
+}
+
+/// unix 초 → ISO8601(UTC, 'Z') 문자열. 프론트 parseServerDate 가 그대로 해석한다.
+fn unix_to_iso_z(ts: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Utc
+        .timestamp_opt(ts, 0)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_default()
+}
+
+/// 디렉토리를 재귀 순회하며 *.jsonl 파일을 (수정시각, 경로)로 수집
+fn collect_codex_jsonl_files(dir: &Path, out: &mut Vec<(std::time::SystemTime, PathBuf)>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect_codex_jsonl_files(&p, out);
+            } else if p.extension().map(|x| x == "jsonl").unwrap_or(false) {
+                let mtime = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                out.push((mtime, p));
+            }
+        }
+    }
+}
+
+/// 한 rollout 파일에서 가장 최신(line timestamp 최대)의 rate_limits 스냅샷을 파싱
+fn parse_latest_rate_limit_in_file(path: &Path) -> Option<CodexRateSnapshot> {
+    fn parse_window(w: &serde_json::Value) -> Option<CodexRateWindow> {
+        let used = w.get("used_percent")?.as_f64()?;
+        let resets = w.get("resets_at").and_then(|x| x.as_i64()).unwrap_or(0);
+        Some(CodexRateWindow {
+            used_percent: used,
+            resets_at: resets,
+        })
+    }
+
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut latest_ts: i64 = i64::MIN;
+    let mut latest: Option<CodexRateSnapshot> = None;
+    for line in content.lines() {
+        if !line.contains("rate_limits") {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let payload = match v.get("payload") {
+            Some(p) => p,
+            None => continue,
+        };
+        if payload.get("type").and_then(|t| t.as_str()) != Some("token_count") {
+            continue;
+        }
+        let rl = match payload.get("rate_limits") {
+            Some(r) => r,
+            None => continue,
+        };
+        let line_ts = v
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.timestamp())
+            .unwrap_or(0);
+        if line_ts >= latest_ts {
+            latest_ts = line_ts;
+            latest = Some(CodexRateSnapshot {
+                primary: rl.get("primary").and_then(parse_window),
+                secondary: rl.get("secondary").and_then(parse_window),
+            });
+        }
+    }
+    latest
+}
+
+/// ~/.codex/sessions 의 rollout 로그에서 가장 최근 rate_limits 스냅샷을 읽는다.
+/// Codex CLI 가 token_count 이벤트에 5h(primary)/주간(secondary) 소진율을 기록하므로
+/// 네트워크 호출이나 비공식 API 없이 순수 로컬 파일만으로 실시간 사용률을 얻을 수 있다.
+fn get_latest_codex_rate_limits(codex_log_dir: &str) -> Option<CodexRateSnapshot> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if !codex_log_dir.is_empty() {
+        roots.push(PathBuf::from(codex_log_dir));
+    } else if !home.is_empty() {
+        roots.push(default_codex_log_dir(&home));
+        roots.push(Path::new(&home).join(".codex").join("archived_sessions"));
+    }
+
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for root in &roots {
+        collect_codex_jsonl_files(root, &mut files);
+    }
+    // 최근 수정 파일 우선으로 정렬 후, 최신 파일부터 첫 스냅샷을 채택
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in files.iter().take(12) {
+        if let Some(snap) = parse_latest_rate_limit_in_file(path) {
+            return Some(snap);
+        }
+    }
+    None
+}
+
+// OpenAI 키 유효성 검증: 실시간 사용량 엔드포인트(Admin 전용) 접근 가능 여부로 판정.
+// 일반 키(sk-...)는 이 엔드포인트에 접근할 수 없어 false, Admin 키(sk-admin-...)만 통과한다.
+async fn validate_openai_usage_access(api_key: &str) -> Result<bool, String> {
+    let client = reqwest::Client::new();
+    let start_ts = chrono::Utc::now().timestamp() - 86_400; // 최근 24h 범위로 접근 권한만 확인
+    let response = client
+        .get("https://api.openai.com/v1/organization/usage/completions")
+        .bearer_auth(api_key)
+        .header("Accept", "application/json")
+        .query(&[
+            ("start_time", start_ts.to_string()),
+            ("limit", "1".to_string()),
+        ])
+        .send()
+        .await;
+    match response {
+        Ok(resp) => Ok(resp.status().as_u16() == 200),
+        Err(_) => Err("OpenAI API 서버에 접근할 수 없습니다.".to_string()),
+    }
 }
 
 fn get_today_usage_antigravity() -> Result<u64, String> {
@@ -1681,61 +2009,97 @@ async fn get_subscription_quota(app_handle: AppHandle) -> Result<Vec<PlanQuotaIn
         weekly_reset_at: claude_weekly_reset,
     });
 
-    // ── OpenAI Codex (5시간 롤링 윈도우) ──
-    let codex_used = get_rolling_window_usage_for_agent("codex", 5).unwrap_or(0);
+    // ── OpenAI Codex (실시간 rate_limits: 5시간 primary + 주간 secondary 롤링 윈도우) ──
+    // 기본값은 로컬 DB 집계. Codex 세션 로그의 rate_limits 스냅샷이 있으면 실시간 소진율로 덮어쓴다.
     let codex_quota = settings.token_limit_codex;
-    let codex_remaining = codex_quota.saturating_sub(codex_used);
-    let codex_pct = if codex_quota == 0 {
+    let mut codex_used = get_rolling_window_usage_for_agent("codex", 5).unwrap_or(0);
+    let mut codex_pct = if codex_quota == 0 {
         0.0
     } else {
         (codex_used as f64 / codex_quota as f64 * 100.0).min(100.0)
     };
-    let codex_reset_at = calc_window_reset_at_for_agent("codex", 5).unwrap_or(None);
+    let mut codex_reset_at = calc_window_reset_at_for_agent("codex", 5).unwrap_or(None);
 
-    let mut openai_used = get_monthly_usage_openai().unwrap_or(0);
     let (openai_quota, openai_label) = openai_tier_quota(&settings.openai_plan);
-
-    // 키체인 혹은 환경변수에서 OpenAI API Key 획득 시도
-    let mut resolved_openai_key = None;
-    if let Ok(entry) = Entry::new("agent-token-tracker", "openai") {
-        if let Ok(api_key) = entry.get_password() {
-            let trimmed = api_key.trim().to_string();
-            if !trimmed.is_empty() {
-                resolved_openai_key = Some(trimmed);
-            }
-        }
-    }
-
-    if resolved_openai_key.is_none() {
-        if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
-            let trimmed = api_key.trim().to_string();
-            if !trimmed.is_empty() {
-                resolved_openai_key = Some(trimmed);
-            }
-        }
-    }
-
-    if let Some(api_key) = resolved_openai_key {
-        println!("[Quota] OpenAI API 키를 활용하여 OpenAI 실시간 사용량 조회를 시작합니다.");
-        match fetch_openai_usage_from_api(&api_key).await {
-            Ok(total_tokens) => {
-                println!("[Quota] OpenAI 실시간 조회 성공: total_tokens = {}", total_tokens);
-                openai_used = total_tokens;
-            }
-            Err(e) => {
-                eprintln!("[Quota] OpenAI 실시간 usage API 호출 실패 (로컬 DB 폴백 사용): {}", e);
-            }
-        }
-    } else {
-        println!("[Quota] 유효한 OpenAI API 키를 발견하지 못했습니다. 로컬 DB 집계를 사용합니다.");
-    }
-
-    let openai_remaining = openai_quota.saturating_sub(openai_used);
-    let openai_pct = if openai_quota == 0 {
+    let mut openai_used = get_monthly_usage_openai().unwrap_or(0);
+    let mut openai_pct = if openai_quota == 0 {
         0.0
     } else {
         (openai_used as f64 / openai_quota as f64 * 100.0).min(100.0)
     };
+    let mut weekly_reset_at: Option<String> = None;
+
+    let now_ts = chrono::Local::now().timestamp();
+    if let Some(snap) = get_latest_codex_rate_limits(&settings.codex_log_dir) {
+        // Codex CLI 가 로컬 로그에 기록한 5시간/주간 소진율을 그대로 사용
+        // (Claude 웹 usage 방식과 동일 철학이나 네트워크 없이 순수 로컬).
+        if let Some(p) = &snap.primary {
+            if p.resets_at > now_ts {
+                codex_pct = p.used_percent.min(100.0);
+                codex_used = (codex_quota as f64 * codex_pct / 100.0) as u64;
+                codex_reset_at = Some(unix_to_iso_z(p.resets_at));
+            } else {
+                // 스냅샷 이후 5시간 윈도우가 이미 리셋됨 → 현재 소진율 0 으로 간주
+                codex_pct = 0.0;
+                codex_used = 0;
+            }
+        }
+        if let Some(s) = &snap.secondary {
+            if s.resets_at > now_ts {
+                openai_pct = s.used_percent.min(100.0);
+                openai_used = (openai_quota as f64 * openai_pct / 100.0) as u64;
+                weekly_reset_at = Some(unix_to_iso_z(s.resets_at));
+            } else {
+                openai_pct = 0.0;
+                openai_used = 0;
+            }
+        }
+        println!(
+            "[Quota] Codex 실시간(로컬 로그) 조회 성공: 5h = {:.1}%, 주간 = {:.1}%",
+            codex_pct, openai_pct
+        );
+    } else {
+        // rate_limits 로컬 스냅샷이 없으면(Codex 미사용/로그 없음) Admin API 키가 있을 때 API usage 로 폴백
+        let mut resolved_openai_key = None;
+        if let Ok(entry) = Entry::new("agent-token-tracker", "openai") {
+            if let Ok(api_key) = entry.get_password() {
+                let trimmed = api_key.trim().to_string();
+                if !trimmed.is_empty() {
+                    resolved_openai_key = Some(trimmed);
+                }
+            }
+        }
+        if resolved_openai_key.is_none() {
+            if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
+                let trimmed = api_key.trim().to_string();
+                if !trimmed.is_empty() {
+                    resolved_openai_key = Some(trimmed);
+                }
+            }
+        }
+        if let Some(api_key) = resolved_openai_key {
+            println!("[Quota] Codex 로컬 로그 없음 → OpenAI Admin API 키로 사용량 조회 시도");
+            match fetch_openai_usage_from_api(&api_key).await {
+                Ok(total_tokens) => {
+                    openai_used = total_tokens;
+                    openai_pct = if openai_quota == 0 {
+                        0.0
+                    } else {
+                        (openai_used as f64 / openai_quota as f64 * 100.0).min(100.0)
+                    };
+                    println!("[Quota] OpenAI 실시간 조회 성공: total_tokens = {}", total_tokens);
+                }
+                Err(e) => {
+                    eprintln!("[Quota] OpenAI 실시간 usage API 호출 실패 (로컬 DB 폴백 사용): {}", e);
+                }
+            }
+        } else {
+            println!("[Quota] Codex rate_limits 로컬 스냅샷·OpenAI 키 모두 없음 → 로컬 DB 집계 사용");
+        }
+    }
+
+    let codex_remaining = codex_quota.saturating_sub(codex_used);
+    let openai_remaining = openai_quota.saturating_sub(openai_used);
 
     result.push(PlanQuotaInfo {
         provider: "openai".to_string(),
@@ -1746,12 +2110,12 @@ async fn get_subscription_quota(app_handle: AppHandle) -> Result<Vec<PlanQuotaIn
         remaining_tokens: codex_remaining,
         usage_pct: codex_pct,
         window_reset_at: codex_reset_at,
-        window_hours: 5, 
+        window_hours: 5,
         weekly_quota_tokens: Some(openai_quota),
         weekly_used_tokens: Some(openai_used),
         weekly_remaining_tokens: Some(openai_remaining),
         weekly_usage_pct: Some(openai_pct),
-        weekly_reset_at: None,
+        weekly_reset_at,
     });
 
     // ── Antigravity (24시간 누적) ──
@@ -1864,10 +2228,9 @@ pub struct SessionAnalysis {
 fn get_session_analysis(session_id: String) -> Result<SessionAnalysis, String> {
     let conn = get_db_conn()?;
 
-    // 세션 기본 정보
-    let sessions = db::get_all_sessions(&conn)
-        .map_err(|e| format!("세션 조회 실패: {}", e))?;
-    let sess = sessions.into_iter().find(|s| s.session_id == session_id)
+    // 세션 기본 정보 (전체 스캔 대신 단건 조회)
+    let sess = db::get_session(&conn, &session_id)
+        .map_err(|e| format!("세션 조회 실패: {}", e))?
         .ok_or_else(|| format!("세션 ID를 찾을 수 없습니다: {}", session_id))?;
 
     // 메시지 조회
@@ -2302,24 +2665,8 @@ async fn validate_stored_api_key(provider: String) -> Result<bool, String> {
             Err(_) => Err("Anthropic API 서버에 접근할 수 없습니다.".to_string()),
         }
     } else {
-        let response = client.get("https://api.openai.com/v1/models")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .send()
-            .await;
-
-        match response {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                if status == 200 {
-                    Ok(true)
-                } else if status == 401 {
-                    Ok(false)
-                } else {
-                    Ok(false)
-                }
-            }
-            Err(_) => Err("OpenAI API 서버에 접근할 수 없습니다.".to_string()),
-        }
+        // 실시간 사용량 엔드포인트(Admin 전용) 접근 가능 여부로 판정
+        validate_openai_usage_access(&api_key).await
     }
 }
 
@@ -2374,24 +2721,8 @@ async fn validate_api_key_value(provider: String, api_key: String) -> Result<boo
             return Ok(true);
         }
 
-        let response = client.get("https://api.openai.com/v1/models")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .send()
-            .await;
-
-        match response {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                if status == 200 {
-                    Ok(true)
-                } else if status == 401 {
-                    Ok(false)
-                } else {
-                    Ok(false)
-                }
-            }
-            Err(_) => Err("OpenAI API 서버에 접근할 수 없습니다.".to_string()),
-        }
+        // 실시간 사용량 엔드포인트(Admin 전용) 접근 가능 여부로 판정
+        validate_openai_usage_access(&api_key).await
     }
 }
 
@@ -2429,7 +2760,7 @@ async fn sync_local_sessions_impl(app_handle: AppHandle) -> Result<SyncResult, S
     if let Ok(cwd) = std::env::current_dir() {
         println!("[Sync] Current working directory: {:?}", cwd);
     }
-    let db_path = "../atk.db";
+    let db_path = current_db_path();
     
     // 1. 설정 log_dir + OS별 기본 에이전트 경로를 자동 감지 (watcher와 동일 로직 공유)
     let target_paths = detect_log_paths(&app_handle);
@@ -2445,11 +2776,15 @@ async fn sync_local_sessions_impl(app_handle: AppHandle) -> Result<SyncResult, S
     }
     println!("[Sync] Collected {} files total", files.len());
     
-    let conn = Connection::open(db_path)
+    let conn = Connection::open(&db_path)
         .map_err(|e| format!("DB 연결 실패: {}", e))?;
+    // process_watch_file 이 CASCADE 삭제를 트랜잭션으로 수행하므로 pragma 를 1회 설정한다.
+    let _ = conn.pragma_update(None, "foreign_keys", "ON");
+    let _ = conn.pragma_update(None, "journal_mode", "WAL");
+    let _ = conn.pragma_update(None, "busy_timeout", &5000);
     let pricing_map = db::get_all_pricings(&conn)
         .map_err(|e| format!("단가 로드 실패: {}", e))?;
-    
+
     let mut result = SyncResult {
         files_total: files.len(),
         sessions_inserted: 0,
@@ -2479,7 +2814,7 @@ async fn sync_local_sessions_impl(app_handle: AppHandle) -> Result<SyncResult, S
                     
                     let virtual_path_str = format!("{}?session_id={}", path_str, id);
                     let virtual_path = PathBuf::from(virtual_path_str);
-                    if let Err(e) = process_watch_file(&virtual_path, &pricing_map, db_path) {
+                    if let Err(e) = process_watch_file(&virtual_path, &pricing_map, &conn) {
                         println!("[Sync] vscdb insert failed for {}: {:?}", id, e);
                         result.sessions_failed += 1;
                     } else {
@@ -2825,60 +3160,210 @@ fn get_token_usage_breakdown(days: Option<u32>) -> Result<TokenUsageBreakdown, S
     })
 }
 
+#[cfg(target_os = "macos")]
+tauri_panel! {
+    panel!(Panel {
+        config: {
+            can_become_key_window: true,
+            can_become_main_window: false
+        }
+    })
+    panel_event!(PanelEventHandler {})
+}
+
 fn main() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.plugin(tauri_nspanel::init());
+    }
+
+    builder = builder.plugin(tauri_plugin_positioner::init());
+
+    builder
         .setup(|app| {
             let app_handle = app.handle().clone();
 
-            // macOS의 경우 백그라운드 트레이 전용 모드(Accessory)로 시작
+            // 0. DB 경로를 시작 시 1회 결정한다(설치 앱은 cwd 불확실 → 절대경로 필요).
+            //    워치 루프/동기화/모든 커맨드가 이 경로를 공유하며, 스키마를 미리 보장한다.
+            let _ = DB_PATH.set(resolve_db_path(&app_handle));
+            if let Err(e) = get_db_conn() {
+                eprintln!("[DB] 초기 스키마 보장 실패: {}", e);
+            }
+
+            // 1. macOS의 경우 백그라운드 트레이 전용 모드(Accessory)로 시작 (윈도우 생성 전 필수 적용)
             #[cfg(target_os = "macos")]
             let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // 2. 프로그램적으로 main 윈도우 생성
+            let main_win = tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::App("index.html".into())
+            )
+            .title("Agent Token Tracker")
+            .inner_size(1000.0, 800.0)
+            .min_inner_size(950.0, 700.0)
+            .resizable(true)
+            .fullscreen(false)
+            .build()
+            .expect("Failed to create main window");
+
             // 메인 윈도우의 CloseRequested 이벤트를 가로채어 창을 숨기고 Accessory 모드로 복구
-            if let Some(main_win) = app.get_webview_window("main") {
-                let main_clone = main_win.clone();
-                let app_handle_clone = app_handle.clone();
-                main_win.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = main_clone.hide();
-                        #[cfg(target_os = "macos")]
-                        let _ = app_handle_clone.set_activation_policy(tauri::ActivationPolicy::Accessory);
-                    }
-                });
-            }
+            let main_clone = main_win.clone();
+            let app_handle_clone = app_handle.clone();
+            main_win.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = main_clone.hide();
+                    #[cfg(target_os = "macos")]
+                    let _ = app_handle_clone.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                }
+            });
 
             // 팝오버 닫힘 시간 추적을 위한 스레드 안전 변수
             let last_hide = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now() - std::time::Duration::from_secs(1)));
             let last_hide_for_blur = last_hide.clone();
             let last_hide_for_click = last_hide.clone();
 
-            // 1. 트레이 팝오버 윈도우 획득 및 blur 이벤트 핸들링
-            if let Some(popover) = app.get_webview_window("tray-popover") {
-                let popover_clone = popover.clone();
-                popover.on_window_event(move |event| {
-                    if let tauri::WindowEvent::Focused(false) = event {
-                        let _ = popover_clone.hide();
-                        if let Ok(mut last) = last_hide_for_blur.lock() {
-                            *last = std::time::Instant::now();
-                        }
-                    }
-                });
+            // 3. 프로그램적으로 tray-popover 윈도우 생성
+            let popover_builder = tauri::WebviewWindowBuilder::new(
+                app,
+                "tray-popover",
+                tauri::WebviewUrl::App("index.html?mode=tray".into())
+            )
+            .title("Tray Popover")
+            .inner_size(320.0, 360.0)
+            .resizable(false)
+            .decorations(false)
+            .always_on_top(true)
+            .visible(false)
+            .transparent(true)
+            .skip_taskbar(true);
 
-                // macOS의 경우 모든 가상 데스크톱(Spaces)에 창이 함께 참여하도록 활성화
-                #[cfg(target_os = "macos")]
-                let _ = popover.set_visible_on_all_workspaces(true);
+            #[cfg(target_os = "macos")]
+            let popover_builder = popover_builder.visible_on_all_workspaces(true);
+
+            let popover = popover_builder.build().expect("Failed to create tray-popover window");
+            
+            #[cfg(target_os = "macos")]
+            {
+                match popover.to_panel::<Panel>() {
+                    Ok(panel) => {
+                        // hides_on_deactivate 는 끈다. NonactivatingPanel 로 만들면 팝오버를 띄워도
+                        // 앱이 활성화되지 않으므로, 이 값이 true 면 "앱 비활성" 상태로 간주되어
+                        // 팝오버가 즉시 숨겨진다(=팝업이 안 보임). 외부 클릭 시 닫힘은 아래
+                        // Focused(false) 윈도우 이벤트 핸들러가 처리한다.
+                        panel.set_hides_on_deactivate(false);
+                        panel.set_floating_panel(true);
+
+                        // 전체화면 및 모든 Spaces에서 보일 수 있도록 윈도우 레벨 설정 (Status 레벨 = 25)
+                        panel.set_level(tauri_nspanel::PanelLevel::Status.value());
+
+                        // 다른 앱이 네이티브 전체화면(별도 Space)일 때도 팝오버가 보이도록
+                        // NonactivatingPanel 스타일 마스크 적용 — 패널이 앱을 활성화(=Space 전환)시키지
+                        // 않고 현재 Space 위에 그대로 표시되게 한다. (앱 강제 활성화 시 풀스크린 Space에서
+                        // 벗어나 팝오버가 보이지 않던 문제 해결)
+                        panel.set_style_mask(
+                            tauri_nspanel::StyleMask::empty().nonactivating_panel().into(),
+                        );
+
+                        // 컬렉션 비헤이비어 설정 (모든 가상 화면, 전체화면 공간 지원 및 고정)
+                        let mut behavior = tauri_nspanel::CollectionBehavior::new();
+                        behavior = behavior.can_join_all_spaces().full_screen_auxiliary().stationary();
+                        panel.set_collection_behavior(behavior.into());
+                    }
+                    Err(e) => {
+                        eprintln!("[Tray] Failed to convert window to NSPanel: {:?}", e);
+                    }
+                }
             }
 
-            // 2. 트레이 아이콘 초기 설정
+            let popover_clone = popover.clone();
+            popover.on_window_event(move |event| {
+                if let tauri::WindowEvent::Focused(false) = event {
+                    #[cfg(target_os = "macos")]
+                    {
+                        // hides_on_deactivate가 처리하지만, tauri 윈도우 가시성 동기화를 명시적으로 hide
+                        let _ = popover_clone.hide();
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        let _ = popover_clone.hide();
+                    }
+                    if let Ok(mut last) = last_hide_for_blur.lock() {
+                        *last = std::time::Instant::now();
+                    }
+                }
+            });
+
+            // macOS의 경우 모든 가상 데스크톱(Spaces)에 창이 함께 참여하도록 활성화
+            #[cfg(target_os = "macos")]
+            let _ = popover.set_visible_on_all_workspaces(true);
+
+            // 2. 트레이 아이콘 초기 설정 및 콘텍스트 메뉴 생성
             let icon_green_bytes = include_bytes!("../icons/icon_green.png");
             let initial_icon = tauri::image::Image::from_bytes(icon_green_bytes)
                 .expect("Green icon load failed");
 
+            // 트레이 우클릭 콘텍스트 메뉴 구성
+            use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+            
+            let open_board_i = MenuItem::with_id(app, "open_board", "보드 열기", true, None::<&str>)?;
+            let open_mcp_manager_i = MenuItem::with_id(app, "open_mcp_manager", "MCP 매니저 열기", true, None::<&str>)?;
+            let restart_mcp_i = MenuItem::with_id(app, "restart_mcp", "MCP 재시작", true, None::<&str>)?;
+            let stop_mcp_i = MenuItem::with_id(app, "stop_mcp", "MCP 정지", true, None::<&str>)?;
+            let separator_i = PredefinedMenuItem::separator(app)?;
+            let quit_i = MenuItem::with_id(app, "quit", "종료", true, Some("CmdOrCtrl+Q"))?;
+
+            let tray_menu = Menu::with_items(
+                app,
+                &[
+                    &open_board_i,
+                    &open_mcp_manager_i,
+                    &restart_mcp_i,
+                    &stop_mcp_i,
+                    &separator_i,
+                    &quit_i,
+                ],
+            )?;
+
             let _tray = tauri::tray::TrayIconBuilder::with_id("main-tray")
                 .icon(initial_icon)
                 .title("$0.00")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(move |app, event| {
+                    match event.id().as_ref() {
+                        "open_board" => {
+                            if let Some(main_window) = app.get_webview_window("main") {
+                                #[cfg(target_os = "macos")]
+                                let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+
+                                let _ = main_window.show();
+                                let _ = main_window.unminimize();
+                                let _ = main_window.set_focus();
+                            }
+                        }
+                        "open_mcp_manager" => {
+                            println!("[TrayMenu] MCP 매니저 열기 클릭됨");
+                        }
+                        "restart_mcp" => {
+                            println!("[TrayMenu] MCP 재시작 클릭됨");
+                        }
+                        "stop_mcp" => {
+                            println!("[TrayMenu] MCP 정지 클릭됨");
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
                 .on_tray_icon_event(move |tray: &tauri::tray::TrayIcon, event: tauri::tray::TrayIconEvent| {
+                    tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
+
                     if let tauri::tray::TrayIconEvent::Click { button, button_state, position, .. } = event {
                         if button == tauri::tray::MouseButton::Left && button_state == tauri::tray::MouseButtonState::Up {
                             if let Ok(last) = last_hide_for_click.lock() {

@@ -235,11 +235,18 @@ fn main() {
                         }
                         Err(err) => {
                             let mut res = accumulator.lock().unwrap();
-                            // 이미 존재하는 세션(already_exists) 스킵인 경우
                             let err_str = err.to_string();
                             if err_str.contains("already_exists") {
                                 res.sessions_skipped += 1;
                                 *res.skip_reasons.entry("already_exists".to_string()).or_insert(0) += 1;
+                            } else if err_str.contains("database is locked") || err_str.contains("db_locked") || err_str.contains("busy") {
+                                res.sessions_skipped += 1;
+                                res.warnings.push(format!("DB 잠금 스킵 [{}]: {}", file_path.display(), err));
+                                *res.skip_reasons.entry("db_locked".to_string()).or_insert(0) += 1;
+                            } else if err_str.contains("permission denied") || err_str.contains("PermissionDenied") || err_str.contains("permission_denied") {
+                                res.sessions_skipped += 1;
+                                res.warnings.push(format!("권한 오류 스킵 [{}]: {}", file_path.display(), err));
+                                *res.skip_reasons.entry("permission_denied".to_string()).or_insert(0) += 1;
                             } else {
                                 res.sessions_failed += 1;
                                 res.warnings.push(format!("파일 파싱 실패 [{}]: {}", file_path.display(), err));

@@ -463,3 +463,98 @@ fn price_fixture_parsed_usage_stored_in_db() {
     assert_eq!(stored_asst.cache_read_input_tokens, 1500);
     assert_eq!(stored_asst.output_tokens, 600);
 }
+
+/// [AGY-P-01] AntigravityAdapter Mock SQLite 파싱 및 Graceful Degrade 검증
+#[test]
+fn test_antigravity_adapter_parsing() {
+    use agent_token_tracker::adapters::antigravity::{
+        AntigravityAdapter, UnifiedState, TrajectorySummary, InnerSummary,
+        TrajectorySummaryDetail, WorkspaceInfo
+    };
+    use agent_token_tracker::adapters::LogAdapter;
+    use prost::Message;
+    use base64::Engine;
+
+    // 1. 임시 SQLite 파일 경로 설정
+    let mut temp_db = std::env::temp_dir();
+    temp_db.push("mock_antigravity_state.vscdb");
+    let temp_db_path = temp_db.to_str().unwrap().to_string();
+
+    // 혹시 기존 파일이 있으면 삭제
+    let _ = std::fs::remove_file(&temp_db_path);
+
+    // 2. SQLite DB 생성 및 테이블 설정
+    let conn = rusqlite::Connection::open(&temp_db_path).unwrap();
+    conn.execute(
+        "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)",
+        [],
+    ).unwrap();
+
+    // 3. Mock Protobuf 데이터 구성
+    let conversation_id = "test-session-uuid-12345";
+    
+    // TrajectorySummaryDetail 구성
+    let detail = TrajectorySummaryDetail {
+        title: "Mock Conversation Title".to_string(),
+        step_count: 5,
+        created_at: None,
+        conversation_id: conversation_id.to_string(),
+        started_at: None,
+        workspace_info: Some(WorkspaceInfo {
+            workspace_root: Some("/Users/mock/project".to_string()),
+            workspace_uri: None,
+            git_info_raw: None,
+        }),
+        updated_at: None,
+    };
+    
+    let mut detail_buf = Vec::new();
+    detail.encode(&mut detail_buf).unwrap();
+    let detail_b64 = base64::engine::general_purpose::STANDARD.encode(&detail_buf);
+
+    // UnifiedState 구성
+    let inner_summary = InnerSummary {
+        detail_b64,
+    };
+    let summary = TrajectorySummary {
+        conversation_id: conversation_id.to_string(),
+        inner: Some(inner_summary),
+    };
+    let unified_state = UnifiedState {
+        summaries: vec![summary],
+    };
+
+    let mut state_buf = Vec::new();
+    unified_state.encode(&mut state_buf).unwrap();
+    let value_b64 = base64::engine::general_purpose::STANDARD.encode(&state_buf);
+
+    // 4. DB에 적재
+    conn.execute(
+        "INSERT INTO ItemTable (key, value) VALUES ('antigravityUnifiedStateSync.trajectorySummaries', ?1)",
+        rusqlite::params![value_b64],
+    ).unwrap();
+    drop(conn); // 파일 핸들 해제
+
+    // 5. AntigravityAdapter 로 파싱 테스트
+    let adapter = AntigravityAdapter;
+    let virtual_path = format!("{}?session_id={}", temp_db_path, conversation_id);
+    let parsed_res = adapter.parse_session(&virtual_path).expect("Antigravity mock 파싱 실패");
+
+    // 6. 결과 단언문(Assertion) 검증
+    assert_eq!(parsed_res.session.session_id, conversation_id);
+    assert_eq!(parsed_res.session.agent_type, "antigravity");
+    assert_eq!(parsed_res.session.token_source, "unavailable");
+    assert_eq!(parsed_res.session.total_input_tokens, 0);
+    assert_eq!(parsed_res.session.total_output_tokens, 0);
+    assert_eq!(parsed_res.session.cwd, "/Users/mock/project");
+    assert_eq!(parsed_res.session.session_name, Some("Mock Conversation Title".to_string()));
+    assert_eq!(parsed_res.nodes.len(), 5);
+    for node in parsed_res.nodes {
+        assert_eq!(node.session_id, conversation_id);
+        assert_eq!(node.node_type, "text");
+        assert!(node.success);
+    }
+
+    // 7. 임시 파일 정리
+    let _ = std::fs::remove_file(&temp_db_path);
+}

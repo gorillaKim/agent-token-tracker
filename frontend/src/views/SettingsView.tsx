@@ -1,7 +1,19 @@
 import { useState, useEffect, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { toast } from "sonner";
-import { PlanQuotaInfo, DetectedCredential, DetectedLogPath } from "../types";
+import { DetectedCredential } from "../types";
+import { useSubscriptionQuota } from "../hooks/queries/useQuotaQuery";
+import { useSettings } from "../hooks/queries/useSettingsQuery";
+import {
+  useApiKeysStatus,
+  useLocalCredentials,
+  useDetectedLogPaths,
+} from "../hooks/queries/useSettingsDiagnostics";
+import {
+  useSaveSettings,
+  useSaveApiKey,
+  useDeleteApiKey,
+  useAutoApplyCredential,
+} from "../hooks/mutations/useSettingsMutations";
 import { formatTokens, formatResetTime } from "../utils/formatters";
 import { cn } from "@/lib/utils";
 import { Card } from "@/components/ui/card";
@@ -27,7 +39,6 @@ import {
 } from "lucide-react";
 
 interface SettingsViewProps {
-  onSettingsSaved: () => Promise<void>;
   activeSection: string;
 }
 
@@ -70,7 +81,7 @@ function StatusBadge({ kind, children }: { kind: StatusKind; children: ReactNode
  *
  * 로그 디렉토리 감시 경로 설정, 수동 API Key 관리 및 로컬 키체인/설정 파일 자동 크리덴셜 연동과 검증 등을 처리합니다.
  */
-export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewProps) {
+export function SettingsView({ activeSection }: SettingsViewProps) {
   const [settings, setSettings] = useState({
     log_dir: "",
     claude_log_dir: "",
@@ -85,8 +96,29 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
     token_display_mode: "tokens",
     refresh_interval: 3,
   });
-  const [keysStatus, setKeysStatus] = useState({ anthropic: false, openai: false });
-  const [quotaInfo, setQuotaInfo] = useState<PlanQuotaInfo[]>([]);
+  // 읽기 데이터는 React Query (quota 는 대시보드와 캐시 공유)
+  const settingsQ = useSettings();
+  const keysStatusQ = useApiKeysStatus();
+  const quotaQ = useSubscriptionQuota();
+  const credsQ = useLocalCredentials();
+  const logPathsQ = useDetectedLogPaths();
+
+  const keysStatus = {
+    anthropic: keysStatusQ.data?.anthropic ?? false,
+    openai: keysStatusQ.data?.openai ?? false,
+  };
+  const quotaInfo = quotaQ.data ?? [];
+  const localCreds = credsQ.data ?? [];
+  const logPaths = logPathsQ.data ?? [];
+  const scanLoading = credsQ.isFetching;
+  const logPathScanLoading = logPathsQ.isFetching;
+
+  // 저장/연동 mutation
+  const saveSettingsMutation = useSaveSettings();
+  const saveApiKeyMutation = useSaveApiKey();
+  const deleteApiKeyMutation = useDeleteApiKey();
+  const autoApplyMutation = useAutoApplyCredential();
+
   const [anthropicKey, setAnthropicKey] = useState("");
   const [openaiKey, setOpenAIKey] = useState("");
 
@@ -100,10 +132,6 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
     path: false,
   });
 
-  const [localCreds, setLocalCreds] = useState<DetectedCredential[]>([]);
-  const [scanLoading, setScanLoading] = useState(false);
-  const [logPaths, setLogPaths] = useState<DetectedLogPath[]>([]);
-  const [logPathScanLoading, setLogPathScanLoading] = useState(false);
   const [logPathDrafts, setLogPathDrafts] = useState<Record<string, string>>({});
   const [applyLoading, setApplyLoading] = useState<Record<number, boolean>>({});
   const [testLoading, setTestLoading] = useState<Record<number, boolean>>({});
@@ -111,34 +139,14 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
     Record<number, { checked: boolean; valid: boolean | null; error?: string }>
   >({});
 
-  const handleScanCredentials = async () => {
-    setScanLoading(true);
-    try {
-      const creds = await invoke<DetectedCredential[]>("get_local_credentials");
-      setLocalCreds(creds);
-    } catch (e) {
-      console.error("로컬 자격 증명 스캔 실패:", e);
-    } finally {
-      setScanLoading(false);
-    }
+  // 로컬 자격 증명 재스캔 (쿼리 refetch — 로딩은 credsQ.isFetching)
+  const handleScanCredentials = () => {
+    credsQ.refetch();
   };
 
-  const handleScanLogPaths = async () => {
-    setLogPathScanLoading(true);
-    try {
-      const paths = await invoke<DetectedLogPath[]>("get_detected_log_paths");
-      setLogPaths(paths);
-      // 입력 초안을 현재 설정값으로 동기화
-      const drafts: Record<string, string> = {};
-      paths.forEach((p) => {
-        drafts[p.agent] = p.configured_path;
-      });
-      setLogPathDrafts(drafts);
-    } catch (e) {
-      console.error("세션 로그 경로 스캔 실패:", e);
-    } finally {
-      setLogPathScanLoading(false);
-    }
+  // 세션 로그 경로 재감지 (입력 초안은 logPathsQ.data 시드 effect 가 동기화)
+  const handleScanLogPaths = () => {
+    logPathsQ.refetch();
   };
 
   // 에이전트별 로그 경로 저장 ("" 전달 시 기본 경로 자동감지로 복원)
@@ -157,19 +165,10 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
   const handleApplyCredential = async (cred: DetectedCredential, index: number) => {
     setApplyLoading((prev) => ({ ...prev, [index]: true }));
     try {
-      await invoke("auto_apply_credential", {
-        provider: cred.provider,
-        rawValue: cred.raw_value,
-        raw_value: cred.raw_value,
-      });
-      toast.success(
-        `${cred.provider === "anthropic" ? "Anthropic" : "OpenAI"} 인증 정보가 성공적으로 연동 및 저장되었습니다.`
-      );
-      await loadData();
-      await onSettingsSaved(); // 대시보드 토큰 한도/게이지 리프레시
-    } catch (e: any) {
-      console.error("auto_apply_credential 실패:", e);
-      toast.error(`자동 연동 실패: ${e.toString()}`);
+      // 토스트/캐시 무효화는 mutation onSuccess/onError 에서 처리
+      await autoApplyMutation.mutateAsync({ provider: cred.provider, rawValue: cred.raw_value });
+    } catch {
+      /* onError 토스트 처리 */
     } finally {
       setApplyLoading((prev) => ({ ...prev, [index]: false }));
     }
@@ -205,72 +204,46 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
     }
   };
 
-  const loadData = async () => {
-    try {
-      const s = await invoke<{
-        log_dir: string;
-        claude_log_dir: string;
-        codex_log_dir: string;
-        antigravity_log_dir: string;
-        token_limit: number;
-        token_limit_claude: number;
-        token_limit_codex: number;
-        token_limit_antigravity: number;
-        claude_plan: string;
-        openai_plan: string;
-        token_display_mode: string;
-        refresh_interval: number;
-      }>("load_settings");
+  // 설정 폼 draft 를 서버 설정으로 시드 (최초 로드 + 저장 후 무효화→재조회 시 재시드)
+  useEffect(() => {
+    const s = settingsQ.data;
+    if (!s) return;
+    setSettings({
+      log_dir: s.log_dir ?? "",
+      claude_log_dir: s.claude_log_dir || "",
+      codex_log_dir: s.codex_log_dir || "",
+      antigravity_log_dir: s.antigravity_log_dir || "",
+      token_limit: s.token_limit,
+      token_limit_claude: s.token_limit_claude,
+      token_limit_codex: s.token_limit_codex,
+      token_limit_antigravity: s.token_limit_antigravity || 50000000,
+      claude_plan: s.claude_plan || "pro",
+      openai_plan: s.openai_plan || "tier1",
+      token_display_mode: s.token_display_mode || "tokens",
+      refresh_interval: s.refresh_interval ?? 3,
+    });
+  }, [settingsQ.data]);
 
-      setSettings({
-        log_dir: s.log_dir,
-        claude_log_dir: s.claude_log_dir || "",
-        codex_log_dir: s.codex_log_dir || "",
-        antigravity_log_dir: s.antigravity_log_dir || "",
-        token_limit: s.token_limit,
-        token_limit_claude: s.token_limit_claude,
-        token_limit_codex: s.token_limit_codex,
-        token_limit_antigravity: s.token_limit_antigravity || 50000000,
-        claude_plan: s.claude_plan || "pro",
-        openai_plan: s.openai_plan || "tier1",
-        token_display_mode: s.token_display_mode || "tokens",
-        refresh_interval: s.refresh_interval ?? 3,
-      });
+  // 로그 경로 입력 초안을 감지 결과로 시드
+  useEffect(() => {
+    const paths = logPathsQ.data;
+    if (!paths) return;
+    const drafts: Record<string, string> = {};
+    paths.forEach((p) => {
+      drafts[p.agent] = p.configured_path;
+    });
+    setLogPathDrafts(drafts);
+  }, [logPathsQ.data]);
 
-      const k = await invoke<Record<string, boolean>>("get_api_keys_status");
-      setKeysStatus({
-        anthropic: k.anthropic || false,
-        openai: k.openai || false,
-      });
-
-      if (k.anthropic) {
-        diagnoseKey("anthropic");
-      }
-      if (k.openai) {
-        diagnoseKey("openai");
-      }
-      if (s.log_dir) {
-        diagnosePath(s.log_dir);
-      }
-      // 로컬 자격 증명 스캔 실행
-      handleScanCredentials();
-      // 세션 로그 경로 자동 감지 스캔 실행
-      handleScanLogPaths();
-
-      try {
-        const quota = await invoke<PlanQuotaInfo[]>("get_subscription_quota");
-        setQuotaInfo(quota);
-      } catch (e) {
-        console.error("실시간 구독 정보 로드 실패:", e);
-      }
-    } catch (e) {
-      console.error("설정 로드 실패:", e);
-    }
-  };
+  // 저장된 키/경로 유효성 자동 진단 (로드 시 + 상태 변경 시)
+  useEffect(() => {
+    if (keysStatusQ.data?.anthropic) diagnoseKey("anthropic");
+    if (keysStatusQ.data?.openai) diagnoseKey("openai");
+  }, [keysStatusQ.data]);
 
   useEffect(() => {
-    loadData();
-  }, []);
+    if (settingsQ.data?.log_dir) diagnosePath(settingsQ.data.log_dir);
+  }, [settingsQ.data?.log_dir]);
 
   const diagnoseKey = async (provider: "anthropic" | "openai") => {
     setDiagnoseLoading((prev) => ({ ...prev, [provider]: true }));
@@ -310,44 +283,29 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
     const key = provider === "anthropic" ? anthropicKey : openaiKey;
     if (!key.trim()) return;
     try {
-      await invoke("save_api_key", {
-        provider,
-        apiKey: key,
-        api_key: key,
-      });
-      if (provider === "anthropic") {
-        setAnthropicKey("");
-      } else {
-        setOpenAIKey("");
-      }
-      toast.success(
-        `${provider === "anthropic" ? "Anthropic" : "OpenAI"} API Key가 암호화되어 안전하게 보관되었습니다.`
-      );
-      loadData();
-    } catch (e: any) {
-      toast.error(`API Key 저장 실패: ${e.toString()}`);
+      await saveApiKeyMutation.mutateAsync({ provider, key });
+      if (provider === "anthropic") setAnthropicKey("");
+      else setOpenAIKey("");
+    } catch {
+      /* onError 토스트 처리 */
     }
   };
 
   const handleDeleteKey = async (provider: "anthropic" | "openai") => {
     try {
-      await invoke("delete_api_key", { provider });
-      toast.success(`${provider === "anthropic" ? "Anthropic" : "OpenAI"} API Key가 제거되었습니다.`);
-      if (provider === "anthropic") {
-        setAnthropicValid(null);
-      } else {
-        setOpenAIValid(null);
-      }
-      loadData();
-    } catch (e: any) {
-      toast.error(`API Key 제거 실패: ${e.toString()}`);
+      await deleteApiKeyMutation.mutateAsync({ provider });
+      if (provider === "anthropic") setAnthropicValid(null);
+      else setOpenAIValid(null);
+    } catch {
+      /* onError 토스트 처리 */
     }
   };
 
   const handleSaveSettings = async (updates: Partial<typeof settings>) => {
     const newSettings = { ...settings, ...updates };
+    setSettings(newSettings); // 토글/입력 즉시 반영 (저장 후 재조회로 재시드)
     try {
-      await invoke("save_settings", {
+      await saveSettingsMutation.mutateAsync({
         logDir: newSettings.log_dir,
         claudeLogDir: newSettings.claude_log_dir,
         codexLogDir: newSettings.codex_log_dir,
@@ -361,11 +319,8 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
         tokenDisplayMode: newSettings.token_display_mode,
         refreshInterval: Number(newSettings.refresh_interval),
       });
-      toast.success("설정이 성공적으로 저장되었습니다.");
-      loadData();
-      await onSettingsSaved();
-    } catch (e: any) {
-      toast.error(`설정 저장 실패: ${e.toString()}`);
+    } catch {
+      /* onError 토스트 처리 */
     }
   };
 
@@ -819,7 +774,7 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
                       <Input
                         type="password"
                         placeholder={
-                          keysStatus.openai ? "••••••••••••••••••••••••" : "OpenAI API 키 수동 입력 (sk-...)"
+                          keysStatus.openai ? "••••••••••••••••••••••••" : "Admin API 키 입력 (sk-admin-...)"
                         }
                         value={openaiKey}
                         onChange={(e) => setOpenAIKey(e.target.value)}
@@ -833,6 +788,11 @@ export function SettingsView({ onSettingsSaved, activeSection }: SettingsViewPro
                         </Button>
                       )}
                     </div>
+                    <p className="mt-1.5 text-xs text-muted-foreground">
+                      실시간 사용량 조회에는 <span className="font-medium">Admin API 키(sk-admin-…)</span>가
+                      필요합니다. platform.openai.com → Organization → Admin keys 에서 발급하세요. 일반 키나
+                      미설정 시 로컬 DB 집계로 표시됩니다.
+                    </p>
                   </div>
 
                   {keysStatus.openai && openaiValid && (

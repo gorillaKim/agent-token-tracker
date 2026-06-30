@@ -1,72 +1,48 @@
-import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { AgentSummary, LoopDetectionResult, PlanQuotaInfo } from "../types";
+import { useQueryClient } from "@tanstack/react-query";
+import { useDbDirty } from "../lib/dbUpdateBus";
+import { useDbInvalidation } from "../hooks/useDbInvalidation";
+import { useAgentSummaries, useLoopSignals } from "../hooks/queries/useDbQueries";
+import { useSubscriptionQuota } from "../hooks/queries/useQuotaQuery";
+import { useSettings } from "../hooks/queries/useSettingsQuery";
+import { queryKeys } from "../lib/queryKeys";
 import { formatTokens } from "../utils/formatters";
 import { AgentQuotaCard } from "../components/AgentQuotaCard";
-import { AlertTriangle, CheckCircle2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, RefreshCw } from "lucide-react";
 
 /**
  * 시스템 트레이 전용 팝오버 뷰 컴포넌트
  *
  * 트레이 아이콘을 클릭했을 때 나타나는 소형 팝업 UI를 담당하며,
  * 실시간 오작동 상태 및 에이전트별 토큰 쿼터 상황을 콤팩트하게 제공합니다.
+ * 데이터는 React Query 로 조회하고(폴링은 refresh_interval 기반 refetchInterval 자동),
+ * 트레이 webview 자체의 db-updated 무효화는 useDbInvalidation 이 담당합니다.
  * (투명 윈도우 위에 렌더 — 이 컨테이너만 시각적으로 보인다. main.tsx의 html.tray 참조)
  */
 export function TrayPopoverView() {
-  const [summaries, setSummaries] = useState<AgentSummary[]>([]);
-  const [anomalies, setAnomalies] = useState<LoopDetectionResult[]>([]);
-  const [quotas, setQuotas] = useState<PlanQuotaInfo[]>([]);
-  const [tokenDisplayMode, setTokenDisplayMode] = useState<string>("tokens");
-  const [refreshInterval, setRefreshInterval] = useState<number>(3);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  // 트레이 webview 자신의 db-updated → DB 파생 쿼리 무효화 (freeze-while-viewing 유지)
+  useDbInvalidation();
 
-  const loadData = async () => {
-    try {
-      const sums = await invoke<AgentSummary[]>("get_agent_summaries");
-      const anoms = await invoke<LoopDetectionResult[]>("get_loop_signals");
-      const qts = await invoke<PlanQuotaInfo[]>("get_subscription_quota");
+  const summariesQ = useAgentSummaries();
+  const anomaliesQ = useLoopSignals();
+  const quotasQ = useSubscriptionQuota();
+  const tokenDisplayMode = useSettings().data?.token_display_mode ?? "tokens";
 
-      try {
-        const appSettings = await invoke<any>("load_settings");
-        if (appSettings && appSettings.token_display_mode) {
-          setTokenDisplayMode(appSettings.token_display_mode);
-        }
-        if (appSettings && typeof appSettings.refresh_interval === "number") {
-          setRefreshInterval(appSettings.refresh_interval);
-        }
-      } catch (e) {
-        console.error("설정 로드 실패:", e);
-      }
+  const summaries = summariesQ.data ?? [];
+  const anomalies = anomaliesQ.data ?? [];
+  const quotas = quotasQ.data ?? [];
+  // 느린 외부 쿼터(quotasQ)는 로딩 게이트에서 제외 — 빠른 DB 요약이 오면 카드를 즉시 표시하고,
+  // 쿼터 게이지는 도착 시 카드 내부에서 따로 채워진다(AgentQuotaCard 는 quota undefined 허용).
+  const loading = summariesQ.isLoading;
 
-      setSummaries(sums);
-      setAnomalies(anoms);
-      setQuotas(qts);
-    } catch (e) {
-      console.error("데이터 로드 실패:", e);
-    } finally {
-      setLoading(false);
-    }
+  // 보는 중 동결 상태에서 새 변경이 쌓이면 dirty=true → "새로고침" 어포던스 노출
+  const { dirty, refresh } = useDbDirty();
+
+  const handleCardRefresh = () => {
+    queryClient.invalidateQueries({ predicate: (q) => q.queryKey[0] === "db" });
+    queryClient.invalidateQueries({ queryKey: queryKeys.subscriptionQuota() });
   };
-
-  useEffect(() => {
-    loadData();
-    const unlistenPromise = listen("db-updated", () => {
-      loadData();
-    });
-    return () => {
-      unlistenPromise.then((fn) => fn());
-    };
-  }, []);
-
-  // 설정된 주기(분)마다 자동 갱신 (0이면 끔)
-  useEffect(() => {
-    if (!refreshInterval || refreshInterval <= 0) return;
-    const id = setInterval(() => {
-      loadData();
-    }, refreshInterval * 60 * 1000);
-    return () => clearInterval(id);
-  }, [refreshInterval]);
 
   const totalAnomalies = anomalies.length;
 
@@ -86,10 +62,21 @@ export function TrayPopoverView() {
       {/* 헤더 */}
       <div className="flex items-center justify-between">
         <h4 className="text-sm font-semibold">에이전트 토큰 관측소</h4>
-        <span className="flex items-center gap-1 text-[11px] font-semibold text-success">
-          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />
-          LIVE
-        </span>
+        {dirty ? (
+          <button
+            onClick={refresh}
+            className="flex items-center gap-1 rounded-md px-1 text-[11px] font-semibold text-primary transition-opacity hover:opacity-80"
+            title="보는 동안 멈춰둔 새 변경을 반영합니다"
+          >
+            <RefreshCw className="h-3 w-3" />
+            새로고침
+          </button>
+        ) : (
+          <span className="flex items-center gap-1 text-[11px] font-semibold text-success">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />
+            LIVE
+          </span>
+        )}
       </div>
 
       {/* 상태 배너 */}
@@ -129,6 +116,7 @@ export function TrayPopoverView() {
                 isDashboard={false}
                 isExpanded={false}
                 onToggleExpand={() => {}}
+                onRefresh={handleCardRefresh}
               />
             );
           })
