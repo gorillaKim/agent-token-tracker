@@ -126,10 +126,14 @@ pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
             input_hash TEXT NOT NULL,
             success INTEGER NOT NULL DEFAULT 1,
             is_loop_suspect INTEGER NOT NULL DEFAULT 0,
+            is_mcp INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
         );",
         [],
     )?;
+
+    // 멱등적으로 컬럼 추가 (ALTER TABLE 에러 무시)
+    conn.execute("ALTER TABLE tool_calls ADD COLUMN is_mcp INTEGER NOT NULL DEFAULT 0;", []).ok();
 
     // 5. pricing 테이블 생성
     conn.execute(
@@ -234,8 +238,8 @@ pub fn insert_node(conn: &Connection, node: &Node) -> Result<(), rusqlite::Error
 /// 도구 호출 정보를 데이터베이스에 적재합니다.
 pub fn insert_tool_call(conn: &Connection, tc: &ToolCall) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "INSERT INTO tool_calls (session_id, tool_name, tool_input, input_hash, success, is_loop_suspect, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO tool_calls (session_id, tool_name, tool_input, input_hash, success, is_loop_suspect, is_mcp, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             tc.session_id,
             tc.tool_name,
@@ -243,6 +247,7 @@ pub fn insert_tool_call(conn: &Connection, tc: &ToolCall) -> Result<(), rusqlite
             tc.input_hash,
             if tc.success { 1 } else { 0 },
             if tc.is_loop_suspect { 1 } else { 0 },
+            if tc.is_mcp { 1 } else { 0 },
             tc.created_at
         ],
     )?;
@@ -448,13 +453,14 @@ pub fn get_nodes_by_session(conn: &Connection, session_id: &str) -> Result<Vec<N
 /// 특정 세션의 도구 호출 기록을 ID 순으로 조회합니다.
 pub fn get_tool_calls_by_session(conn: &Connection, session_id: &str) -> Result<Vec<ToolCall>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, session_id, tool_name, tool_input, input_hash, success, is_loop_suspect, created_at
+        "SELECT id, session_id, tool_name, tool_input, input_hash, success, is_loop_suspect, is_mcp, created_at
          FROM tool_calls WHERE session_id = ?1 ORDER BY id ASC",
     )?;
 
     let tc_iter = stmt.query_map(params![session_id], |row| {
         let success_val: i32 = row.get(5)?;
         let loop_suspect_val: i32 = row.get(6)?;
+        let mcp_val: i32 = row.get(7)?;
         let mut tc = ToolCall::new(
             row.get(1)?,
             row.get(2)?,
@@ -462,7 +468,8 @@ pub fn get_tool_calls_by_session(conn: &Connection, session_id: &str) -> Result<
             row.get(4)?,
             success_val == 1,
             loop_suspect_val == 1,
-            row.get(7)?,
+            mcp_val == 1,
+            row.get(8)?,
         );
         tc.id = Some(row.get(0)?);
         Ok(tc)
@@ -767,6 +774,7 @@ mod tests {
             "abc123hash".to_string(),
             true,
             false,
+            false, // is_mcp
             "2026-06-23T09:03:00Z".to_string(),
         );
         insert_tool_call(&conn, &tc).expect("ToolCall 삽입 실패");
@@ -775,6 +783,7 @@ mod tests {
         assert_eq!(fetched_tcs.len(), 1);
         assert_eq!(fetched_tcs[0].tool_name, "view_file");
         assert!(fetched_tcs[0].success);
+        assert!(!fetched_tcs[0].is_mcp);
 
         // 5. Pricing 데이터 테스트 (기본 시드 포함)
         let pricings = get_all_pricings(&conn).expect("Pricing 조회 실패");

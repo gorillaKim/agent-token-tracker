@@ -233,6 +233,13 @@ impl LogAdapter for ClaudeCodeAdapter {
                                                 let input_hash =
                                                     super::calculate_input_hash(tool_input_val);
 
+                                                let local_tools = [
+                                                    "read_file", "write_file", "grep_search", "glob_search",
+                                                    "run_command", "bash", "view_file", "list_dir",
+                                                    "make_dir", "delete_file"
+                                                ];
+                                                let is_mcp = !local_tools.contains(&tool_name);
+
                                                 tool_calls.push(ToolCall::new(
                                                     session_id.clone(),
                                                     tool_name.to_string(),
@@ -240,6 +247,7 @@ impl LogAdapter for ClaudeCodeAdapter {
                                                     input_hash,
                                                     true,
                                                     false,
+                                                    is_mcp,
                                                     timestamp.to_string(),
                                                 ));
                                             }

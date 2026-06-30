@@ -241,9 +241,9 @@ mod tests {
         };
 
         let tool_calls = vec![
-            ToolCall::new("sess-1".to_string(), "view_file".to_string(), None, "hash1".to_string(), true, false, "1".to_string()),
-            ToolCall::new("sess-1".to_string(), "view_file".to_string(), None, "hash1".to_string(), true, false, "2".to_string()),
-            ToolCall::new("sess-1".to_string(), "view_file".to_string(), None, "hash1".to_string(), true, false, "3".to_string()),
+            ToolCall::new("sess-1".to_string(), "view_file".to_string(), None, "hash1".to_string(), true, false, false, "1".to_string()),
+            ToolCall::new("sess-1".to_string(), "view_file".to_string(), None, "hash1".to_string(), true, false, false, "2".to_string()),
+            ToolCall::new("sess-1".to_string(), "view_file".to_string(), None, "hash1".to_string(), true, false, false, "3".to_string()),
         ];
 
         let result = detect_session_anomalies(&sess, &[], &tool_calls, &config);
@@ -260,9 +260,9 @@ mod tests {
         };
 
         let tool_calls = vec![
-            ToolCall::new("sess-2".to_string(), "run_command".to_string(), None, "h1".to_string(), false, false, "1".to_string()),
-            ToolCall::new("sess-2".to_string(), "run_command".to_string(), None, "h2".to_string(), false, false, "2".to_string()),
-            ToolCall::new("sess-2".to_string(), "run_command".to_string(), None, "h3".to_string(), false, false, "3".to_string()),
+            ToolCall::new("sess-2".to_string(), "run_command".to_string(), None, "h1".to_string(), false, false, false, "1".to_string()),
+            ToolCall::new("sess-2".to_string(), "run_command".to_string(), None, "h2".to_string(), false, false, false, "2".to_string()),
+            ToolCall::new("sess-2".to_string(), "run_command".to_string(), None, "h3".to_string(), false, false, false, "3".to_string()),
         ];
 
         let result = detect_session_anomalies(&sess, &[], &tool_calls, &config);
@@ -279,7 +279,7 @@ mod tests {
         };
 
         let tool_calls = vec![
-            ToolCall::new("sess-3".to_string(), "run_command".to_string(), None, "h1".to_string(), false, false, "1".to_string()),
+            ToolCall::new("sess-3".to_string(), "run_command".to_string(), None, "h1".to_string(), false, false, false, "1".to_string()),
         ];
 
         let result = detect_session_anomalies(&sess, &[], &tool_calls, &config);
@@ -296,12 +296,12 @@ mod tests {
         };
 
         let tool_calls = vec![
-            ToolCall::new("sess-4".to_string(), "view_file".to_string(), None, "h".to_string(), true, false, "1".to_string()),
-            ToolCall::new("sess-4".to_string(), "run_command".to_string(), None, "h".to_string(), true, false, "2".to_string()),
-            ToolCall::new("sess-4".to_string(), "view_file".to_string(), None, "h".to_string(), true, false, "3".to_string()),
-            ToolCall::new("sess-4".to_string(), "run_command".to_string(), None, "h".to_string(), true, false, "4".to_string()),
-            ToolCall::new("sess-4".to_string(), "view_file".to_string(), None, "h".to_string(), true, false, "5".to_string()),
-            ToolCall::new("sess-4".to_string(), "run_command".to_string(), None, "h".to_string(), true, false, "6".to_string()),
+            ToolCall::new("sess-4".to_string(), "view_file".to_string(), None, "h".to_string(), true, false, false, "1".to_string()),
+            ToolCall::new("sess-4".to_string(), "run_command".to_string(), None, "h".to_string(), true, false, false, "2".to_string()),
+            ToolCall::new("sess-4".to_string(), "view_file".to_string(), None, "h".to_string(), true, false, false, "3".to_string()),
+            ToolCall::new("sess-4".to_string(), "run_command".to_string(), None, "h".to_string(), true, false, false, "4".to_string()),
+            ToolCall::new("sess-4".to_string(), "view_file".to_string(), None, "h".to_string(), true, false, false, "5".to_string()),
+            ToolCall::new("sess-4".to_string(), "run_command".to_string(), None, "h".to_string(), true, false, false, "6".to_string()),
         ];
 
         let result = detect_session_anomalies(&sess, &[], &tool_calls, &config);

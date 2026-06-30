@@ -128,6 +128,7 @@ pub struct ToolCall {
     pub input_hash: String,
     pub success: bool,
     pub is_loop_suspect: bool, // 루프 오작동 의심 플래그
+    pub is_mcp: bool,          // MCP 도구 여부 플래그
     pub created_at: String,
 }
 
@@ -139,6 +140,7 @@ impl ToolCall {
         input_hash: String,
         success: bool,
         is_loop_suspect: bool,
+        is_mcp: bool,
         created_at: String,
     ) -> Self {
         Self {
@@ -149,6 +151,7 @@ impl ToolCall {
             input_hash,
             success,
             is_loop_suspect,
+            is_mcp,
             created_at,
         }
     }

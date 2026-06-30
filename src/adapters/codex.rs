@@ -162,6 +162,7 @@ impl LogAdapter for CodexAdapter {
                             input_hash,
                             success,
                             false,
+                            true, // is_mcp
                             started_at.clone(),
                         );
                         tool_calls.push(tc);

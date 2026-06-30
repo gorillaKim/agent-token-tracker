@@ -289,6 +289,7 @@ impl LogAdapter for AntigravityAdapter {
                                     let tool_input_str = serde_json::to_string(&tool_input_val).unwrap_or_default();
                                     let input_hash = calculate_input_hash(&tool_input_val);
                                     
+                                    let is_mcp = tool_name_clean == "call_mcp_tool" || final_tool_name.contains('/');
                                     let tool_call = AppToolCall::new(
                                         target_session_id.to_string(),
                                         final_tool_name,
@@ -296,6 +297,7 @@ impl LogAdapter for AntigravityAdapter {
                                         input_hash,
                                         true, // 성공 기본값
                                         false,
+                                        is_mcp,
                                         started_at.clone(),
                                     );
                                     session_tool_calls.push(tool_call);
