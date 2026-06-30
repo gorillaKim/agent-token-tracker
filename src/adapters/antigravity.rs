@@ -323,5 +323,47 @@ mod tests {
         let err_msg = res.unwrap_err().to_string();
         assert!(err_msg.contains("unable to open database file") || err_msg.contains("cannot open file"));
     }
+
+    #[test]
+    fn test_real_trajectory_summaries_parsing() {
+        let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("tests");
+        p.push("fixtures");
+        p.push("antigravity_trajectory_summaries.txt");
+        
+        let content = std::fs::read_to_string(p).expect("fixtures 파일 읽기 실패");
+        let bytes = base64::engine::general_purpose::STANDARD.decode(content.trim())
+            .expect("Base64 디코딩 실패");
+        
+        let unified_state = UnifiedState::decode(&bytes[..])
+            .expect("UnifiedState Protobuf 디코딩 실패");
+        
+        assert!(!unified_state.summaries.is_empty(), "summaries가 비어있으면 안 됨");
+        
+        let mut summary_ids = Vec::new();
+        let mut detail_ids = Vec::new();
+        for summary in &unified_state.summaries {
+            summary_ids.push(summary.conversation_id.clone());
+            if let Some(ref inner) = summary.inner {
+                let detail_bytes = base64::engine::general_purpose::STANDARD.decode(inner.detail_b64.trim())
+                    .expect("Inner detail Base64 디코딩 실패");
+                let detail = TrajectorySummaryDetail::decode(&detail_bytes[..])
+                    .expect("TrajectorySummaryDetail Protobuf 디코딩 실패");
+                detail_ids.push(detail.conversation_id.clone());
+            }
+        }
+        
+        println!("Summary IDs count: {}, Detail IDs count: {}", summary_ids.len(), detail_ids.len());
+        
+        let mut matched_count = 0;
+        for s_id in &summary_ids {
+            if detail_ids.contains(s_id) {
+                matched_count += 1;
+            } else {
+                println!("Unmatched summary_id: {}", s_id);
+            }
+        }
+        println!("Matched count: {} / {}", matched_count, summary_ids.len());
+    }
 }
 

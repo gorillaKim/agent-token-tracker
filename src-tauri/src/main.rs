@@ -707,15 +707,53 @@ fn default_claude_log_dir(home: &str) -> PathBuf {
 fn default_codex_log_dir(home: &str) -> PathBuf {
     Path::new(home).join(".codex").join("sessions")
 }
-/// Antigravity state.vscdb 기본 경로 (macOS)
+/// Antigravity state.vscdb 기본 경로 (OS별 후보 자동 탐색)
 fn default_antigravity_log_dir(home: &str) -> PathBuf {
-    Path::new(home)
-        .join("Library")
-        .join("Application Support")
-        .join("Code")
-        .join("User")
-        .join("globalStorage")
-        .join("state.vscdb")
+    let mut candidates = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        let base = Path::new(home).join("Library").join("Application Support");
+        candidates.push(base.join("Antigravity IDE").join("User").join("globalStorage").join("state.vscdb"));
+        candidates.push(base.join("Antigravity").join("User").join("globalStorage").join("state.vscdb"));
+        candidates.push(base.join("Code").join("User").join("globalStorage").join("state.vscdb"));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let base = Path::new(&appdata);
+            candidates.push(base.join("Antigravity IDE").join("User").join("globalStorage").join("state.vscdb"));
+            candidates.push(base.join("Antigravity").join("User").join("globalStorage").join("state.vscdb"));
+            candidates.push(base.join("Code").join("User").join("globalStorage").join("state.vscdb"));
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let base = Path::new(home).join(".config");
+        candidates.push(base.join("Antigravity IDE").join("User").join("globalStorage").join("state.vscdb"));
+        candidates.push(base.join("Antigravity").join("User").join("globalStorage").join("state.vscdb"));
+        candidates.push(base.join("Code").join("User").join("globalStorage").join("state.vscdb"));
+    }
+
+    for path in &candidates {
+        if path.exists() {
+            return path.clone();
+        }
+    }
+
+    if let Some(first) = candidates.first() {
+        first.clone()
+    } else {
+        Path::new(home)
+            .join("Library")
+            .join("Application Support")
+            .join("Code")
+            .join("User")
+            .join("globalStorage")
+            .join("state.vscdb")
+    }
 }
 
 /// 에이전트별 로그 경로(설정값 우선 → 없으면 OS 기본 경로 자동 감지)를 취합한다.
