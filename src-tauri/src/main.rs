@@ -3376,17 +3376,38 @@ fn get_atk_bin_path() -> Result<PathBuf, String> {
     let mut exe_path = std::env::current_exe()
         .map_err(|e| format!("현재 실행 파일 경로 획득 실패: {}", e))?;
     exe_path.pop(); // 실행 파일명 제거
+    
     let bin_name = if cfg!(windows) {
         "agent-token-tracker.exe"
     } else {
         "agent-token-tracker"
     };
-    let bin_path = exe_path.join(bin_name);
-    if bin_path.exists() {
-        Ok(bin_path)
-    } else {
-        Err(format!("CLI 바이너리를 찾을 수 없습니다: {:?}", bin_path))
+
+    // 1. 프로덕션 경로 (동일 디렉토리 내에 있는 경우)
+    let prod_path = exe_path.join(bin_name);
+    if prod_path.exists() {
+        return Ok(prod_path);
     }
+
+    // 2. 개발(Dev) 경로 (Tauri는 src-tauri/target/debug, CLI는 target/debug 에 생성되는 경우)
+    let mut dev_path = exe_path.clone();
+    if dev_path.ends_with("debug") || dev_path.ends_with("release") {
+        dev_path.pop(); // debug/release 제거 -> src-tauri/target
+        dev_path.pop(); // target 제거 -> src-tauri
+        dev_path.pop(); // src-tauri 제거 -> workspace root
+        
+        let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+        let workspace_bin = dev_path.join("target").join(profile).join(bin_name);
+        if workspace_bin.exists() {
+            return Ok(workspace_bin);
+        }
+    }
+
+    Err(format!(
+        "CLI 바이너리를 찾을 수 없습니다. (시도된 경로: {:?}, 워크스페이스 경로: {:?})",
+        prod_path,
+        dev_path.join("target").join("debug").join(bin_name)
+    ))
 }
 
 #[tauri::command]
