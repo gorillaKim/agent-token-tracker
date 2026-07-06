@@ -1,6 +1,7 @@
 import { useState, useEffect, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { DetectedCredential } from "../types";
+import { useAppUpdate } from "../hooks/useAppUpdate";
 import { useSubscriptionQuota } from "../hooks/queries/useQuotaQuery";
 import { useSettings } from "../hooks/queries/useSettingsQuery";
 import {
@@ -82,6 +83,25 @@ function StatusBadge({ kind, children }: { kind: StatusKind; children: ReactNode
  * 로그 디렉토리 감시 경로 설정, 수동 API Key 관리 및 로컬 키체인/설정 파일 자동 크리덴셜 연동과 검증 등을 처리합니다.
  */
 export function SettingsView({ activeSection }: SettingsViewProps) {
+  const {
+    state: updateState,
+    update: updateInfo,
+    progress: updateProgress,
+    error: updateError,
+    checkForUpdates,
+    installUpdate,
+    relaunchApp,
+  } = useAppUpdate();
+
+  const [showRelaunchModal, setShowRelaunchModal] = useState(false);
+
+  // 업데이트가 완료되면 자동으로 재시작 모달 활성화
+  useEffect(() => {
+    if (updateState === "installed") {
+      setShowRelaunchModal(true);
+    }
+  }, [updateState]);
+
   const [settings, setSettings] = useState({
     log_dir: "",
     claude_log_dir: "",
@@ -536,6 +556,71 @@ export function SettingsView({ activeSection }: SettingsViewProps) {
                 </div>
               </div>
             </Card>
+
+            {/* 버전 및 업데이트 설정 */}
+            <Card className="gap-0 p-6 mt-6">
+              <h3 className="mb-4 border-b border-border pb-2 text-base font-semibold">
+                버전 및 업데이트
+              </h3>
+              <div className="flex flex-col gap-6">
+                <div className="flex items-center justify-between">
+                  <div className="flex flex-col gap-1">
+                    <span className="text-sm font-semibold">현재 설치된 버전</span>
+                    <span className="text-xs text-muted-foreground">Version 0.2.0</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {updateState === "idle" && (
+                      <Button onClick={() => checkForUpdates()} size="sm">
+                        업데이트 확인
+                      </Button>
+                    )}
+                    {updateState === "checking" && (
+                      <Button disabled size="sm">
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        확인 중...
+                      </Button>
+                    )}
+                    {updateState === "upToDate" && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-success font-medium">최신 버전입니다.</span>
+                        <Button onClick={() => checkForUpdates()} variant="outline" size="sm">
+                          재확인
+                        </Button>
+                      </div>
+                    )}
+                    {updateState === "available" && updateInfo && (
+                      <Button onClick={installUpdate} size="sm">
+                        새 버전 설치 (v{updateInfo.version})
+                      </Button>
+                    )}
+                    {updateState === "downloading" && (
+                      <div className="flex flex-col items-end gap-1">
+                        <span className="text-xs text-muted-foreground">다운로드 중: {updateProgress}%</span>
+                        <div className="h-1.5 w-32 bg-muted rounded-full overflow-hidden">
+                          <div 
+                            className="bg-primary h-full transition-all duration-300" 
+                            style={{ width: `${updateProgress}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                    {updateState === "installed" && (
+                      <Button onClick={relaunchApp} size="sm">
+                        지금 재시작
+                      </Button>
+                    )}
+                    {updateState === "error" && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-destructive font-medium">실패 ({updateError || "오류"})</span>
+                        <Button onClick={() => checkForUpdates()} size="sm">
+                          다시 시도
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </Card>
           </>
         ) : (
           <>
@@ -881,6 +966,27 @@ export function SettingsView({ activeSection }: SettingsViewProps) {
           </>
         )}
       </div>
+
+      {showRelaunchModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <Card className="w-full max-w-md p-6 border border-border/80 shadow-2xl flex flex-col gap-4 bg-background/95">
+            <div className="flex flex-col gap-2">
+              <h3 className="text-lg font-bold tracking-tight">업데이트 설치 완료</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                새로운 버전으로 업데이트가 설치되었습니다. 변경사항을 적용하려면 지금 앱을 재시작해야 합니다.
+              </p>
+            </div>
+            <div className="flex justify-end gap-3 mt-2">
+              <Button variant="outline" onClick={() => setShowRelaunchModal(false)}>
+                나중에
+              </Button>
+              <Button onClick={relaunchApp}>
+                지금 재시작
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
     </TooltipProvider>
   );
 }

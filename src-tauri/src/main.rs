@@ -3462,6 +3462,11 @@ tauri_panel! {
     panel_event!(PanelEventHandler {})
 }
 
+#[tauri::command]
+fn relaunch_app(app: tauri::AppHandle) {
+    tauri::process::restart(&app.env());
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 && args[1] == "mcp" {
@@ -3488,6 +3493,7 @@ fn main() {
     }
 
     builder = builder.plugin(tauri_plugin_positioner::init());
+    builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
 
     builder = builder.manage(McpServerState::new());
 
@@ -3756,7 +3762,8 @@ fn main() {
             auto_apply_credential,
             mcp_server_start,
             mcp_server_stop,
-            mcp_server_status
+            mcp_server_status,
+            relaunch_app
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 앱 구동 중 에러 발생");
