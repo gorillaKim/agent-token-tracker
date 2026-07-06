@@ -247,5 +247,6 @@ export interface McpServerStatus {
   pid: number | null;
   logLines: string[];
   dbPath: string;
+  exePath: string;
 }
 

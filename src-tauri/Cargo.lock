@@ -191,6 +191,7 @@ dependencies = [
  "tauri-build",
  "tauri-nspanel",
  "tauri-plugin-positioner",
+ "tokio",
 ]
 
 [[package]]

@@ -50,7 +50,7 @@ export function McpServerView() {
     const config = {
       mcpServers: {
         atk: {
-          command: "agent-token-tracker",
+          command: status.exePath,
           args: ["mcp", "--db", status.dbPath]
         }
       }
@@ -60,7 +60,7 @@ export function McpServerView() {
 
   const getAntigravityConfig = () => {
     if (!status) return "";
-    return `plugins:\n  - name: "atk"\n    command: "agent-token-tracker"\n    args:\n      - "mcp"\n      - "--db"\n      - "${status.dbPath}"`;
+    return `plugins:\n  - name: "atk"\n    command: "${status.exePath}"\n    args:\n      - "mcp"\n      - "--db"\n      - "${status.dbPath}"`;
   };
 
   return (
