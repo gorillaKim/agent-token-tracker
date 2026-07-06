@@ -68,11 +68,14 @@ function scheduleNotify() {
   }
   debounceTimer = setTimeout(() => {
     debounceTimer = null;
-    // 어떤 상태(포커스 중/비포커스/숨김)든 db-updated 만으로는 즉시 refetch 하지 않고 dirty 로 미룬다.
-    // 숨김/비포커스 상태의 두 창(메인+트레이)이 와치독 db-updated 폭주마다 백그라운드 refetch 를
-    // 돌려 백엔드와 경합하던 문제를 제거한다. 실제 refetch 는 창이 (다시) 포커스될 때 applyActive 에서
-    // 1회만 flush 하거나, 사용자가 새로고침을 누를 때(refreshNow) 수행한다.
-    setDirty(true);
+    if (isViewActive) {
+      // 창이 활성화되어 활발히 보는 중이면 즉시 리렌더링 트리거
+      setDirty(false);
+      notifySubscribers();
+    } else {
+      // 백그라운드에 숨어 있으면 캐시 경합 방지를 위해 렌더링 동결 및 dirty 플래그만 활성화
+      setDirty(true);
+    }
   }, DEBOUNCE_MS);
 }
 

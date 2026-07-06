@@ -3513,6 +3513,31 @@ fn main() {
                 eprintln!("[DB] 초기 스키마 보장 실패: {}", e);
             }
 
+            // [Startup] 즉시 1회 백그라운드 동기화 수행
+            let app_handle_startup = app_handle.clone();
+            std::thread::spawn(move || {
+                println!("[Startup] 앱 시작 시 자동 세션 동기화 개시...");
+                tauri::async_runtime::block_on(async {
+                    if let Err(e) = sync_local_sessions_impl(app_handle_startup).await {
+                        eprintln!("[Startup] 자동 동기화 에러: {}", e);
+                    }
+                });
+            });
+
+            // [Scheduler] 30초 주기 백그라운드 보정 스케줄러 실행
+            let app_handle_scheduler = app_handle.clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    let app_handle_clone = app_handle_scheduler.clone();
+                    tauri::async_runtime::block_on(async {
+                        if let Err(e) = sync_local_sessions_impl(app_handle_clone).await {
+                            eprintln!("[Scheduler] 백그라운드 주기 동기화 에러: {}", e);
+                        }
+                    });
+                }
+            });
+
             // 1. macOS의 경우 백그라운드 트레이 전용 모드(Accessory)로 시작 (윈도우 생성 전 필수 적용)
             #[cfg(target_os = "macos")]
             let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
