@@ -226,6 +226,7 @@ mod tests {
             None,
             input_tokens,
             0,
+            0, // total_cache_creation_input_tokens
             "api".to_string(),
             None,
             None,

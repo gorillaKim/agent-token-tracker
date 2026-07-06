@@ -149,17 +149,19 @@ pub fn fmt_tool_usage(data: &[ToolReport], since: Option<&str>) -> String {
     }
     let period = since.map(|s| format!(" *(since {s})*")).unwrap_or_default();
     let mut out = format!("## 도구 사용 통계{period}\n\n");
-    out.push_str("| 도구 | 호출 | 성공률 | 루프의심 |\n");
-    out.push_str("|---|---|---|---|\n");
+    out.push_str("| 도구 | 호출 | 성공률 | 루프의심 | 결과 토큰 (추정 합/평균) |\n");
+    out.push_str("|---|---|---|---|---|\n");
     for r in data {
         let loop_flag = if r.loop_suspect_count > 0 { " ⚠️" } else { "" };
         out.push_str(&format!(
-            "| `{}` | {} | {} | {}{} |\n",
+            "| `{}` | {} | {} | {}{} | {} / {} |\n",
             r.tool_name,
             r.call_count,
             fmt_rate(r.success_count, r.call_count),
             r.loop_suspect_count,
             loop_flag,
+            fmt_tokens(r.total_result_est_tokens),
+            fmt_tokens(r.avg_result_est_tokens as u64),
         ));
     }
     out
@@ -218,23 +220,24 @@ pub fn fmt_mcp_plugin_summary(data: &[McpServerReport], since: Option<&str>) -> 
     }
     let period = since.map(|s| format!(" *(since {s})*")).unwrap_or_default();
     let mut out = format!("## MCP 플러그인 사용량{period}\n\n");
-    out.push_str("| 서버 | 호출 | 성공률 | 루프⚠️ | 세션 | 입력 | 출력 | 비용 |\n");
-    out.push_str("|---|---|---|---|---|---|---|---|\n");
+    out.push_str("| 서버 | 호출 | 성공률 | 루프⚠️ | 세션 | 결과토큰(추정 합) | 입력(세션귀속⚠️) | 출력(세션귀속⚠️) | 비용(세션귀속⚠️) |\n");
+    out.push_str("|---|---|---|---|---|---|---|---|---|\n");
     for r in data {
         let loop_flag = if r.loop_suspect_count > 0 { format!("**{}** ⚠️", r.loop_suspect_count) } else { "0".to_string() };
         out.push_str(&format!(
-            "| `{}` | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             r.mcp_server,
             r.call_count,
             fmt_rate(r.success_count, r.call_count),
             loop_flag,
             r.distinct_sessions,
+            fmt_tokens(r.total_result_est_tokens),
             fmt_tokens(r.session_total_input_tokens),
             fmt_tokens(r.session_total_output_tokens),
             fmt_cost(r.session_total_cost_usd),
         ));
     }
-    out.push_str("\n> ℹ️ 토큰/비용은 해당 서버를 호출한 세션 기준 집계 (세션 내 타 작업 토큰 포함)");
+    out.push_str("\n> ℹ️ '결과토큰(추정)'은 해당 서버 도구들이 반환한 결과 크기로 산출한 단독 추정 비용의 기초입니다.\n> ℹ️ '세션귀속' 토큰/비용은 해당 서버를 호출한 세션 전체 기준 집계이며, 중복계상(overlap)될 수 있습니다.");
     out
 }
 
@@ -245,23 +248,90 @@ pub fn fmt_mcp_plugin_tools(data: &[McpToolDetailReport], mcp_server: &str, sinc
     }
     let period = since.map(|s| format!(" *(since {s})*")).unwrap_or_default();
     let mut out = format!("## `{mcp_server}` 도구별 사용량{period}\n\n");
-    out.push_str("| 도구 | 호출 | 성공률 | 루프⚠️ | 세션 | 입력 | 출력 | 비용 |\n");
-    out.push_str("|---|---|---|---|---|---|---|---|\n");
+    out.push_str("| 도구 | 호출 | 성공률 | 루프⚠️ | 세션 | 결과토큰(추정 합/평균) | 입력(세션귀속⚠️) | 출력(세션귀속⚠️) | 비용(세션귀속⚠️) |\n");
+    out.push_str("|---|---|---|---|---|---|---|---|---|\n");
     for r in data {
         let loop_flag = if r.loop_suspect_count > 0 { format!("**{}** ⚠️", r.loop_suspect_count) } else { "0".to_string() };
         out.push_str(&format!(
-            "| `{}` | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| `{}` | {} | {} | {} | {} | {} / {} | {} | {} | {} |\n",
             r.mcp_tool,
             r.call_count,
             fmt_rate(r.success_count, r.call_count),
             loop_flag,
             r.distinct_sessions,
+            fmt_tokens(r.total_result_est_tokens),
+            fmt_tokens(r.avg_result_est_tokens as u64),
             fmt_tokens(r.session_total_input_tokens),
             fmt_tokens(r.session_total_output_tokens),
             fmt_cost(r.session_total_cost_usd),
         ));
     }
-    out.push_str("\n> ℹ️ 토큰/비용은 해당 도구를 호출한 세션 기준 집계 (세션 내 타 작업 토큰 포함)");
+    out.push_str("\n> ℹ️ '결과토큰(추정)'은 해당 도구가 반환한 결과 크기로 산출한 단독 추정 비용의 기초입니다.\n> ℹ️ '세션귀속' 토큰/비용은 해당 도구를 호출한 세션 전체 기준 집계이며, 중복계상(overlap)될 수 있습니다.");
+    out
+}
+
+/// `get_tool_trend` 응답 포매터 — 날짜별 도구 평균 결과 토큰 추세
+pub fn fmt_tool_trend(data: &[crate::db::ToolTrendRow], since: Option<&str>) -> String {
+    if data.is_empty() {
+        return "## 도구 결과 토큰 시계열 추세\n데이터가 없습니다.".to_string();
+    }
+    let period = since.map(|s| format!(" *(since {s})*")).unwrap_or_default();
+    let mut out = format!("## 도구 결과 토큰 시계열 추세{period}\n\n");
+    out.push_str("| 날짜 | 도구명 | 평균 결과 토큰 | 호출 횟수 |\n");
+    out.push_str("|---|---|---|---|\n");
+    for r in data {
+        out.push_str(&format!(
+            "| `{}` | `{}` | {} | {} |\n",
+            r.date_bucket,
+            r.tool_name,
+            fmt_tokens(r.avg_result_est_tokens as u64),
+            r.call_count,
+        ));
+    }
+    out
+}
+
+/// `get_tool_offenders` 응답 포매터 — 결과가 가장 큰 도구 호출 Top-N
+pub fn fmt_tool_offenders(data: &[crate::db::ToolOffenderRow], since: Option<&str>) -> String {
+    if data.is_empty() {
+        return "## 도구 결과 오펜더 랭킹 (Top-N)\n데이터가 없습니다.".to_string();
+    }
+    let period = since.map(|s| format!(" *(since {s})*")).unwrap_or_default();
+    let mut out = format!("## 도구 결과 오펜더 랭킹{period}\n\n");
+    out.push_str("| 세션 ID | 도구명 | 일시 | 결과 글자수 | 결과 추정 토큰 |\n");
+    out.push_str("|---|---|---|---|---|\n");
+    for r in data {
+        out.push_str(&format!(
+            "| `{}` | `{}` | `{}` | {} | {} |\n",
+            short_id(&r.session_id),
+            r.tool_name,
+            r.created_at,
+            r.result_char_count,
+            fmt_tokens(r.result_est_tokens as u64),
+        ));
+    }
+    out
+}
+
+/// `get_tool_percentiles` 응답 포매터 — 백분위 분포
+pub fn fmt_tool_percentiles(data: &[crate::db::ToolPercentileRow], since: Option<&str>) -> String {
+    if data.is_empty() {
+        return "## 도구 결과 백분위 분포\n데이터가 없습니다.".to_string();
+    }
+    let period = since.map(|s| format!(" *(since {s})*")).unwrap_or_default();
+    let mut out = format!("## 도구 결과 백분위 분포{period}\n\n");
+    out.push_str("| 도구명 | 호출수 | p50 토큰 | p90 토큰 | Max 토큰 |\n");
+    out.push_str("|---|---|---|---|---|\n");
+    for r in data {
+        out.push_str(&format!(
+            "| `{}` | {} | {} | {} | {} |\n",
+            r.tool_name,
+            r.call_count,
+            fmt_tokens(r.p50_tokens as u64),
+            fmt_tokens(r.p90_tokens as u64),
+            fmt_tokens(r.max_tokens as u64),
+        ));
+    }
     out
 }
 

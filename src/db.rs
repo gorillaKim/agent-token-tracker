@@ -29,6 +29,7 @@ pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
             model_id TEXT,
             total_input_tokens INTEGER NOT NULL DEFAULT 0,
             total_output_tokens INTEGER NOT NULL DEFAULT 0,
+            total_cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
             token_source TEXT NOT NULL DEFAULT 'unavailable'
         );",
         [],
@@ -37,6 +38,7 @@ pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
     // 멱등적으로 컬럼 추가 (ALTER TABLE 에러 무시)
     conn.execute("ALTER TABLE sessions ADD COLUMN session_name TEXT;", []).ok();
     conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;", []).ok();
+    conn.execute("ALTER TABLE sessions ADD COLUMN total_cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0;", []).ok();
 
     // 2. messages 테이블 생성
     conn.execute(
@@ -47,6 +49,7 @@ pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
             role TEXT NOT NULL,
             input_tokens INTEGER NOT NULL DEFAULT 0,
             cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
             output_tokens INTEGER NOT NULL DEFAULT 0,
             cost_usd REAL NOT NULL DEFAULT 0.0,
             created_at TEXT NOT NULL,
@@ -57,6 +60,7 @@ pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
 
     // 멱등적으로 컬럼 추가 (ALTER TABLE 에러 무시)
     conn.execute("ALTER TABLE messages ADD COLUMN content TEXT;", []).ok();
+    conn.execute("ALTER TABLE messages ADD COLUMN cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0;", []).ok();
 
     // SQLite FTS5 확장 기능 선택적 활성화
     #[cfg(feature = "fts")]
@@ -129,7 +133,10 @@ pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
             is_mcp INTEGER NOT NULL DEFAULT 0,
             mcp_server TEXT,
             mcp_tool TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            result_char_count INTEGER,
+            result_est_tokens INTEGER,
+            tool_use_id TEXT
         );",
         [],
     )?;
@@ -138,6 +145,9 @@ pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
     conn.execute("ALTER TABLE tool_calls ADD COLUMN is_mcp INTEGER NOT NULL DEFAULT 0;", []).ok();
     conn.execute("ALTER TABLE tool_calls ADD COLUMN mcp_server TEXT;", []).ok();
     conn.execute("ALTER TABLE tool_calls ADD COLUMN mcp_tool TEXT;", []).ok();
+    conn.execute("ALTER TABLE tool_calls ADD COLUMN result_char_count INTEGER;", []).ok();
+    conn.execute("ALTER TABLE tool_calls ADD COLUMN result_est_tokens INTEGER;", []).ok();
+    conn.execute("ALTER TABLE tool_calls ADD COLUMN tool_use_id TEXT;", []).ok();
 
     // 5. pricing 테이블 생성
     conn.execute(
@@ -182,8 +192,8 @@ pub fn insert_session(conn: &Connection, session: &Session) -> Result<(), rusqli
     conn.execute(
         "INSERT OR IGNORE INTO sessions (
             session_id, agent_type, agent_version, started_at, ended_at, cwd, model_id,
-            total_input_tokens, total_output_tokens, token_source, session_name, parent_session_id
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            total_input_tokens, total_output_tokens, total_cache_creation_input_tokens, token_source, session_name, parent_session_id
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             session.session_id,
             session.agent_type,
@@ -194,6 +204,7 @@ pub fn insert_session(conn: &Connection, session: &Session) -> Result<(), rusqli
             session.model_id,
             session.total_input_tokens,
             session.total_output_tokens,
+            session.total_cache_creation_input_tokens,
             session.token_source,
             session.session_name,
             session.parent_session_id
@@ -206,15 +217,16 @@ pub fn insert_session(conn: &Connection, session: &Session) -> Result<(), rusqli
 pub fn insert_message(conn: &Connection, msg: &Message) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT INTO messages (
-            session_id, turn_index, role, input_tokens, cache_read_input_tokens,
+            session_id, turn_index, role, input_tokens, cache_read_input_tokens, cache_creation_input_tokens,
             output_tokens, cost_usd, created_at, content
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             msg.session_id,
             msg.turn_index,
             msg.role,
             msg.input_tokens,
             msg.cache_read_input_tokens,
+            msg.cache_creation_input_tokens,
             msg.output_tokens,
             msg.cost_usd,
             msg.created_at,
@@ -242,8 +254,8 @@ pub fn insert_node(conn: &Connection, node: &Node) -> Result<(), rusqlite::Error
 /// 도구 호출 정보를 데이터베이스에 적재합니다.
 pub fn insert_tool_call(conn: &Connection, tc: &ToolCall) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "INSERT INTO tool_calls (session_id, tool_name, tool_input, input_hash, success, is_loop_suspect, is_mcp, mcp_server, mcp_tool, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO tool_calls (session_id, tool_name, tool_input, input_hash, success, is_loop_suspect, is_mcp, mcp_server, mcp_tool, created_at, result_char_count, result_est_tokens, tool_use_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             tc.session_id,
             tc.tool_name,
@@ -254,7 +266,10 @@ pub fn insert_tool_call(conn: &Connection, tc: &ToolCall) -> Result<(), rusqlite
             if tc.is_mcp { 1 } else { 0 },
             tc.mcp_server,
             tc.mcp_tool,
-            tc.created_at
+            tc.created_at,
+            tc.result_char_count,
+            tc.result_est_tokens,
+            tc.tool_use_id
         ],
     )?;
     Ok(())
@@ -264,7 +279,7 @@ pub fn insert_tool_call(conn: &Connection, tc: &ToolCall) -> Result<(), rusqlite
 pub fn get_session(conn: &Connection, session_id: &str) -> Result<Option<Session>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT session_id, agent_type, agent_version, started_at, ended_at, cwd, model_id,
-                total_input_tokens, total_output_tokens, token_source, session_name, parent_session_id
+                total_input_tokens, total_output_tokens, total_cache_creation_input_tokens, token_source, session_name, parent_session_id
          FROM sessions WHERE session_id = ?1",
     )?;
 
@@ -284,6 +299,7 @@ pub fn get_session(conn: &Connection, session_id: &str) -> Result<Option<Session
             row.get(9)?,
             row.get(10)?,
             row.get(11)?,
+            row.get(12)?,
         )))
     } else {
         Ok(None)
@@ -294,7 +310,7 @@ pub fn get_session(conn: &Connection, session_id: &str) -> Result<Option<Session
 pub fn get_all_sessions(conn: &Connection) -> Result<Vec<Session>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT session_id, agent_type, agent_version, started_at, ended_at, cwd, model_id,
-                total_input_tokens, total_output_tokens, token_source, session_name, parent_session_id
+                total_input_tokens, total_output_tokens, total_cache_creation_input_tokens, token_source, session_name, parent_session_id
          FROM sessions",
     )?;
 
@@ -312,6 +328,7 @@ pub fn get_all_sessions(conn: &Connection) -> Result<Vec<Session>, rusqlite::Err
             row.get(9)?,
             row.get(10)?,
             row.get(11)?,
+            row.get(12)?,
         ))
     })?;
 
@@ -328,7 +345,7 @@ pub fn get_sessions_within_days(conn: &Connection, days: u32) -> Result<Vec<Sess
     let days = days.max(1);
     let sql = format!(
         "SELECT session_id, agent_type, agent_version, started_at, ended_at, cwd, model_id,
-                total_input_tokens, total_output_tokens, token_source, session_name, parent_session_id
+                total_input_tokens, total_output_tokens, total_cache_creation_input_tokens, token_source, session_name, parent_session_id
          FROM sessions
          WHERE datetime(started_at) >= datetime('now', '-{} days')
          ORDER BY datetime(started_at) DESC",
@@ -350,6 +367,7 @@ pub fn get_sessions_within_days(conn: &Connection, days: u32) -> Result<Vec<Sess
             row.get(9)?,
             row.get(10)?,
             row.get(11)?,
+            row.get(12)?,
         ))
     })?;
 
@@ -368,7 +386,7 @@ pub fn get_sessions_within_days(conn: &Connection, days: u32) -> Result<Vec<Sess
 pub fn get_sessions_today(conn: &Connection, tz_modifier: &str) -> Result<Vec<Session>, rusqlite::Error> {
     let sql = format!(
         "SELECT session_id, agent_type, agent_version, started_at, ended_at, cwd, model_id,
-                total_input_tokens, total_output_tokens, token_source, session_name, parent_session_id
+                total_input_tokens, total_output_tokens, total_cache_creation_input_tokens, token_source, session_name, parent_session_id
          FROM sessions
          WHERE date(started_at, '{tz}') = date('now', '{tz}')",
         tz = tz_modifier
@@ -389,6 +407,7 @@ pub fn get_sessions_today(conn: &Connection, tz_modifier: &str) -> Result<Vec<Se
             row.get(9)?,
             row.get(10)?,
             row.get(11)?,
+            row.get(12)?,
         ))
     })?;
 
@@ -402,7 +421,7 @@ pub fn get_sessions_today(conn: &Connection, tz_modifier: &str) -> Result<Vec<Se
 /// 특정 세션의 메시지 리스트를 턴 인덱스 오름차순으로 조회합니다.
 pub fn get_messages_by_session(conn: &Connection, session_id: &str) -> Result<Vec<Message>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, session_id, turn_index, role, input_tokens, cache_read_input_tokens,
+        "SELECT id, session_id, turn_index, role, input_tokens, cache_read_input_tokens, cache_creation_input_tokens,
                 output_tokens, cost_usd, created_at, content
          FROM messages WHERE session_id = ?1 ORDER BY turn_index ASC",
     )?;
@@ -418,6 +437,7 @@ pub fn get_messages_by_session(conn: &Connection, session_id: &str) -> Result<Ve
             row.get(7)?,
             row.get(8)?,
             row.get(9)?,
+            row.get(10)?,
         );
         msg.id = Some(row.get(0)?);
         Ok(msg)
@@ -459,7 +479,7 @@ pub fn get_nodes_by_session(conn: &Connection, session_id: &str) -> Result<Vec<N
 /// 특정 세션의 도구 호출 기록을 ID 순으로 조회합니다.
 pub fn get_tool_calls_by_session(conn: &Connection, session_id: &str) -> Result<Vec<ToolCall>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, session_id, tool_name, tool_input, input_hash, success, is_loop_suspect, is_mcp, mcp_server, mcp_tool, created_at
+        "SELECT id, session_id, tool_name, tool_input, input_hash, success, is_loop_suspect, is_mcp, mcp_server, mcp_tool, created_at, result_char_count, result_est_tokens, tool_use_id
          FROM tool_calls WHERE session_id = ?1 ORDER BY id ASC",
     )?;
 
@@ -480,6 +500,9 @@ pub fn get_tool_calls_by_session(conn: &Connection, session_id: &str) -> Result<
             row.get(10)?,
         );
         tc.id = Some(row.get(0)?);
+        tc.result_char_count = row.get(11)?;
+        tc.result_est_tokens = row.get(12)?;
+        tc.tool_use_id = row.get(13)?;
         Ok(tc)
     })?;
 
@@ -651,7 +674,10 @@ pub fn get_tool_report(
     limit: Option<usize>,
 ) -> Result<Vec<ToolReport>, rusqlite::Error> {
     let mut query = "
-        SELECT tc.tool_name, COUNT(*) as call_count, SUM(tc.success) as success_count, SUM(tc.is_loop_suspect) as loop_suspect_count
+        SELECT tc.tool_name, COUNT(*) as call_count, SUM(tc.success) as success_count, SUM(tc.is_loop_suspect) as loop_suspect_count,
+               COALESCE(SUM(tc.result_char_count), 0) as total_char_count,
+               COALESCE(SUM(tc.result_est_tokens), 0) as total_est_tokens,
+               COALESCE(AVG(tc.result_est_tokens), 0.0) as avg_est_tokens
         FROM tool_calls tc
         LEFT JOIN sessions s ON tc.session_id = s.session_id
         WHERE 1=1
@@ -684,11 +710,17 @@ pub fn get_tool_report(
         let call_count_val: i64 = row.get(1)?;
         let success_count_val: i64 = row.get(2)?;
         let loop_suspect_count_val: i64 = row.get(3)?;
+        let total_char: i64 = row.get(4)?;
+        let total_est: i64 = row.get(5)?;
+        let avg_est: f64 = row.get(6)?;
         Ok(ToolReport::new(
             row.get(0)?,
             call_count_val as u64,
             success_count_val as u64,
             loop_suspect_count_val as u64,
+            total_char as u64,
+            total_est as u64,
+            avg_est,
         ))
     })?;
 
@@ -718,7 +750,9 @@ pub fn get_mcp_server_report(
             COUNT(DISTINCT tc.session_id) AS distinct_sessions,
             COALESCE(SUM(sess_agg.total_input_tokens), 0) AS session_total_input_tokens,
             COALESCE(SUM(sess_agg.total_output_tokens), 0) AS session_total_output_tokens,
-            COALESCE(SUM(sess_agg.session_cost), 0.0) AS session_total_cost_usd
+            COALESCE(SUM(sess_agg.session_cost), 0.0) AS session_total_cost_usd,
+            COALESCE(SUM(tc.result_char_count), 0) AS total_result_char_count,
+            COALESCE(SUM(tc.result_est_tokens), 0) AS total_result_est_tokens
         FROM tool_calls tc
         JOIN (
             SELECT DISTINCT s.session_id, s.total_input_tokens, s.total_output_tokens,
@@ -763,6 +797,9 @@ pub fn get_mcp_server_report(
         let distinct: i64 = row.get(4)?;
         let input_tokens: i64 = row.get(5)?;
         let output_tokens: i64 = row.get(6)?;
+        let cost_usd: f64 = row.get(7)?;
+        let result_char: i64 = row.get(8)?;
+        let result_est: i64 = row.get(9)?;
         Ok(McpServerReport::new(
             row.get(0)?,
             call_count as u64,
@@ -771,7 +808,9 @@ pub fn get_mcp_server_report(
             distinct as u64,
             input_tokens as u64,
             output_tokens as u64,
-            row.get(7)?,
+            cost_usd,
+            result_char as u64,
+            result_est as u64,
         ))
     })?;
 
@@ -803,7 +842,10 @@ pub fn get_mcp_tool_report_by_server(
             COUNT(DISTINCT tc.session_id) AS distinct_sessions,
             COALESCE(SUM(sess_agg.total_input_tokens), 0) AS session_total_input_tokens,
             COALESCE(SUM(sess_agg.total_output_tokens), 0) AS session_total_output_tokens,
-            COALESCE(SUM(sess_agg.session_cost), 0.0) AS session_total_cost_usd
+            COALESCE(SUM(sess_agg.session_cost), 0.0) AS session_total_cost_usd,
+            COALESCE(SUM(tc.result_char_count), 0) AS total_result_char_count,
+            COALESCE(SUM(tc.result_est_tokens), 0) AS total_result_est_tokens,
+            COALESCE(AVG(tc.result_est_tokens), 0.0) AS avg_result_est_tokens
         FROM tool_calls tc
         JOIN (
             SELECT DISTINCT s.session_id, s.total_input_tokens, s.total_output_tokens,
@@ -856,6 +898,10 @@ pub fn get_mcp_tool_report_by_server(
         let distinct: i64 = row.get(5)?;
         let input_tokens: i64 = row.get(6)?;
         let output_tokens: i64 = row.get(7)?;
+        let cost_usd: f64 = row.get(8)?;
+        let result_char: i64 = row.get(9)?;
+        let result_est: i64 = row.get(10)?;
+        let avg_est: f64 = row.get(11)?;
         Ok(McpToolDetailReport::new(
             row.get(0)?,
             row.get(1)?,
@@ -865,7 +911,10 @@ pub fn get_mcp_tool_report_by_server(
             distinct as u64,
             input_tokens as u64,
             output_tokens as u64,
-            row.get(8)?,
+            cost_usd,
+            result_char as u64,
+            result_est as u64,
+            avg_est,
         ))
     })?;
 
@@ -933,6 +982,7 @@ mod tests {
             Some("gpt-4o".to_string()),
             1500,
             800,
+            0, // total_cache_creation_input_tokens
             "api".to_string(),
             Some("테스트 세션".to_string()),
             Some("parent-uuid-5678".to_string()),
@@ -962,6 +1012,7 @@ mod tests {
             "user".to_string(),
             100,
             20,
+            0, // cache_creation_input_tokens
             50,
             0.003,
             "2026-06-23T09:01:00Z".to_string(),
@@ -1185,6 +1236,158 @@ pub fn search_messages(conn: &Connection, query: &str) -> Result<Vec<SearchResul
     for r in rows {
         list.push(r?);
     }
+    Ok(list)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ToolTrendRow {
+    pub date_bucket: String,
+    pub tool_name: String,
+    pub avg_result_est_tokens: f64,
+    pub call_count: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ToolOffenderRow {
+    pub session_id: String,
+    pub tool_name: String,
+    pub created_at: String,
+    pub result_char_count: i64,
+    pub result_est_tokens: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ToolPercentileRow {
+    pub tool_name: String,
+    pub p50_tokens: i64,
+    pub p90_tokens: i64,
+    pub max_tokens: i64,
+    pub call_count: u64,
+}
+
+pub fn get_tool_trend(conn: &Connection, since: Option<&str>) -> Result<Vec<ToolTrendRow>, rusqlite::Error> {
+    let mut query = "
+        SELECT strftime('%Y-%m-%d', tc.created_at) as date_bucket,
+               tc.tool_name,
+               AVG(tc.result_est_tokens) as avg_tokens,
+               COUNT(*) as call_count
+        FROM tool_calls tc
+        LEFT JOIN sessions s ON tc.session_id = s.session_id
+        WHERE tc.result_est_tokens IS NOT NULL
+    ".to_string();
+
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
+    if let Some(date_str) = since {
+        query.push_str(" AND s.started_at >= ? ");
+        params.push(rusqlite::types::Value::Text(date_str.to_string()));
+    }
+    query.push_str(" GROUP BY date_bucket, tc.tool_name ORDER BY tc.tool_name ASC, date_bucket ASC");
+
+    let mut stmt = conn.prepare(&query)?;
+    let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+
+    let iter = stmt.query_map(&params_ref[..], |row| {
+        Ok(ToolTrendRow {
+            date_bucket: row.get(0)?,
+            tool_name: row.get(1)?,
+            avg_result_est_tokens: row.get(2)?,
+            call_count: row.get::<_, i64>(3)? as u64,
+        })
+    })?;
+
+    let mut list = Vec::new();
+    for r in iter {
+        list.push(r?);
+    }
+    Ok(list)
+}
+
+pub fn get_tool_offenders(conn: &Connection, since: Option<&str>, limit: usize) -> Result<Vec<ToolOffenderRow>, rusqlite::Error> {
+    let mut query = "
+        SELECT tc.session_id, tc.tool_name, tc.created_at, tc.result_char_count, tc.result_est_tokens
+        FROM tool_calls tc
+        LEFT JOIN sessions s ON tc.session_id = s.session_id
+        WHERE tc.result_est_tokens IS NOT NULL
+    ".to_string();
+
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
+    if let Some(date_str) = since {
+        query.push_str(" AND s.started_at >= ? ");
+        params.push(rusqlite::types::Value::Text(date_str.to_string()));
+    }
+    query.push_str(" ORDER BY tc.result_est_tokens DESC LIMIT ?");
+    params.push(rusqlite::types::Value::Integer(limit as i64));
+
+    let mut stmt = conn.prepare(&query)?;
+    let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+
+    let iter = stmt.query_map(&params_ref[..], |row| {
+        Ok(ToolOffenderRow {
+            session_id: row.get(0)?,
+            tool_name: row.get(1)?,
+            created_at: row.get(2)?,
+            result_char_count: row.get(3)?,
+            result_est_tokens: row.get(4)?,
+        })
+    })?;
+
+    let mut list = Vec::new();
+    for r in iter {
+        list.push(r?);
+    }
+    Ok(list)
+}
+
+pub fn get_tool_percentiles(conn: &Connection, since: Option<&str>) -> Result<Vec<ToolPercentileRow>, rusqlite::Error> {
+    let mut query = "
+        SELECT tc.tool_name, tc.result_est_tokens
+        FROM tool_calls tc
+        LEFT JOIN sessions s ON tc.session_id = s.session_id
+        WHERE tc.result_est_tokens IS NOT NULL
+    ".to_string();
+
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
+    if let Some(date_str) = since {
+        query.push_str(" AND s.started_at >= ? ");
+        params.push(rusqlite::types::Value::Text(date_str.to_string()));
+    }
+
+    let mut stmt = conn.prepare(&query)?;
+    let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+
+    let iter = stmt.query_map(&params_ref[..], |row| {
+        let name: String = row.get(0)?;
+        let val: i64 = row.get(1)?;
+        Ok((name, val))
+    })?;
+
+    let mut tool_groups: std::collections::HashMap<String, Vec<i64>> = std::collections::HashMap::new();
+    for r in iter {
+        let (name, val) = r?;
+        tool_groups.entry(name).or_default().push(val);
+    }
+
+    let mut list = Vec::new();
+    for (tool_name, mut vals) in tool_groups {
+        vals.sort_unstable();
+        let len = vals.len();
+        if len == 0 {
+            continue;
+        }
+        let p50 = vals[(len * 50 / 100).min(len - 1)];
+        let p90 = vals[(len * 90 / 100).min(len - 1)];
+        let max_val = vals[len - 1];
+
+        list.push(ToolPercentileRow {
+            tool_name,
+            p50_tokens: p50,
+            p90_tokens: p90,
+            max_tokens: max_val,
+            call_count: len as u64,
+        });
+    }
+
+    list.sort_by(|a, b| b.call_count.cmp(&a.call_count));
     Ok(list)
 }
 

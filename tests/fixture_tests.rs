@@ -368,7 +368,7 @@ fn price_cache_read_tokens_with_custom_pricing() {
         "2026-01-01T00:00:00Z".to_string(),
     );
 
-    let cost = calculate_cost_usd(Some(&pricing), 2000, 1500, 600);
+    let cost = calculate_cost_usd(Some(&pricing), 2000, 1500, 0, 600);
     let expected = 500.0 * 15.0 / 1_000_000.0
         + 1500.0 * 1.5 / 1_000_000.0
         + 600.0 * 75.0 / 1_000_000.0;
@@ -386,7 +386,7 @@ fn price_cache_read_tokens_with_custom_pricing() {
 ///      = 0.0036 + 0.0051 = 0.0087
 #[test]
 fn price_fallback_no_cache_read() {
-    let cost = calculate_cost_usd(None, 1200, 0, 340);
+    let cost = calculate_cost_usd(None, 1200, 0, 0, 340);
     let expected = 1200.0 * 3.0 / 1_000_000.0 + 340.0 * 15.0 / 1_000_000.0;
     assert!(
         (cost - expected).abs() < 1e-9,
@@ -402,7 +402,7 @@ fn price_fallback_no_cache_read() {
 ///        = 0.0039 + 0.00006 + 0.0027 = 0.00666
 #[test]
 fn price_fallback_with_cache_read() {
-    let cost = calculate_cost_usd(None, 1500, 200, 180);
+    let cost = calculate_cost_usd(None, 1500, 200, 0, 180);
     let expected = 1300.0 * 3.0 / 1_000_000.0
         + 200.0 * 0.3 / 1_000_000.0
         + 180.0 * 15.0 / 1_000_000.0;
@@ -419,7 +419,7 @@ fn price_fallback_with_cache_read() {
 #[test]
 fn price_cache_read_exceeds_input_no_underflow() {
     // pricing 없이 fallback 사용
-    let cost = calculate_cost_usd(None, 100, 200, 50);
+    let cost = calculate_cost_usd(None, 100, 200, 0, 50);
     // normal_input=0, cache_read_cost=200 * 0.3/1M, output_cost=50 * 15/1M
     let expected = 0.0 + 200.0 * 0.3 / 1_000_000.0 + 50.0 * 15.0 / 1_000_000.0;
     assert!(
@@ -433,7 +433,7 @@ fn price_cache_read_exceeds_input_no_underflow() {
 /// [PRICE-05] 토큰이 모두 0인 경우 비용 0
 #[test]
 fn price_zero_tokens_yields_zero_cost() {
-    let cost = calculate_cost_usd(None, 0, 0, 0);
+    let cost = calculate_cost_usd(None, 0, 0, 0, 0);
     assert_eq!(cost, 0.0, "토큰 모두 0이면 비용 0이어야 함");
 }
 

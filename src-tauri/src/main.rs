@@ -645,6 +645,7 @@ fn process_watch_file(
                 pricing_info,
                 msg.input_tokens,
                 msg.cache_read_input_tokens,
+                msg.cache_creation_input_tokens,
                 msg.output_tokens,
             );
         }
@@ -2988,6 +2989,7 @@ async fn sync_local_sessions_impl(app_handle: AppHandle) -> Result<SyncResult, S
                                 pricing_info,
                                 msg.input_tokens,
                                 msg.cache_read_input_tokens,
+                                msg.cache_creation_input_tokens,
                                 msg.output_tokens,
                             );
                         }

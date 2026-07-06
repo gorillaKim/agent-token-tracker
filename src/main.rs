@@ -50,6 +50,9 @@ enum Commands {
 
         #[arg(long, help = "단일 파일에 대해 훅 트리거 모드로 멱등 적재합니다 (전체 스캔 스킵).")]
         hook: bool,
+
+        #[arg(short, long, help = "기존 데이터 존재 여부와 무관하게 모든 로그 파일에 대해 스캔을 강제하여 덮어씁니다.")]
+        force: bool,
     },
     #[command(about = "적재된 에이전트 세션의 토큰 사용량 및 비용 리포트를 출력합니다.")]
     Report {
@@ -123,6 +126,24 @@ enum Commands {
         #[arg(long, help = "사용할 DB 파일 경로 (다지정 시: --database 플래그 값 또는 atk.db 사용)")]
         db: Option<String>,
     },
+    #[command(about = "도구별 결과 토큰 시계열 추세를 출력합니다.")]
+    Trend {
+        #[arg(long, help = "조회 시작일 필터 (예: 2026-06-23)")]
+        since: Option<String>,
+    },
+    #[command(about = "결과 토큰이 가장 큰 Top-N 도구 호출 목록을 보여줍니다.")]
+    Offenders {
+        #[arg(long, help = "조회 시작일 필터 (예: 2026-06-23)")]
+        since: Option<String>,
+
+        #[arg(short, long, default_value = "10", help = "출력할 최대 행 수 [기본: 10]")]
+        limit: usize,
+    },
+    #[command(about = "도구별 결과 토큰 백분위수 분포 (p50, p90, Max)를 보여줍니다.")]
+    Percentiles {
+        #[arg(long, help = "조회 시작일 필터 (예: 2026-06-23)")]
+        since: Option<String>,
+    },
 }
 
 /// 스캔 결과를 요약 보고하기 위한 구조체 (이슈 #683 정책 준수)
@@ -178,7 +199,7 @@ fn main() {
     }
 
     match &cli.command {
-        Commands::Scan { path, agent, watch, hook } => {
+        Commands::Scan { path, agent, watch, hook, force } => {
             println!("스캔을 시작합니다. 대상 경로: {}", path);
             if let Some(agent_type) = agent {
                 println!("필터링할 에이전트 타입: {}", agent_type);
@@ -246,7 +267,7 @@ fn main() {
                         &pricing_cache,
                         &db_path_clone,
                         &db_write_lock,
-                        false, // force_update (일반 최초 스캔은 기존 데이터 중복 시 스킵)
+                        *force, // force_update (일반 최초 스캔은 force 여부에 따름)
                     ) {
                         Ok(_) => {
                             let mut res = accumulator.lock().unwrap();
@@ -532,14 +553,15 @@ fn main() {
                         }
                     };
 
-                    println!("\n=================================== 도구별 호출/루프 집계 리포트 ===================================");
-                    println!("| {:<30} | {:>10} | {:>10} | {:>12} | {:>10} |", 
-                             "도구명", "총 호출 수", "성공 수", "루프 의심 수", "성공률 (%)");
-                    println!("-----------------------------------------------------------------------------------------------------");
+                    println!("\n====================================================== 도구별 호출/루프 집계 리포트 ======================================================");
+                    println!("| {:<30} | {:>10} | {:>10} | {:>12} | {:>10} | {:>18} | {:>18} |", 
+                             "도구명", "총 호출 수", "성공 수", "루프 의심 수", "성공률 (%)", "총 결과 토큰(추정)", "평균 결과 토큰");
+                    println!("-----------------------------------------------------------------------------------------------------------------------------------------");
                     
                     let mut sum_calls = 0;
                     let mut sum_success = 0;
                     let mut sum_loops = 0;
+                    let mut sum_result_tokens = 0;
 
                     for r in &report_list {
                         let success_rate = if r.call_count > 0 {
@@ -548,29 +570,39 @@ fn main() {
                             0.0
                         };
 
-                        println!("| {:<30} | {:>10} | {:>10} | {:>12} | {:>9.1}% |",
+                        println!("| {:<30} | {:>10} | {:>10} | {:>12} | {:>9.1}% | {:>18} | {:>18.1} |",
                                  r.tool_name,
                                  format_number(r.call_count),
                                  format_number(r.success_count),
                                  format_number(r.loop_suspect_count),
-                                 success_rate);
+                                 success_rate,
+                                 format_number(r.total_result_est_tokens),
+                                 r.avg_result_est_tokens);
                         sum_calls += r.call_count;
                         sum_success += r.success_count;
                         sum_loops += r.loop_suspect_count;
+                        sum_result_tokens += r.total_result_est_tokens;
                     }
-                    println!("-----------------------------------------------------------------------------------------------------");
+                    println!("-----------------------------------------------------------------------------------------------------------------------------------------");
                     let total_rate = if sum_calls > 0 {
                         (sum_success as f64) * 100.0 / (sum_calls as f64)
                     } else {
                         0.0
                     };
-                    println!("| {:<30} | {:>10} | {:>10} | {:>12} | {:>9.1}% |",
+                    let avg_result_tokens = if sum_calls > 0 {
+                        (sum_result_tokens as f64) / (sum_calls as f64)
+                    } else {
+                        0.0
+                    };
+                    println!("| {:<30} | {:>10} | {:>10} | {:>12} | {:>9.1}% | {:>18} | {:>18.1} |",
                              "합계",
                              format_number(sum_calls),
                              format_number(sum_success),
                              format_number(sum_loops),
-                             total_rate);
-                    println!("=====================================================================================================");
+                             total_rate,
+                             format_number(sum_result_tokens),
+                             avg_result_tokens);
+                    println!("=========================================================================================================================================");
                 }
                 _ => {
                     eprintln!("잘못된 차원입니다. 지원되는 차원: session, agent, tool");
@@ -832,6 +864,92 @@ fn main() {
             }
         }
         Commands::Mcp { .. } => unreachable!(),
+        Commands::Trend { since } => {
+            let conn = match db::init_db(&db_path) {
+                Ok(c) => c,
+                Err(err) => {
+                    eprintln!("데이터베이스 연결 실패: {}", err);
+                    std::process::exit(1);
+                }
+            };
+            match db::get_tool_trend(&conn, since.as_deref()) {
+                Ok(list) => {
+                    println!("\n=================================== 도구별 결과 토큰 시계열 추세 ===================================");
+                    println!("| {:<15} | {:<25} | {:>20} | {:>10} |", "날짜", "도구명", "평균 결과 토큰 (추정)", "호출 수");
+                    println!("-----------------------------------------------------------------------------------------------------");
+                    for r in list {
+                        println!("| {:<15} | {:<25} | {:>20} | {:>10} |",
+                                 r.date_bucket,
+                                 r.tool_name,
+                                 format_number(r.avg_result_est_tokens as u64),
+                                 format_number(r.call_count));
+                    }
+                    println!("=====================================================================================================");
+                }
+                Err(err) => {
+                    eprintln!("추세 데이터 조회 실패: {}", err);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::Offenders { since, limit } => {
+            let conn = match db::init_db(&db_path) {
+                Ok(c) => c,
+                Err(err) => {
+                    eprintln!("데이터베이스 연결 실패: {}", err);
+                    std::process::exit(1);
+                }
+            };
+            match db::get_tool_offenders(&conn, since.as_deref(), *limit) {
+                Ok(list) => {
+                    println!("\n=================================== 도구 결과 크기 오펜더 랭킹 (Top-N) ===================================");
+                    println!("| {:<20} | {:<25} | {:<20} | {:>15} | {:>18} |", "세션 ID", "도구명", "호출 일시", "결과 글자수", "결과 토큰(추정)");
+                    println!("-----------------------------------------------------------------------------------------------------------");
+                    for r in list {
+                        println!("| {:<20} | {:<25} | {:<20} | {:>15} | {:>18} |",
+                                 r.session_id,
+                                 r.tool_name,
+                                 r.created_at,
+                                 format_number(r.result_char_count as u64),
+                                 format_number(r.result_est_tokens as u64));
+                    }
+                    println!("===========================================================================================================");
+                }
+                Err(err) => {
+                    eprintln!("오펜더 데이터 조회 실패: {}", err);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::Percentiles { since } => {
+            let conn = match db::init_db(&db_path) {
+                Ok(c) => c,
+                Err(err) => {
+                    eprintln!("데이터베이스 연결 실패: {}", err);
+                    std::process::exit(1);
+                }
+            };
+            match db::get_tool_percentiles(&conn, since.as_deref()) {
+                Ok(list) => {
+                    println!("\n======================================= 도구 결과 크기 백분위 분포 =======================================");
+                    println!("| {:<25} | {:>10} | {:>15} | {:>15} | {:>15} |", "도구명", "총 호출수", "p50 토큰", "p90 토큰", "Max 토큰");
+                    println!("-----------------------------------------------------------------------------------------------------------");
+                    for r in list {
+                        println!("| {:<25} | {:>10} | {:>15} | {:>15} | {:>15} |",
+                                 r.tool_name,
+                                 format_number(r.call_count),
+                                 format_number(r.p50_tokens as u64),
+                                 format_number(r.p90_tokens as u64),
+                                 format_number(r.max_tokens as u64));
+                    }
+                    println!("===========================================================================================================");
+                }
+                Err(err) => {
+                    eprintln!("백분위 데이터 조회 실패: {}", err);
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 }
 
@@ -937,6 +1055,7 @@ fn process_single_file(
                 pricing_info,
                 msg.input_tokens,
                 msg.cache_read_input_tokens,
+                msg.cache_creation_input_tokens,
                 msg.output_tokens,
             );
         }

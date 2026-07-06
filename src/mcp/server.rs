@@ -20,6 +20,7 @@ use crate::mcp::types::{
     fmt_token_summary, fmt_session_report, fmt_today_usage,
     fmt_loop_suspects_md, fmt_tool_usage, fmt_search_sessions,
     fmt_mcp_plugin_summary, fmt_mcp_plugin_tools,
+    fmt_tool_trend, fmt_tool_offenders, fmt_tool_percentiles,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -101,6 +102,29 @@ pub struct McpPluginToolsParams {
     pub sort: Option<String>,
     /// 반환할 최대 행 수.
     pub limit: Option<i64>,
+}
+
+/// `get_tool_trend` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ToolTrendParams {
+    /// 조회 시작일 (예: "2026-07-01").
+    pub since: Option<String>,
+}
+
+/// `get_tool_offenders` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ToolOffendersParams {
+    /// 조회 시작일 (예: "2026-07-01").
+    pub since: Option<String>,
+    /// 반환할 최대 행 수. 기본값: 10.
+    pub limit: Option<i64>,
+}
+
+/// `get_tool_percentiles` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ToolPercentilesParams {
+    /// 조회 시작일 (예: "2026-07-01").
+    pub since: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -332,6 +356,46 @@ impl AtkMcpServer {
             Err(e) => format!("❌ 조회 실패: {e}"),
         }
     }
+
+    /// 도구별 결과 토큰 시계열 추세를 조회합니다.
+    #[tool(description = "각 도구별 날짜별 평균 결과 토큰 크기 추세를 조회합니다. since(시작일)를 지정할 수 있습니다.")]
+    async fn get_tool_trend(&self, Parameters(p): Parameters<ToolTrendParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        match db::get_tool_trend(&conn, p.since.as_deref()) {
+            Ok(result) => fmt_tool_trend(&result, p.since.as_deref()),
+            Err(e) => format!("❌ 조회 실패: {e}"),
+        }
+    }
+
+    /// 결과 데이터(페이로드) 크기가 가장 큰 Top-N 도구 호출을 조회합니다.
+    #[tool(description = "가장 큰 응답 결과를 반환한 도구 호출의 상세 정보와 크기를 조회합니다. since(시작일), limit(기본 10)를 지정할 수 있습니다.")]
+    async fn get_tool_offenders(&self, Parameters(p): Parameters<ToolOffendersParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        let limit_n = p.limit.unwrap_or(10) as usize;
+        match db::get_tool_offenders(&conn, p.since.as_deref(), limit_n) {
+            Ok(result) => fmt_tool_offenders(&result, p.since.as_deref()),
+            Err(e) => format!("❌ 조회 실패: {e}"),
+        }
+    }
+
+    /// 도구별 결과 토큰의 백분위 분포(p50, p90, Max)를 조회합니다.
+    #[tool(description = "각 도구별 반환 결과 크기의 p50, p90, Max 분포를 조회합니다. since(시작일)를 지정할 수 있습니다.")]
+    async fn get_tool_percentiles(&self, Parameters(p): Parameters<ToolPercentilesParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        match db::get_tool_percentiles(&conn, p.since.as_deref()) {
+            Ok(result) => fmt_tool_percentiles(&result, p.since.as_deref()),
+            Err(e) => format!("❌ 조회 실패: {e}"),
+        }
+    }
 }
 
 #[tool_handler]
@@ -350,7 +414,10 @@ impl ServerHandler for AtkMcpServer {
              - MCP 서버 전체 집계: get_mcp_plugin_summary\n\
              - 특정 서버 도구별 비용: get_mcp_plugin_tools {mcp_server: 'engram'}\n\
              - 루프 의심 세션: get_loop_suspects\n\
-             - 프로젝트별 세션: search_sessions {cwd_contains: 'my-project'}"
+             - 프로젝트별 세션: search_sessions {cwd_contains: 'my-project'}\n\
+             - 도구별 결과 토큰 추세: get_tool_trend {since: '2026-07-01'}\n\
+             - 가장 큰 도구 응답 Top-N: get_tool_offenders {limit: 10}\n\
+             - 도구 결과 크기 백분위 분포: get_tool_percentiles"
         )
     }
 }

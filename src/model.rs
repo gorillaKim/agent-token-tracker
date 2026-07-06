@@ -17,6 +17,7 @@ pub struct Session {
     pub model_id: Option<String>,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
+    pub total_cache_creation_input_tokens: u64,
     pub token_source: String, // "api" | "unavailable" | "parse_error" | "db_locked" | "permission_denied"
     pub session_name: Option<String>,
     pub parent_session_id: Option<String>,
@@ -33,6 +34,7 @@ impl Session {
         model_id: Option<String>,
         total_input_tokens: u64,
         total_output_tokens: u64,
+        total_cache_creation_input_tokens: u64,
         token_source: String,
         session_name: Option<String>,
         parent_session_id: Option<String>,
@@ -47,6 +49,7 @@ impl Session {
             model_id,
             total_input_tokens,
             total_output_tokens,
+            total_cache_creation_input_tokens,
             token_source,
             session_name,
             parent_session_id,
@@ -63,6 +66,7 @@ pub struct Message {
     pub role: String, // "user" | "agent"
     pub input_tokens: u64,
     pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
     pub output_tokens: u64,
     pub cost_usd: f64,
     pub created_at: String,
@@ -76,6 +80,7 @@ impl Message {
         role: String,
         input_tokens: u64,
         cache_read_input_tokens: u64,
+        cache_creation_input_tokens: u64,
         output_tokens: u64,
         cost_usd: f64,
         created_at: String,
@@ -88,6 +93,7 @@ impl Message {
             role,
             input_tokens,
             cache_read_input_tokens,
+            cache_creation_input_tokens,
             output_tokens,
             cost_usd,
             created_at,
@@ -132,6 +138,9 @@ pub struct ToolCall {
     pub mcp_server: Option<String>,  // MCP 서버명 (예: "engram")
     pub mcp_tool: Option<String>,    // MCP 원천 도구명 (예: "epic_create")
     pub created_at: String,
+    pub result_char_count: Option<i64>,
+    pub result_est_tokens: Option<i64>,
+    pub tool_use_id: Option<String>,
 }
 
 impl ToolCall {
@@ -159,6 +168,9 @@ impl ToolCall {
             mcp_server,
             mcp_tool,
             created_at,
+            result_char_count: None,
+            result_est_tokens: None,
+            tool_use_id: None,
         }
     }
 }
@@ -263,6 +275,9 @@ pub struct ToolReport {
     pub call_count: u64,
     pub success_count: u64,
     pub loop_suspect_count: u64,
+    pub total_result_char_count: u64,
+    pub total_result_est_tokens: u64,
+    pub avg_result_est_tokens: f64,
 }
 
 impl ToolReport {
@@ -271,12 +286,18 @@ impl ToolReport {
         call_count: u64,
         success_count: u64,
         loop_suspect_count: u64,
+        total_result_char_count: u64,
+        total_result_est_tokens: u64,
+        avg_result_est_tokens: f64,
     ) -> Self {
         Self {
             tool_name,
             call_count,
             success_count,
             loop_suspect_count,
+            total_result_char_count,
+            total_result_est_tokens,
+            avg_result_est_tokens,
         }
     }
 }
@@ -296,6 +317,8 @@ pub struct McpServerReport {
     pub session_total_input_tokens: u64,
     pub session_total_output_tokens: u64,
     pub session_total_cost_usd: f64,
+    pub total_result_char_count: u64,
+    pub total_result_est_tokens: u64,
 }
 
 impl McpServerReport {
@@ -309,6 +332,8 @@ impl McpServerReport {
         session_total_input_tokens: u64,
         session_total_output_tokens: u64,
         session_total_cost_usd: f64,
+        total_result_char_count: u64,
+        total_result_est_tokens: u64,
     ) -> Self {
         Self {
             mcp_server,
@@ -319,6 +344,8 @@ impl McpServerReport {
             session_total_input_tokens,
             session_total_output_tokens,
             session_total_cost_usd,
+            total_result_char_count,
+            total_result_est_tokens,
         }
     }
 }
@@ -338,6 +365,9 @@ pub struct McpToolDetailReport {
     pub session_total_input_tokens: u64,
     pub session_total_output_tokens: u64,
     pub session_total_cost_usd: f64,
+    pub total_result_char_count: u64,
+    pub total_result_est_tokens: u64,
+    pub avg_result_est_tokens: f64,
     /// 토큰 귀속 방식 설명 (에이전트에게 수치의 의미를 명확히 전달)
     pub note: String,
 }
@@ -354,6 +384,9 @@ impl McpToolDetailReport {
         session_total_input_tokens: u64,
         session_total_output_tokens: u64,
         session_total_cost_usd: f64,
+        total_result_char_count: u64,
+        total_result_est_tokens: u64,
+        avg_result_est_tokens: f64,
     ) -> Self {
         Self {
             mcp_server,
@@ -365,7 +398,10 @@ impl McpToolDetailReport {
             session_total_input_tokens,
             session_total_output_tokens,
             session_total_cost_usd,
-            note: "세션 기여도 방식: 이 수치는 해당 MCP 도구를 사용한 세션의 총 토큰이며, 세션 내 다른 작업의 토큰도 포함됩니다.".to_string(),
+            total_result_char_count,
+            total_result_est_tokens,
+            avg_result_est_tokens,
+            note: "세션귀속 방식: '입력/출력/비용 (세션귀속)' 수치는 해당 MCP 도구를 1회 이상 사용한 세션 전체의 토큰 및 비용 총합이며, 세션 내 다른 작업의 토큰이 포함되어 중복계상(overlap)될 수 있습니다. 반면 '결과토큰(추정)'은 도구의 tool_result 페이로드 크기 기반으로 도구 단독 비용을 추정한 값(estimate)입니다.".to_string(),
         }
     }
 }

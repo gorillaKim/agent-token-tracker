@@ -43,6 +43,7 @@ fn process_file(
                 pricing_info,
                 msg.input_tokens,
                 msg.cache_read_input_tokens,
+                msg.cache_creation_input_tokens,
                 msg.output_tokens,
             );
         }

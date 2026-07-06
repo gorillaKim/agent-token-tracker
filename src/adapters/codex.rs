@@ -105,6 +105,7 @@ impl LogAdapter for CodexAdapter {
                                     "assistant".to_string(),
                                     in_t,
                                     cache_t,
+                                    0, // cache_creation_input_tokens
                                     out_t,
                                     0.0,
                                     started_at.clone(),
@@ -147,6 +148,11 @@ impl LogAdapter for CodexAdapter {
                             .and_then(|r| r.get("Ok"))
                             .is_some();
 
+                        let result_val = log_val.get("result");
+                        let result_str = result_val.map(|r| serde_json::to_string(r).unwrap_or_default()).unwrap_or_default();
+                        let result_char_count = result_str.chars().count() as i64;
+                        let result_est_tokens = (result_char_count + 3) / 4;
+
                         let node = Node::new(
                             session_id.clone(),
                             "tool_call".to_string(),
@@ -155,7 +161,7 @@ impl LogAdapter for CodexAdapter {
                         );
                         nodes.push(node);
 
-                        let tc = ToolCall::new(
+                        let mut tc = ToolCall::new(
                             session_id.clone(),
                             tool_name,
                             tool_input,
@@ -167,6 +173,8 @@ impl LogAdapter for CodexAdapter {
                             Some(tool.to_string()),
                             started_at.clone(),
                         );
+                        tc.result_char_count = Some(result_char_count);
+                        tc.result_est_tokens = Some(result_est_tokens);
                         tool_calls.push(tc);
                     }
                 }
@@ -210,6 +218,7 @@ impl LogAdapter for CodexAdapter {
             model_id,
             total_input_tokens,
             total_output_tokens,
+            0, // total_cache_creation_input_tokens
             "api".to_string(),
             session_name,
             parent_session_id,

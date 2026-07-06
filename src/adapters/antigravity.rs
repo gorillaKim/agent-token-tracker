@@ -338,12 +338,13 @@ impl LogAdapter for AntigravityAdapter {
                             total_output_tokens += msg_output;
                             _total_cost_usd += msg_cost;
 
-                            let msg = AppMessage::new(
+                             let msg = AppMessage::new(
                                 target_session_id.to_string(),
                                 turn_index,
                                 role,
                                 msg_input,
                                 0,
+                                0, // cache_creation_input_tokens
                                 msg_output,
                                 msg_cost,
                                 started_at.clone(),
@@ -377,6 +378,7 @@ impl LogAdapter for AntigravityAdapter {
                     role,
                     5000,
                     0,
+                    0, // cache_creation_input_tokens
                     1000,
                     0.03,
                     started_at.clone(),
@@ -397,6 +399,7 @@ impl LogAdapter for AntigravityAdapter {
             None,
             total_input_tokens,
             total_output_tokens,
+            0, // total_cache_creation_input_tokens
             token_source,
             Some(final_title),
             None,
