@@ -3328,6 +3328,136 @@ fn get_token_usage_breakdown(days: Option<u32>) -> Result<TokenUsageBreakdown, S
     })
 }
 
+
+// ────────────────────────────────────────────────────────────
+// MCP 서버 관리 기능 (Tauri 백엔드)
+// ────────────────────────────────────────────────────────────
+
+use std::collections::VecDeque;
+use std::sync::Mutex;
+use std::process::{Child, Command, Stdio};
+use std::io::{BufRead, BufReader};
+
+pub struct McpServerState {
+    child: Mutex<Option<Child>>,
+    log_buffer: Mutex<VecDeque<String>>,
+}
+
+impl McpServerState {
+    pub fn new() -> Self {
+        Self {
+            child: Mutex::new(None),
+            log_buffer: Mutex::new(VecDeque::with_capacity(500)),
+        }
+    }
+}
+
+impl Drop for McpServerState {
+    fn drop(&mut self) {
+        if let Ok(mut child_guard) = self.child.lock() {
+            if let Some(mut child) = child_guard.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerStatus {
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub log_lines: Vec<String>,
+    pub db_path: String,
+}
+
+fn get_atk_bin_path() -> Result<PathBuf, String> {
+    let mut exe_path = std::env::current_exe()
+        .map_err(|e| format!("현재 실행 파일 경로 획득 실패: {}", e))?;
+    exe_path.pop(); // 실행 파일명 제거
+    let bin_name = if cfg!(windows) {
+        "agent-token-tracker.exe"
+    } else {
+        "agent-token-tracker"
+    };
+    let bin_path = exe_path.join(bin_name);
+    if bin_path.exists() {
+        Ok(bin_path)
+    } else {
+        Err(format!("CLI 바이너리를 찾을 수 없습니다: {:?}", bin_path))
+    }
+}
+
+#[tauri::command]
+fn mcp_server_status(state: tauri::State<'_, McpServerState>) -> Result<McpServerStatus, String> {
+    let child_guard = state.child.lock().map_err(|e| e.to_string())?;
+    let running = child_guard.is_some();
+    let pid = child_guard.as_ref().map(|c| c.id());
+    let log_lines = state.log_buffer.lock().map_err(|e| e.to_string())?
+        .iter().cloned().collect();
+    
+    Ok(McpServerStatus {
+        running,
+        pid,
+        log_lines,
+        db_path: current_db_path(),
+    })
+}
+
+#[tauri::command]
+fn mcp_server_start(app: AppHandle, state: tauri::State<'_, McpServerState>) -> Result<(), String> {
+    let mut child_guard = state.child.lock().map_err(|e| e.to_string())?;
+    if child_guard.is_some() {
+        return Err("MCP 서버가 이미 실행 중입니다.".to_string());
+    }
+
+    let bin_path = get_atk_bin_path()?;
+    let db_path = current_db_path();
+
+    let mut child = Command::new(&bin_path)
+        .args(&["mcp", "--db", &db_path])
+        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("MCP 서버 시작 실패: {}", e))?;
+
+    let stderr = child.stderr.take().ok_or_else(|| "Failed to capture stderr".to_string())?;
+
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        let state = app_clone.state::<McpServerState>();
+        let reader = BufReader::new(stderr);
+        for line_result in reader.lines() {
+            if let Ok(line) = line_result {
+                if let Ok(mut logs) = state.log_buffer.lock() {
+                    if logs.len() >= 500 {
+                        logs.pop_front();
+                    }
+                    logs.push_back(line.clone());
+                }
+                let _ = app_clone.emit("mcp-log", line);
+            }
+        }
+    });
+
+    *child_guard = Some(child);
+    Ok(())
+}
+
+#[tauri::command]
+fn mcp_server_stop(state: tauri::State<'_, McpServerState>) -> Result<(), String> {
+    let mut child_guard = state.child.lock().map_err(|e| e.to_string())?;
+    if let Some(mut child) = child_guard.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    if let Ok(mut logs) = state.log_buffer.lock() {
+        logs.clear();
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 tauri_panel! {
     panel!(Panel {
@@ -3348,6 +3478,8 @@ fn main() {
     }
 
     builder = builder.plugin(tauri_plugin_positioner::init());
+
+    builder = builder.manage(McpServerState::new());
 
     builder
         .setup(|app| {
@@ -3586,7 +3718,10 @@ fn main() {
             get_rolling_window_usage,
             get_session_analysis,
             get_local_credentials,
-            auto_apply_credential
+            auto_apply_credential,
+            mcp_server_start,
+            mcp_server_stop,
+            mcp_server_status
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 앱 구동 중 에러 발생");

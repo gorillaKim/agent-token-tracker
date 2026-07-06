@@ -9,6 +9,7 @@ pub mod adapters;
 pub mod detect;
 pub mod tui;
 pub mod cross_check;
+pub mod mcp;
 
 use clap::{Parser, Subcommand};
 use rayon::prelude::*;
@@ -117,6 +118,11 @@ enum Commands {
         #[arg(long, help = "결과를 JSON 형식으로 출력합니다.")]
         json: bool,
     },
+    #[command(about = "MCP 서버를 시작합니다. (stdio 트랜스포트) 에이전트가 토큰 사용량과 MCP 플러그인 현황을 직접 조회할 수 있습니다.")]
+    Mcp {
+        #[arg(long, help = "사용할 DB 파일 경로 (다지정 시: --database 플래그 값 또는 atk.db 사용)")]
+        db: Option<String>,
+    },
 }
 
 /// 스캔 결과를 요약 보고하기 위한 구조체 (이슈 #683 정책 준수)
@@ -144,6 +150,20 @@ struct LoopRow {
 
 fn main() {
     let cli = Cli::parse();
+
+    // MCP 서브커맨드는 DB 초기화 로그 출력 없이 비동기 런타임으로 직접 실행합니다.
+    if let Commands::Mcp { db } = &cli.command {
+        let db_path = db.clone()
+            .or_else(|| cli.database.clone())
+            .unwrap_or_else(|| "atk.db".to_string());
+        let rt = tokio::runtime::Runtime::new().expect("tokio 런타임 생성 실패");
+        if let Err(e) = rt.block_on(mcp::server::run(db_path)) {
+            eprintln!("[ATK MCP] 오류: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let db_path = cli.database.unwrap_or_else(|| "atk.db".to_string());
 
     println!("데이터베이스 파일: {}", db_path);
@@ -811,6 +831,7 @@ fn main() {
                 std::process::exit(2);
             }
         }
+        Commands::Mcp { .. } => unreachable!(),
     }
 }
 

@@ -9,6 +9,7 @@ pub mod pricing;
 pub mod adapters;
 pub mod detect;
 pub mod cross_check;
+pub mod mcp;
 // tui는 crossterm I/O가 필요하므로 테스트 환경에서 조건부로만 노출
 #[cfg(not(test))]
 pub mod tui;

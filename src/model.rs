@@ -281,3 +281,92 @@ impl ToolReport {
     }
 }
 
+/// MCP 서버(플러그인)별 사용량 집계 리포트
+///
+/// 토큰 수치는 '세션 기여도 방식'으로 집계됩니다.
+/// 즉, 해당 MCP 서버를 1회 이상 호출한 세션들의 총 토큰 합계이며,
+/// 세션 내 다른 작업의 토큰도 포함됩니다.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpServerReport {
+    pub mcp_server: String,
+    pub call_count: u64,
+    pub success_count: u64,
+    pub loop_suspect_count: u64,
+    pub distinct_sessions: u64,
+    pub session_total_input_tokens: u64,
+    pub session_total_output_tokens: u64,
+    pub session_total_cost_usd: f64,
+}
+
+impl McpServerReport {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        mcp_server: String,
+        call_count: u64,
+        success_count: u64,
+        loop_suspect_count: u64,
+        distinct_sessions: u64,
+        session_total_input_tokens: u64,
+        session_total_output_tokens: u64,
+        session_total_cost_usd: f64,
+    ) -> Self {
+        Self {
+            mcp_server,
+            call_count,
+            success_count,
+            loop_suspect_count,
+            distinct_sessions,
+            session_total_input_tokens,
+            session_total_output_tokens,
+            session_total_cost_usd,
+        }
+    }
+}
+
+/// MCP 서버 내 개별 도구별 상세 사용량 리포트
+///
+/// 토큰 수치는 '세션 기여도 방식'으로 집계됩니다.
+/// `note` 필드에 귀속 방식에 대한 설명이 포함됩니다.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpToolDetailReport {
+    pub mcp_server: String,
+    pub mcp_tool: String,
+    pub call_count: u64,
+    pub success_count: u64,
+    pub loop_suspect_count: u64,
+    pub distinct_sessions: u64,
+    pub session_total_input_tokens: u64,
+    pub session_total_output_tokens: u64,
+    pub session_total_cost_usd: f64,
+    /// 토큰 귀속 방식 설명 (에이전트에게 수치의 의미를 명확히 전달)
+    pub note: String,
+}
+
+impl McpToolDetailReport {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        mcp_server: String,
+        mcp_tool: String,
+        call_count: u64,
+        success_count: u64,
+        loop_suspect_count: u64,
+        distinct_sessions: u64,
+        session_total_input_tokens: u64,
+        session_total_output_tokens: u64,
+        session_total_cost_usd: f64,
+    ) -> Self {
+        Self {
+            mcp_server,
+            mcp_tool,
+            call_count,
+            success_count,
+            loop_suspect_count,
+            distinct_sessions,
+            session_total_input_tokens,
+            session_total_output_tokens,
+            session_total_cost_usd,
+            note: "세션 기여도 방식: 이 수치는 해당 MCP 도구를 사용한 세션의 총 토큰이며, 세션 내 다른 작업의 토큰도 포함됩니다.".to_string(),
+        }
+    }
+}
+

@@ -1,0 +1,405 @@
+//! ATK MCP 서버 구조체 및 실행 루프
+//!
+//! rmcp 2.1의 `#[tool_router]` + `#[tool_handler]` 패턴으로 8개 MCP 도구를 정의합니다.
+//! 모든 응답은 에이전트 친화적인 컴팩트 Markdown 형식으로 반환됩니다.
+
+use rmcp::{
+    ServerHandler, ServiceExt,
+    handler::server::wrapper::Parameters,
+    tool, tool_handler, tool_router,
+    transport::stdio,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
+use rusqlite::Connection;
+
+use crate::db;
+use crate::mcp::types::{
+    LoopSession, SessionMatch,
+    fmt_token_summary, fmt_session_report, fmt_today_usage,
+    fmt_loop_suspects_md, fmt_tool_usage, fmt_search_sessions,
+    fmt_mcp_plugin_summary, fmt_mcp_plugin_tools,
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 도구 파라미터 구조체 정의
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `get_token_summary` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct TokenSummaryParams {
+    /// 조회 시작일 (예: "2026-07-01"). 미지정 시 전체 기간.
+    pub since: Option<String>,
+    /// 반환할 최대 행 수.
+    pub limit: Option<i64>,
+}
+
+/// `get_session_report` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SessionReportParams {
+    /// 특정 세션 ID 필터. 미지정 시 전체 세션.
+    pub session_id: Option<String>,
+    /// 조회 시작일 (예: "2026-07-01").
+    pub since: Option<String>,
+    /// 정렬 기준: "cost"(비용), "tokens"(토큰). 기본값: 시작시각 내림차순.
+    pub sort: Option<String>,
+    /// 반환할 최대 행 수.
+    pub limit: Option<i64>,
+}
+
+/// `get_loop_suspects` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct LoopSuspectsParams {
+    /// 에이전트 타입 필터 (예: "claude_code", "codex"). 미지정 시 전체.
+    pub agent_type: Option<String>,
+    /// 조회 시작일 (예: "2026-07-01").
+    pub since: Option<String>,
+    /// 반환할 최대 행 수. 기본값: 20.
+    pub limit: Option<i64>,
+}
+
+/// `get_tool_usage` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ToolUsageParams {
+    /// 조회 시작일 (예: "2026-07-01").
+    pub since: Option<String>,
+    /// 정렬 기준: "count"(호출 수), "loop"(루프 의심). 기본값: 호출 수.
+    pub sort: Option<String>,
+    /// 반환할 최대 행 수.
+    pub limit: Option<i64>,
+}
+
+/// `search_sessions` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SearchSessionsParams {
+    /// cwd 경로에서 검색할 문자열 (예: "gorillaProject", "my-service").
+    pub cwd_contains: String,
+    /// 조회 시작일 (예: "2026-07-01").
+    pub since: Option<String>,
+    /// 반환할 최대 행 수. 기본값: 30.
+    pub limit: Option<i64>,
+}
+
+/// `get_mcp_plugin_summary` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct McpPluginSummaryParams {
+    /// 조회 시작일 (예: "2026-07-01"). 미지정 시 전체 기간.
+    pub since: Option<String>,
+    /// 반환할 최대 행 수.
+    pub limit: Option<i64>,
+}
+
+/// `get_mcp_plugin_tools` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct McpPluginToolsParams {
+    /// 조회할 MCP 서버명 (필수). 예: "engram", "atk", "playwright".
+    pub mcp_server: String,
+    /// 조회 시작일 (예: "2026-07-01"). 미지정 시 전체 기간.
+    pub since: Option<String>,
+    /// 정렬 기준: "count"(호출 수), "tokens"(토큰), "cost"(비용). 기본값: 호출 수.
+    pub sort: Option<String>,
+    /// 반환할 최대 행 수.
+    pub limit: Option<i64>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ATK MCP 서버 핸들러
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// ATK MCP 서버 핸들러
+///
+/// DB 커넥션을 `Arc<Mutex<Connection>>`으로 공유하여 비동기 환경에서 안전하게 접근합니다.
+#[derive(Clone)]
+pub struct AtkMcpServer {
+    conn: Arc<Mutex<Connection>>,
+}
+
+#[tool_router]
+impl AtkMcpServer {
+    // ─────────────────────────────────────────────────────────────────
+    // 기본 토큰 조회 도구 (6개)
+    // ─────────────────────────────────────────────────────────────────
+
+    /// 에이전트별·모델별 토큰 및 비용 사용량 집계를 조회합니다.
+    #[tool(description = "에이전트별(codex, claude_code, antigravity 등) 토큰 사용량 및 비용을 집계합니다. since(시작일), limit(최대 행 수)를 선택적으로 지정할 수 있습니다.")]
+    async fn get_token_summary(&self, Parameters(p): Parameters<TokenSummaryParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        match db::get_agent_report(&conn, p.since.as_deref(), None, p.limit.map(|l| l as usize)) {
+            Ok(result) => fmt_token_summary(&result, p.since.as_deref()),
+            Err(e) => format!("❌ 조회 실패: {e}"),
+        }
+    }
+
+    /// 세션 단위 토큰/비용 리포트를 조회합니다.
+    #[tool(description = "세션 단위로 토큰 사용량, 비용, 에이전트 타입, 시작 시각을 조회합니다. session_id로 특정 세션을 지정하거나 since·sort·limit으로 필터링할 수 있습니다.")]
+    async fn get_session_report(&self, Parameters(p): Parameters<SessionReportParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        match db::get_session_report(
+            &conn,
+            p.session_id.as_deref(),
+            p.since.as_deref(),
+            p.sort.as_deref(),
+            p.limit.map(|l| l as usize),
+        ) {
+            Ok(result) => fmt_session_report(&result, p.since.as_deref()),
+            Err(e) => format!("❌ 조회 실패: {e}"),
+        }
+    }
+
+    /// 오늘(UTC 기준) 토큰 사용량을 빠르게 요약합니다. 파라미터 불필요.
+    #[tool(description = "오늘 시작된 세션들의 토큰 사용량과 비용을 빠르게 집계합니다.")]
+    async fn get_today_usage(&self) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        let today = chrono_today_utc();
+        match db::get_session_report(&conn, None, Some(&today), Some("cost"), Some(50)) {
+            Ok(result) => fmt_today_usage(&today, &result),
+            Err(e) => format!("❌ 조회 실패: {e}"),
+        }
+    }
+
+    /// 루프·오작동 의심 세션 목록을 조회합니다.
+    #[tool(description = "무한 루프, 반복 실패 등 오작동 패턴이 감지된 세션 목록을 반환합니다. agent_type으로 특정 에이전트만 필터링 가능합니다.")]
+    async fn get_loop_suspects(&self, Parameters(p): Parameters<LoopSuspectsParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        let limit_n = p.limit.unwrap_or(20) as usize;
+
+        let mut query = "
+            SELECT DISTINCT s.session_id, s.agent_type, s.started_at,
+                   COUNT(tc.id) AS loop_tool_count
+            FROM sessions s
+            JOIN tool_calls tc ON tc.session_id = s.session_id
+            WHERE tc.is_loop_suspect = 1
+        ".to_string();
+        let mut pv: Vec<rusqlite::types::Value> = Vec::new();
+
+        if let Some(ref at) = p.agent_type {
+            query.push_str(" AND s.agent_type = ? ");
+            pv.push(rusqlite::types::Value::Text(at.clone()));
+        }
+        if let Some(ref d) = p.since {
+            query.push_str(" AND s.started_at >= ? ");
+            pv.push(rusqlite::types::Value::Text(d.clone()));
+        }
+        query.push_str(" GROUP BY s.session_id ORDER BY loop_tool_count DESC LIMIT ? ");
+        pv.push(rusqlite::types::Value::Integer(limit_n as i64));
+
+        let mut stmt = match conn.prepare(&query) {
+            Ok(s) => s,
+            Err(e) => return format!("❌ 쿼리 준비 실패: {e}"),
+        };
+        let pr: Vec<&dyn rusqlite::ToSql> = pv.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        let rows = match stmt.query_map(&pr[..], |row| {
+            Ok(LoopSession {
+                session_id: row.get(0)?,
+                agent_type: row.get(1)?,
+                started_at: row.get(2)?,
+                loop_tool_count: row.get(3)?,
+            })
+        }) {
+            Ok(r) => r,
+            Err(e) => return format!("❌ 쿼리 실패: {e}"),
+        };
+
+        let mut list = Vec::new();
+        for r in rows {
+            match r {
+                Ok(item) => list.push(item),
+                Err(e) => return format!("❌ 행 파싱 실패: {e}"),
+            }
+        }
+        fmt_loop_suspects_md(&list)
+    }
+
+    /// 도구 호출 빈도 및 루프 의심 통계를 조회합니다.
+    #[tool(description = "에이전트가 사용한 도구별 호출 횟수, 성공 횟수, 루프 의심 횟수를 집계합니다. sort='count' 또는 'loop'로 정렬 가능합니다.")]
+    async fn get_tool_usage(&self, Parameters(p): Parameters<ToolUsageParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        match db::get_tool_report(&conn, p.since.as_deref(), p.sort.as_deref(), p.limit.map(|l| l as usize)) {
+            Ok(result) => fmt_tool_usage(&result, p.since.as_deref()),
+            Err(e) => format!("❌ 조회 실패: {e}"),
+        }
+    }
+
+    /// 프로젝트 디렉토리 경로(cwd)를 기반으로 세션을 검색합니다.
+    #[tool(description = "작업 디렉토리 경로(cwd)에 특정 문자열이 포함된 세션을 검색합니다. 예: cwd_contains='gorillaProject'로 특정 프로젝트 세션만 조회 가능합니다.")]
+    async fn search_sessions(&self, Parameters(p): Parameters<SearchSessionsParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        let limit_n = p.limit.unwrap_or(30) as usize;
+        let pattern = format!("%{}%", p.cwd_contains);
+
+        let mut query = "
+            SELECT s.session_id, s.agent_type, s.cwd, s.model_id,
+                   s.total_input_tokens, s.total_output_tokens, s.started_at,
+                   COALESCE(mc.session_cost, 0.0) as total_cost_usd
+            FROM sessions s
+            LEFT JOIN (
+                SELECT session_id, SUM(cost_usd) as session_cost FROM messages GROUP BY session_id
+            ) mc ON s.session_id = mc.session_id
+            WHERE s.cwd LIKE ?
+        ".to_string();
+        let mut pv: Vec<rusqlite::types::Value> = Vec::new();
+        pv.push(rusqlite::types::Value::Text(pattern));
+
+        if let Some(ref d) = p.since {
+            query.push_str(" AND s.started_at >= ? ");
+            pv.push(rusqlite::types::Value::Text(d.clone()));
+        }
+        query.push_str(" ORDER BY s.started_at DESC LIMIT ? ");
+        pv.push(rusqlite::types::Value::Integer(limit_n as i64));
+
+        let mut stmt = match conn.prepare(&query) {
+            Ok(s) => s,
+            Err(e) => return format!("❌ 쿼리 준비 실패: {e}"),
+        };
+        let pr: Vec<&dyn rusqlite::ToSql> = pv.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        let rows = match stmt.query_map(&pr[..], |row| {
+            Ok(SessionMatch {
+                session_id: row.get(0)?,
+                agent_type: row.get(1)?,
+                cwd: row.get(2)?,
+                model_id: row.get(3)?,
+                total_input_tokens: row.get::<_, i64>(4)? as u64,
+                total_output_tokens: row.get::<_, i64>(5)? as u64,
+                started_at: row.get(6)?,
+                total_cost_usd: row.get(7)?,
+            })
+        }) {
+            Ok(r) => r,
+            Err(e) => return format!("❌ 쿼리 실패: {e}"),
+        };
+
+        let mut list = Vec::new();
+        for r in rows {
+            match r {
+                Ok(item) => list.push(item),
+                Err(e) => return format!("❌ 행 파싱 실패: {e}"),
+            }
+        }
+        fmt_search_sessions(&list, &p.cwd_contains)
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // MCP 플러그인 전용 도구 (2개)
+    // ─────────────────────────────────────────────────────────────────
+
+    /// 사용 중인 MCP 플러그인(서버)별 사용량 전체를 집계합니다.
+    #[tool(description = "에이전트가 호출한 MCP 플러그인(서버)별로 호출 횟수, 성공률, 루프 의심, 연관 세션 토큰/비용을 집계합니다. 어떤 MCP 서버를 가장 많이/비싸게 쓰는지 한눈에 파악할 수 있습니다.")]
+    async fn get_mcp_plugin_summary(&self, Parameters(p): Parameters<McpPluginSummaryParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        match db::get_mcp_server_report(&conn, p.since.as_deref(), p.limit.map(|l| l as usize)) {
+            Ok(result) => fmt_mcp_plugin_summary(&result, p.since.as_deref()),
+            Err(e) => format!("❌ 조회 실패: {e}"),
+        }
+    }
+
+    /// 특정 MCP 플러그인(서버) 내 도구별 상세 사용량과 토큰 비용을 조회합니다.
+    #[tool(description = "특정 MCP 서버(예: 'engram', 'atk') 내에서 각 도구별 호출 횟수, 성공률, 세션 토큰/비용을 조회합니다. sort='cost'로 비용 기준 정렬 가능합니다.")]
+    async fn get_mcp_plugin_tools(&self, Parameters(p): Parameters<McpPluginToolsParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        match db::get_mcp_tool_report_by_server(
+            &conn,
+            &p.mcp_server,
+            p.since.as_deref(),
+            p.sort.as_deref(),
+            p.limit.map(|l| l as usize),
+        ) {
+            Ok(result) => fmt_mcp_plugin_tools(&result, &p.mcp_server, p.since.as_deref()),
+            Err(e) => format!("❌ 조회 실패: {e}"),
+        }
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for AtkMcpServer {
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        use rmcp::model::{ServerCapabilities, ServerInfo, Implementation};
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+        )
+        .with_server_info(Implementation::new("atk", env!("CARGO_PKG_VERSION")))
+        .with_instructions(
+            "ATK(Agent Token Tracker) MCP 서버입니다. 응답은 Markdown 형식입니다.\n\
+             - 오늘 현황: get_today_usage (파라미터 없음)\n\
+             - MCP 서버 전체 집계: get_mcp_plugin_summary\n\
+             - 특정 서버 도구별 비용: get_mcp_plugin_tools {mcp_server: 'engram'}\n\
+             - 루프 의심 세션: get_loop_suspects\n\
+             - 프로젝트별 세션: search_sessions {cwd_contains: 'my-project'}"
+        )
+    }
+}
+
+impl AtkMcpServer {
+    /// 새 ATK MCP 서버 인스턴스를 생성합니다.
+    pub fn new(conn: Connection) -> Self {
+        Self {
+            conn: Arc::new(Mutex::new(conn)),
+        }
+    }
+}
+
+/// ATK MCP 서버를 stdio 트랜스포트로 실행합니다.
+///
+/// stdin에서 JSON-RPC 요청을 읽고, stdout으로 Markdown 응답을 씁니다.
+pub async fn run(db_path: String) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = crate::db::init_db(&db_path)
+        .map_err(|e| format!("DB 초기화 실패: {e}"))?;
+    eprintln!("[ATK MCP] 서버 시작. DB: {db_path}");
+    let server = AtkMcpServer::new(conn);
+    server.serve(stdio()).await?.waiting().await?;
+    Ok(())
+}
+
+/// 오늘 날짜를 UTC 기준 "YYYY-MM-DD" 형식으로 반환합니다. (외부 크레이트 미사용)
+fn chrono_today_utc() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    days_to_date(secs / 86400)
+}
+
+fn days_to_date(days: u64) -> String {
+    let mut d = days as i64;
+    let mut y = 1970i64;
+    loop {
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let diy = if leap { 366 } else { 365 };
+        if d < diy { break; }
+        d -= diy;
+        y += 1;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let months = [31i64, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut m = 1i64;
+    for &dim in &months {
+        if d < dim { break; }
+        d -= dim;
+        m += 1;
+    }
+    format!("{:04}-{:02}-{:02}", y, m, d + 1)
+}

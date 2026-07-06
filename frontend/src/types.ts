@@ -241,3 +241,11 @@ export interface SessionAnalysis {
   is_anomaly: boolean;
   token_distribution: SessionTokenDistribution;
 }
+
+export interface McpServerStatus {
+  running: boolean;
+  pid: number | null;
+  logLines: string[];
+  dbPath: string;
+}
+

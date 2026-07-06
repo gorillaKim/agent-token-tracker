@@ -4,7 +4,7 @@
 //! 멱등하게(재실행 안전하게) 생성하는 마이그레이션을 구현합니다.
 
 use rusqlite::{Connection, params};
-use crate::model::{Session, Message, Node, ToolCall, Pricing, SessionReport, AgentReport, ToolReport};
+use crate::model::{Session, Message, Node, ToolCall, Pricing, SessionReport, AgentReport, ToolReport, McpServerReport, McpToolDetailReport};
 
 /// 데이터베이스 커넥션을 초기화하고 필요한 스키마 테이블 및 인덱스를 생성합니다.
 pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
@@ -694,6 +694,220 @@ pub fn get_tool_report(
 
     let mut list = Vec::new();
     for item in report_iter {
+        list.push(item?);
+    }
+    Ok(list)
+}
+
+/// MCP 서버별 사용량 집계 리포트를 조회합니다.
+///
+/// 토큰 수치는 세션 기여도 방식으로 집계됩니다.
+/// 즉, 해당 MCP 서버를 1회 이상 호출한 세션들의 총 토큰 합계이며,
+/// 중복 집계 방지를 위해 DISTINCT 세션 기준으로 먼저 집계한 후 조인합니다.
+pub fn get_mcp_server_report(
+    conn: &Connection,
+    since: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<McpServerReport>, rusqlite::Error> {
+    let mut query = "
+        SELECT
+            tc.mcp_server,
+            COUNT(*) AS call_count,
+            SUM(tc.success) AS success_count,
+            SUM(tc.is_loop_suspect) AS loop_suspect_count,
+            COUNT(DISTINCT tc.session_id) AS distinct_sessions,
+            COALESCE(SUM(sess_agg.total_input_tokens), 0) AS session_total_input_tokens,
+            COALESCE(SUM(sess_agg.total_output_tokens), 0) AS session_total_output_tokens,
+            COALESCE(SUM(sess_agg.session_cost), 0.0) AS session_total_cost_usd
+        FROM tool_calls tc
+        JOIN (
+            SELECT DISTINCT s.session_id, s.total_input_tokens, s.total_output_tokens,
+                   COALESCE(mc.session_cost, 0.0) AS session_cost
+            FROM sessions s
+            LEFT JOIN (
+                SELECT session_id, SUM(cost_usd) AS session_cost
+                FROM messages
+                GROUP BY session_id
+            ) mc ON s.session_id = mc.session_id
+        ) sess_agg ON tc.session_id = sess_agg.session_id
+        WHERE tc.is_mcp = 1
+          AND tc.mcp_server IS NOT NULL
+    ".to_string();
+
+    let mut params_vec: Vec<rusqlite::types::Value> = Vec::new();
+
+    if let Some(date_str) = since {
+        // 세션 started_at 기준 필터 (tool_call created_at 대신 세션 시작일 기준)
+        query.push_str(" AND EXISTS (
+            SELECT 1 FROM sessions s2
+            WHERE s2.session_id = tc.session_id
+              AND s2.started_at >= ?
+        ) ");
+        params_vec.push(rusqlite::types::Value::Text(date_str.to_string()));
+    }
+
+    query.push_str(" GROUP BY tc.mcp_server ORDER BY call_count DESC ");
+
+    if let Some(l) = limit {
+        query.push_str(" LIMIT ? ");
+        params_vec.push(rusqlite::types::Value::Integer(l as i64));
+    }
+
+    let mut stmt = conn.prepare(&query)?;
+    let params_ref: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+
+    let iter = stmt.query_map(&params_ref[..], |row| {
+        let call_count: i64 = row.get(1)?;
+        let success_count: i64 = row.get(2)?;
+        let loop_count: i64 = row.get(3)?;
+        let distinct: i64 = row.get(4)?;
+        let input_tokens: i64 = row.get(5)?;
+        let output_tokens: i64 = row.get(6)?;
+        Ok(McpServerReport::new(
+            row.get(0)?,
+            call_count as u64,
+            success_count as u64,
+            loop_count as u64,
+            distinct as u64,
+            input_tokens as u64,
+            output_tokens as u64,
+            row.get(7)?,
+        ))
+    })?;
+
+    let mut list = Vec::new();
+    for item in iter {
+        list.push(item?);
+    }
+    Ok(list)
+}
+
+/// 특정 MCP 서버 내 도구별 상세 사용량 리포트를 조회합니다.
+///
+/// `mcp_server` 파라미터는 필수이며, 해당 서버 내 각 mcp_tool의
+/// 호출 횟수, 성공률, 관련 세션 토큰을 반환합니다.
+pub fn get_mcp_tool_report_by_server(
+    conn: &Connection,
+    mcp_server: &str,
+    since: Option<&str>,
+    sort: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<McpToolDetailReport>, rusqlite::Error> {
+    let mut query = "
+        SELECT
+            tc.mcp_server,
+            tc.mcp_tool,
+            COUNT(*) AS call_count,
+            SUM(tc.success) AS success_count,
+            SUM(tc.is_loop_suspect) AS loop_suspect_count,
+            COUNT(DISTINCT tc.session_id) AS distinct_sessions,
+            COALESCE(SUM(sess_agg.total_input_tokens), 0) AS session_total_input_tokens,
+            COALESCE(SUM(sess_agg.total_output_tokens), 0) AS session_total_output_tokens,
+            COALESCE(SUM(sess_agg.session_cost), 0.0) AS session_total_cost_usd
+        FROM tool_calls tc
+        JOIN (
+            SELECT DISTINCT s.session_id, s.total_input_tokens, s.total_output_tokens,
+                   COALESCE(mc.session_cost, 0.0) AS session_cost
+            FROM sessions s
+            LEFT JOIN (
+                SELECT session_id, SUM(cost_usd) AS session_cost
+                FROM messages
+                GROUP BY session_id
+            ) mc ON s.session_id = mc.session_id
+        ) sess_agg ON tc.session_id = sess_agg.session_id
+        WHERE tc.is_mcp = 1
+          AND tc.mcp_server = ?
+          AND tc.mcp_tool IS NOT NULL
+    ".to_string();
+
+    let mut params_vec: Vec<rusqlite::types::Value> = Vec::new();
+    params_vec.push(rusqlite::types::Value::Text(mcp_server.to_string()));
+
+    if let Some(date_str) = since {
+        query.push_str(" AND EXISTS (
+            SELECT 1 FROM sessions s2
+            WHERE s2.session_id = tc.session_id
+              AND s2.started_at >= ?
+        ) ");
+        params_vec.push(rusqlite::types::Value::Text(date_str.to_string()));
+    }
+
+    query.push_str(" GROUP BY tc.mcp_server, tc.mcp_tool ");
+
+    match sort {
+        Some("count") => query.push_str(" ORDER BY call_count DESC "),
+        Some("tokens") => query.push_str(" ORDER BY session_total_input_tokens DESC "),
+        Some("cost") => query.push_str(" ORDER BY session_total_cost_usd DESC "),
+        _ => query.push_str(" ORDER BY call_count DESC "),
+    }
+
+    if let Some(l) = limit {
+        query.push_str(" LIMIT ? ");
+        params_vec.push(rusqlite::types::Value::Integer(l as i64));
+    }
+
+    let mut stmt = conn.prepare(&query)?;
+    let params_ref: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+
+    let iter = stmt.query_map(&params_ref[..], |row| {
+        let call_count: i64 = row.get(2)?;
+        let success_count: i64 = row.get(3)?;
+        let loop_count: i64 = row.get(4)?;
+        let distinct: i64 = row.get(5)?;
+        let input_tokens: i64 = row.get(6)?;
+        let output_tokens: i64 = row.get(7)?;
+        Ok(McpToolDetailReport::new(
+            row.get(0)?,
+            row.get(1)?,
+            call_count as u64,
+            success_count as u64,
+            loop_count as u64,
+            distinct as u64,
+            input_tokens as u64,
+            output_tokens as u64,
+            row.get(8)?,
+        ))
+    })?;
+
+    let mut list = Vec::new();
+    for item in iter {
+        list.push(item?);
+    }
+    Ok(list)
+}
+
+/// 데이터베이스에 기록된 MCP 서버(플러그인) 이름 목록을 반환합니다.
+/// 에이전트가 어떤 MCP 서버들이 추적되고 있는지 먼저 확인할 때 사용합니다.
+pub fn get_mcp_server_list(conn: &Connection) -> Result<Vec<String>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT mcp_server
+         FROM tool_calls
+         WHERE is_mcp = 1 AND mcp_server IS NOT NULL
+         ORDER BY mcp_server ASC",
+    )?;
+
+    let iter = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut list = Vec::new();
+    for item in iter {
+        list.push(item?);
+    }
+    Ok(list)
+}
+
+/// 특정 MCP 서버 내에서 사용된 도구(mcp_tool) 이름 목록을 반환합니다.
+pub fn get_mcp_tool_list(conn: &Connection, mcp_server: &str) -> Result<Vec<String>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT mcp_tool
+         FROM tool_calls
+         WHERE is_mcp = 1
+           AND mcp_server = ?1
+           AND mcp_tool IS NOT NULL
+         ORDER BY mcp_tool ASC",
+    )?;
+
+    let iter = stmt.query_map(params![mcp_server], |row| row.get::<_, String>(0))?;
+    let mut list = Vec::new();
+    for item in iter {
         list.push(item?);
     }
     Ok(list)
