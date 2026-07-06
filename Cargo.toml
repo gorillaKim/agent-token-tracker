@@ -1,6 +1,6 @@
 [package]
 name = "agent-token-tracker"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 
 # 라이브러리 크레이트 (통합 테스트에서 `use agent_token_tracker::...` 가능)

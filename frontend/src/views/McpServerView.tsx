@@ -33,8 +33,8 @@ export function McpServerView() {
 
   useEffect(() => {
     invoke<any>("load_settings").then((settings) => {
-      if (settings && typeof settings.autoStartMcp === "boolean") {
-        setAutoStart(settings.autoStartMcp);
+      if (settings && typeof settings.auto_start_mcp === "boolean") {
+        setAutoStart(settings.auto_start_mcp);
       }
     }).catch((err) => console.error("설정 로드 실패:", err));
   }, []);
