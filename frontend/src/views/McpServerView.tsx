@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useMcpServer } from "../hooks/useMcpServer";
+import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -27,6 +28,26 @@ export function McpServerView() {
     refreshStatus,
     clearLogs
   } = useMcpServer();
+
+  const [autoStart, setAutoStart] = useState(false);
+
+  useEffect(() => {
+    invoke<any>("load_settings").then((settings) => {
+      if (settings && typeof settings.autoStartMcp === "boolean") {
+        setAutoStart(settings.autoStartMcp);
+      }
+    }).catch((err) => console.error("설정 로드 실패:", err));
+  }, []);
+
+  const handleToggleAutoStart = async (checked: boolean) => {
+    try {
+      await invoke("save_auto_start_mcp", { enabled: checked });
+      setAutoStart(checked);
+      toast.success(checked ? "앱 시작 시 자동 실행이 활성화되었습니다." : "앱 시작 시 자동 실행이 비활성화되었습니다.");
+    } catch (err) {
+      toast.error(`설정 저장 실패: ${String(err)}`);
+    }
+  };
 
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
@@ -129,6 +150,22 @@ export function McpServerView() {
                     서버 기동
                   </Button>
                 )}
+              </div>
+
+              <div className="flex items-center gap-2 mt-1 px-1">
+                <input
+                  type="checkbox"
+                  id="auto-start-mcp"
+                  checked={autoStart}
+                  onChange={(e) => handleToggleAutoStart(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary accent-primary cursor-pointer"
+                />
+                <label 
+                  htmlFor="auto-start-mcp" 
+                  className="text-xs text-muted-foreground select-none cursor-pointer hover:text-foreground transition-colors font-medium"
+                >
+                  앱 실행 시 MCP 서버 자동 시작
+                </label>
               </div>
 
               {status && (

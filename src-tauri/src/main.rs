@@ -696,6 +696,7 @@ fn read_settings(app_handle: &AppHandle) -> AppSettings {
         openai_plan: default_openai_plan(),
         token_display_mode: default_token_display_mode(),
         refresh_interval: default_refresh_interval(),
+        auto_start_mcp: false,
     }
 }
 
@@ -1280,6 +1281,9 @@ pub struct AppSettings {
     /// 대시보드/트레이 세션 정보 자동 갱신 주기(분). 0=끔, 1·3·5
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval: u32,
+    /// 앱 켤 때 MCP 서버 자동 기동 설정
+    #[serde(default)]
+    pub auto_start_mcp: bool,
 }
 
 fn get_config_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1306,6 +1310,7 @@ fn save_settings(
     openai_plan: Option<String>,
     token_display_mode: Option<String>,
     refresh_interval: Option<u32>,
+    auto_start_mcp: Option<bool>,
 ) -> Result<(), String> {
     let path = get_config_path(&app_handle)?;
     // 기존 설정을 읽어 플랜 필드를 보존
@@ -1343,6 +1348,9 @@ fn save_settings(
         refresh_interval: refresh_interval.unwrap_or_else(|| {
             existing.as_ref().map(|s| s.refresh_interval).unwrap_or_else(default_refresh_interval)
         }),
+        auto_start_mcp: auto_start_mcp.unwrap_or_else(|| {
+            existing.as_ref().map(|s| s.auto_start_mcp).unwrap_or(false)
+        }),
     };
     let json = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("JSON 직렬화 실패: {}", e))?;
@@ -1368,6 +1376,7 @@ fn load_settings(app_handle: AppHandle) -> Result<AppSettings, String> {
             openai_plan: default_openai_plan(),
             token_display_mode: default_token_display_mode(),
             refresh_interval: default_refresh_interval(),
+            auto_start_mcp: false,
         });
     }
     let json = std::fs::read_to_string(path)
@@ -1375,6 +1384,39 @@ fn load_settings(app_handle: AppHandle) -> Result<AppSettings, String> {
     let settings: AppSettings = serde_json::from_str(&json)
         .map_err(|e| format!("JSON 역직렬화 실패: {}", e))?;
     Ok(settings)
+}
+
+#[tauri::command]
+fn save_auto_start_mcp(app_handle: AppHandle, enabled: bool) -> Result<(), String> {
+    let path = get_config_path(&app_handle)?;
+    let mut settings = if path.exists() {
+        let s = std::fs::read_to_string(&path)
+            .map_err(|e| format!("설정 파일 읽기 실패: {}", e))?;
+        serde_json::from_str::<AppSettings>(&s)
+            .map_err(|e| format!("설정 파일 파싱 실패: {}", e))?
+    } else {
+        AppSettings {
+            log_dir: "".to_string(),
+            claude_log_dir: "".to_string(),
+            codex_log_dir: "".to_string(),
+            antigravity_log_dir: "".to_string(),
+            token_limit: 50_000_000,
+            token_limit_claude: 50_000_000,
+            token_limit_codex: 50_000_000,
+            token_limit_antigravity: 50_000_000,
+            claude_plan: default_claude_plan(),
+            openai_plan: default_openai_plan(),
+            token_display_mode: default_token_display_mode(),
+            refresh_interval: default_refresh_interval(),
+            auto_start_mcp: false,
+        }
+    };
+    settings.auto_start_mcp = enabled;
+    let json = serde_json::to_string_pretty(&settings)
+        .map_err(|e| format!("JSON 직렬화 실패: {}", e))?;
+    std::fs::write(path, json)
+        .map_err(|e| format!("설정 파일 쓰기 실패: {}", e))?;
+    Ok(())
 }
 
 // ────────────────────────────────────────────────────────────
@@ -3398,8 +3440,7 @@ fn mcp_server_status(state: tauri::State<'_, McpServerState>) -> Result<McpServe
     })
 }
 
-#[tauri::command]
-fn mcp_server_start(app: AppHandle, state: tauri::State<'_, McpServerState>) -> Result<(), String> {
+fn mcp_server_start_impl(app: &AppHandle, state: &McpServerState) -> Result<(), String> {
     let mut child_guard = state.child.lock().map_err(|e| e.to_string())?;
     if child_guard.is_some() {
         return Err("MCP 서버가 이미 실행 중입니다.".to_string());
@@ -3436,6 +3477,11 @@ fn mcp_server_start(app: AppHandle, state: tauri::State<'_, McpServerState>) -> 
 
     *child_guard = Some(child);
     Ok(())
+}
+
+#[tauri::command]
+fn mcp_server_start(app: AppHandle, state: tauri::State<'_, McpServerState>) -> Result<(), String> {
+    mcp_server_start_impl(&app, &state)
 }
 
 #[tauri::command]
@@ -3506,6 +3552,17 @@ fn main() {
             let _ = DB_PATH.set(resolve_db_path(&app_handle));
             if let Err(e) = get_db_conn() {
                 eprintln!("[DB] 초기 스키마 보장 실패: {}", e);
+            }
+
+            // 0.1 앱 시작 시 MCP 서버 자동 구동 설정이 켜져있다면 구동 개시
+            if let Ok(settings) = load_settings(app_handle.clone()) {
+                if settings.auto_start_mcp {
+                    println!("[Setup] auto_start_mcp 활성화됨. MCP 서버 자동 구동 개시...");
+                    let state = app_handle.state::<McpServerState>();
+                    if let Err(e) = mcp_server_start_impl(&app_handle, &state) {
+                        eprintln!("[Setup] MCP 서버 자동 구동 에러: {}", e);
+                    }
+                }
             }
 
             // [Startup] 즉시 1회 백그라운드 동기화 수행
@@ -3763,7 +3820,8 @@ fn main() {
             mcp_server_start,
             mcp_server_stop,
             mcp_server_status,
-            relaunch_app
+            relaunch_app,
+            save_auto_start_mcp
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 앱 구동 중 에러 발생");

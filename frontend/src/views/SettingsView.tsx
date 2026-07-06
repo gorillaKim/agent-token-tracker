@@ -115,6 +115,7 @@ export function SettingsView({ activeSection }: SettingsViewProps) {
     openai_plan: "tier1",
     token_display_mode: "tokens",
     refresh_interval: 3,
+    auto_start_mcp: false,
   });
   // 읽기 데이터는 React Query (quota 는 대시보드와 캐시 공유)
   const settingsQ = useSettings();
@@ -241,6 +242,7 @@ export function SettingsView({ activeSection }: SettingsViewProps) {
       openai_plan: s.openai_plan || "tier1",
       token_display_mode: s.token_display_mode || "tokens",
       refresh_interval: s.refresh_interval ?? 3,
+      auto_start_mcp: (s as any).auto_start_mcp ?? false,
     });
   }, [settingsQ.data]);
 
@@ -338,6 +340,7 @@ export function SettingsView({ activeSection }: SettingsViewProps) {
         openaiPlan: newSettings.openai_plan,
         tokenDisplayMode: newSettings.token_display_mode,
         refreshInterval: Number(newSettings.refresh_interval),
+        autoStartMcp: newSettings.auto_start_mcp,
       });
     } catch {
       /* onError 토스트 처리 */
