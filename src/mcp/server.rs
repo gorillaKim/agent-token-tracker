@@ -22,6 +22,7 @@ use crate::mcp::types::{
     fmt_mcp_plugin_summary, fmt_mcp_plugin_tools,
     fmt_tool_trend, fmt_tool_offenders, fmt_tool_percentiles,
     fmt_malfunction_patterns, fmt_malfunction_detections,
+    fmt_malfunction_detections_v2, fmt_malfunction_summary,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,6 +159,40 @@ pub struct GetSessionMalfunctionsParams {
 pub struct DeleteMalfunctionPatternParams {
     /// 삭제할 오작동 패턴의 ID (i64)
     pub id: i64,
+}
+
+/// `get_malfunction_detections` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct GetMalfunctionDetectionsParams {
+    /// 조회 시작일 (예: "2026-07-01"). 미지정 시 전체 기간.
+    pub since: Option<String>,
+    /// 특정 오작동 패턴명 필터.
+    pub pattern_name: Option<String>,
+    /// 특정 에이전트 타입 필터.
+    pub agent_type: Option<String>,
+}
+
+/// `scan_and_detect_recent` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ScanAndDetectRecentParams {
+    /// 일괄 감지 기준 시작일 (필수, 예: "2026-07-01").
+    pub since: String,
+}
+
+/// `validate_malfunction_pattern` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ValidateMalfunctionPatternParams {
+    /// 검증 및 FP 분석 대상 규칙 JSON 문자열.
+    pub rules_json: String,
+    /// 테스트해볼 최근 세션 수 (기본값: 30).
+    pub limit: Option<i64>,
+}
+
+/// `ingest_logs` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct IngestLogsParams {
+    /// 이미 적재 완료된 파일도 강제 덮어쓰기할지 여부.
+    pub force: Option<bool>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -501,6 +536,112 @@ impl AtkMcpServer {
             Err(e) => format!("❌ 삭제 실패: {e}"),
         }
     }
+
+    /// 조건에 매칭되는 오작동 감지 상세 이력 목록을 집계 조회합니다.
+    #[tool(description = "조건(since, pattern_name, agent_type)을 지정하여 매칭되는 오작동 감지 상세 이력 목록을 집계 조회합니다.")]
+    async fn get_malfunction_detections(&self, Parameters(p): Parameters<GetMalfunctionDetectionsParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        match db::get_malfunction_detections(
+            &conn,
+            p.since.as_deref(),
+            p.pattern_name.as_deref(),
+            p.agent_type.as_deref(),
+        ) {
+            Ok(result) => fmt_malfunction_detections_v2(&result),
+            Err(e) => format!("❌ 조회 실패: {e}"),
+        }
+    }
+
+    /// 등록된 오작동 패턴별 매칭률, 누적 건수, 최초/최근 발생 시간, 최근 7일 추세를 요약 조회합니다.
+    #[tool(description = "등록된 모든 오작동 패턴별 매칭률, 누적 감지 횟수, 최초/최근 감지 시각 및 최근 7일 일별 발생 추세를 요약 조회합니다.")]
+    async fn get_malfunction_summary(&self) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        match db::get_malfunction_summary(&conn) {
+            Ok(result) => fmt_malfunction_summary(&result),
+            Err(e) => format!("❌ 조회 실패: {e}"),
+        }
+    }
+
+    /// 특정 시점 이후의 모든 세션에 대해 오작동 감지 엔진을 구동하고 결과를 DB에 반영합니다. (멱등 실행)
+    #[tool(description = "since(시작일) 이후 시작된 세션들을 대상으로 오작동 분석을 일괄 수행하고, 그 결과를 DB에 멱등하게 적재합니다.")]
+    async fn scan_and_detect_recent(&self, Parameters(p): Parameters<ScanAndDetectRecentParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        match db::scan_and_detect_recent(&conn, &p.since) {
+            Ok(count) => format!("✅ 일괄 감지 완료 (분석 수행된 세션: {}개)", count),
+            Err(e) => format!("❌ 일괄 감지 실패: {e}"),
+        }
+    }
+
+    /// 오작동 패턴 규칙 JSON이 유효한지 검증하고, 최근 세션을 기반으로 False Positive(오탐) 가능성을 테스트합니다.
+    #[tool(description = "규칙 JSON 문자열이 유효한지 파싱을 테스트하고, 최근 N개 세션을 대상으로 임시 평가를 돌려 False Positive(오탐) 확률을 백분율로 제공합니다.")]
+    async fn validate_malfunction_pattern(&self, Parameters(p): Parameters<ValidateMalfunctionPatternParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        let limit_n = p.limit.unwrap_or(30) as usize;
+        match crate::detect::malfunctions::validate_malfunction_pattern(&conn, &p.rules_json, limit_n) {
+            Ok((valid, msg, _ratio, _is_fp, matched_samples)) => {
+                let mut out = format!("### 규칙 검증 결과 요약\n\n{}\n\n", msg);
+                if valid && !matched_samples.is_empty() {
+                    out.push_str("#### 🔍 매칭 샘플 세션 및 감지 근거\n");
+                    out.push_str("| 세션 ID | 감지 근거 (Evidence) |\n");
+                    out.push_str("|---|---|\n");
+                    for (sid, ev) in matched_samples.iter().take(10) {
+                        let short_sid = if sid.len() > 8 { &sid[..8] } else { sid };
+                        out.push_str(&format!("| `{}` | {} |\n", short_sid, ev));
+                    }
+                    if matched_samples.len() > 10 {
+                        out.push_str(&format!("\n*(그 외 {}개의 세션이 더 매칭되었습니다)*\n", matched_samples.len() - 10));
+                    }
+                }
+                out
+            }
+            Err(e) => format!("❌ 검증 처리 오류: {e}"),
+        }
+    }
+
+    /// 로컬 에이전트 로그 디렉토리를 자동 감지하여 신규 로그들을 즉시 DB에 수집(Ingest)합니다.
+    #[tool(description = "로컬의 Claude Code, Codex, Antigravity 로그 파일들을 자동 탐색하여 신규 세션 정보를 데이터베이스에 즉시 수집/동기화합니다.")]
+    async fn ingest_logs(&self, Parameters(p): Parameters<IngestLogsParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        let paths = crate::adapters::ingest::detect_default_log_paths();
+        if paths.is_empty() {
+            return "⚠️ 감지된 에이전트 로그 경로가 없습니다. 로그가 정상 경로에 존재하는지 확인해주세요.".to_string();
+        }
+        
+        let force_val = p.force.unwrap_or(false);
+        match crate::adapters::ingest::ingest_logs(&conn, &paths, None, force_val) {
+            Ok(res) => {
+                let mut out = "### 📥 로그 수집(Ingest) 요약 보고\n\n".to_string();
+                out.push_str(&format!("* 🔍 **스캔 경로**: 수집된 감지 디렉토리/파일 {}개\n", paths.len()));
+                for path in &paths {
+                    out.push_str(&format!("  - `{}`\n", path.display()));
+                }
+                out.push_str("\n| 항목 | 건수 |\n");
+                out.push_str("|---|---|\n");
+                out.push_str(&format!("| 총 발견된 파일 | {}개 |\n", res.files_total));
+                out.push_str(&format!("| 스캔 진행한 세션 | {}개 |\n", res.sessions_scanned));
+                out.push_str(&format!("| **새로 추가된 세션** | **{}개** |\n", res.sessions_inserted));
+                out.push_str(&format!("| 중복 스킵된 세션 | {}개 |\n", res.sessions_skipped));
+                out.push_str(&format!("| 실패한 세션 | {}개 |\n", res.sessions_failed));
+                out
+            }
+            Err(e) => format!("❌ 로그 수집 실패: {e}"),
+        }
+    }
 }
 
 #[tool_handler]
@@ -525,7 +666,12 @@ impl ServerHandler for AtkMcpServer {
              - 도구 결과 크기 백분위 분포: get_tool_percentiles\n\
              - 오작동 패턴 목록: get_malfunction_patterns\n\
              - 세션 오작동 분석: analyze_session_malfunctions {session_id: '...'}\n\
-             - 세션 오작동 이력: get_session_malfunctions {session_id: '...'}"
+             - 세션 오작동 이력: get_session_malfunctions {session_id: '...'}\n\
+             - 오작동 감지 이력 조회: get_malfunction_detections {since: '2026-07-01'}\n\
+             - 오작동 패턴별 요약 통계: get_malfunction_summary\n\
+             - since 이후 일괄 멱등 분석: scan_and_detect_recent {since: '2026-07-01'}\n\
+             - 규칙 JSON 검증 및 FP 추정: validate_malfunction_pattern {rules_json: '...'}\n\
+             - 로그 자동 감지 및 Ingest: ingest_logs {force: false}"
         )
     }
 }

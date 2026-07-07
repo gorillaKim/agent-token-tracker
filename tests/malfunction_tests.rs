@@ -165,4 +165,93 @@ mod tests {
         
         cleanup_temp_db(db_path);
     }
+
+    #[test]
+    fn test_malfunction_dedup_and_idempotence() {
+        let db_path = ":memory:";
+        let conn = setup_temp_db(db_path);
+
+        let session_id = "test-sess-dedup";
+        let session = Session::new(
+            session_id.to_string(),
+            "claude_code".to_string(),
+            Some("1.0".to_string()),
+            "2026-07-07T09:00:00Z".to_string(),
+            None,
+            "/workspace".to_string(),
+            Some("claude-3-5-sonnet".to_string()),
+            100,
+            100,
+            0,
+            "api".to_string(),
+            None,
+            None,
+        );
+        insert_session(&conn, &session).unwrap();
+
+        let pat_id = insert_malfunction_pattern(
+            &conn,
+            "테스트 패턴",
+            None,
+            "{\"type\":\"unexpected_exit\",\"value\":true}"
+        ).unwrap();
+
+        // 중복 감지 이력 등록 시도 (insert_malfunction_detection 대신 DB에 직접 쓰거나 이관된 기능 호출)
+        let _id1 = agent_token_tracker::db::insert_malfunction_detection(&conn, session_id, pat_id, "근거 1").unwrap();
+        let _id2 = agent_token_tracker::db::insert_malfunction_detection(&conn, session_id, pat_id, "근거 2").unwrap();
+
+        // UNIQUE 제약 조건(INSERT OR IGNORE)에 의해 두 번째 입력은 무시되어야 하며,
+        // 결과적으로 get_session_malfunctions 반환 건수는 1건이어야 한다.
+        let detections = get_session_malfunctions(&conn, session_id).unwrap();
+        assert_eq!(detections.len(), 1, "중복 감지는 무시되어 단 1건만 존재해야 합니다.");
+        assert_eq!(detections[0].evidence, "근거 1", "최초로 인입된 근거 1이 보존되어야 합니다.");
+    }
+
+    #[test]
+    fn test_validate_malfunction_pattern_fp() {
+        let db_path = ":memory:";
+        let conn = setup_temp_db(db_path);
+
+        // 테스트를 위해 세션 하나 등록 (UnexpectedExit 가 true가 되도록 ended_at은 None)
+        let session_id = "test-sess-fp";
+        let session = Session::new(
+            session_id.to_string(),
+            "claude_code".to_string(),
+            Some("1.0".to_string()),
+            "2026-07-07T09:00:00Z".to_string(),
+            None,
+            "/workspace".to_string(),
+            Some("claude-3-5-sonnet".to_string()),
+            100,
+            100,
+            0,
+            "api".to_string(),
+            None,
+            None,
+        );
+        insert_session(&conn, &session).unwrap();
+
+        // 1. 유효하지 않은 JSON 검증
+        let (valid1, msg1, _, _, _) = agent_token_tracker::detect::malfunctions::validate_malfunction_pattern(
+            &conn,
+            "{invalid_json}",
+            30
+        ).unwrap();
+        assert!(!valid1);
+        assert!(msg1.contains("유효하지 않은"));
+
+        // 2. 유효하지만 FP 의심되는 룰 (UnexpectedExit: true 룰은 100% 매칭됨)
+        let rules_json = "{\"type\":\"unexpected_exit\",\"value\":true}";
+        let (valid2, _msg2, ratio, is_fp, samples) = agent_token_tracker::detect::malfunctions::validate_malfunction_pattern(
+            &conn,
+            rules_json,
+            30
+        ).unwrap();
+        assert!(valid2);
+        assert!(is_fp, "모든 세션이 매칭되므로 FP로 분류되어야 합니다.");
+        assert_eq!(ratio, 1.0);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].0, session_id);
+    }
 }
+

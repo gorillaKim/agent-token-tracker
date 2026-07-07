@@ -17,10 +17,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use adapters::LogAdapter;
-use adapters::claude_code::ClaudeCodeAdapter;
-use adapters::codex::CodexAdapter;
-use adapters::antigravity::AntigravityAdapter;
+
 
 #[derive(Parser)]
 #[command(name = "agent-token-tracker")]
@@ -268,14 +265,27 @@ fn main() {
                 // 단일 훅 트리거 최적화 경로: 전체 수집을 스킵하고 단일 지정 경로 즉시 멱등 적재
                 let file_path = Path::new(path);
                 println!("[Hook Trigger] 단일 파일에 대한 즉시 멱등 적재를 구동합니다: {}", file_path.display());
-                match process_single_file(
-                    file_path,
-                    agent.as_deref(),
-                    &pricing_map_shared,
-                    &db_path,
-                    &db_write_lock,
-                    true, // force_update
-                ) {
+                
+                let pricing_cache = Arc::clone(&pricing_map_shared);
+                let db_write_lock = Arc::clone(&db_write_lock);
+                
+                let run_hook = || -> Result<(), Box<dyn std::error::Error>> {
+                    let _write_guard = db_write_lock.lock().unwrap();
+                    let conn = rusqlite::Connection::open(&db_path)?;
+                    let _ = conn.pragma_update(None, "foreign_keys", "ON");
+                    let _ = conn.pragma_update(None, "journal_mode", "WAL");
+                    let _ = conn.pragma_update(None, "busy_timeout", &5000);
+                    
+                    adapters::ingest::process_single_file(
+                        &conn,
+                        file_path,
+                        agent.as_deref(),
+                        &pricing_cache,
+                        true, // force_update
+                    )
+                };
+
+                match run_hook() {
                     Ok(_) => println!("[Hook Trigger] 성공적으로 적재 완료되었습니다."),
                     Err(err) => {
                         eprintln!("[Hook Trigger] 적재 실패: {}", err);
@@ -285,7 +295,7 @@ fn main() {
             } else {
                 // 일반 스캔 모드 또는 파일 감시 모드
                 let mut files = Vec::new();
-                if let Err(err) = collect_files(Path::new(path), &mut files) {
+                if let Err(err) = adapters::ingest::collect_files(Path::new(path), &mut files) {
                     eprintln!("파일 목록 수집 중 오류 발생: {}", err);
                     std::process::exit(1);
                 }
@@ -302,13 +312,30 @@ fn main() {
                     let pricing_cache = Arc::clone(&pricing_map_shared);
                     let db_write_lock = Arc::clone(&db_write_lock);
 
-                    match process_single_file(
+                    let conn_res = rusqlite::Connection::open(&db_path_clone).and_then(|c| {
+                        c.pragma_update(None, "foreign_keys", "ON")?;
+                        c.pragma_update(None, "journal_mode", "WAL")?;
+                        c.pragma_update(None, "busy_timeout", &5000)?;
+                        Ok(c)
+                    });
+
+                    let conn = match conn_res {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let mut res = accumulator.lock().unwrap();
+                            res.sessions_failed += 1;
+                            res.warnings.push(format!("DB 연결 실패 [{}]: {}", file_path.display(), e));
+                            return;
+                        }
+                    };
+
+                    let _write_guard = db_write_lock.lock().unwrap();
+                    match adapters::ingest::process_single_file(
+                        &conn,
                         file_path,
                         agent.as_deref(),
                         &pricing_cache,
-                        &db_path_clone,
-                        &db_write_lock,
-                        *force, // force_update (일반 최초 스캔은 force 여부에 따름)
+                        *force, // force_update
                     ) {
                         Ok(_) => {
                             let mut res = accumulator.lock().unwrap();
@@ -423,6 +450,24 @@ fn main() {
                                             continue; // 유효 파일만
                                         }
 
+                                        let pricing_cache = Arc::clone(&pricing_map_shared);
+                                        let db_write_lock = Arc::clone(&db_write_lock);
+                                        let run_watch_process = |vpath: &Path| -> Result<(), Box<dyn std::error::Error>> {
+                                            let _write_guard = db_write_lock.lock().unwrap();
+                                            let conn = rusqlite::Connection::open(&db_path)?;
+                                            let _ = conn.pragma_update(None, "foreign_keys", "ON");
+                                            let _ = conn.pragma_update(None, "journal_mode", "WAL");
+                                            let _ = conn.pragma_update(None, "busy_timeout", &5000);
+                                            
+                                            adapters::ingest::process_single_file(
+                                                &conn,
+                                                vpath,
+                                                agent.as_deref(),
+                                                &pricing_cache,
+                                                true, // force_update
+                                            )
+                                        };
+
                                         if is_vscdb {
                                             // state.vscdb 변경 시 세션 ID 목록을 새로 뽑아 가상 경로로 변형해 순차 처리
                                             match adapters::antigravity::get_vscdb_session_ids(path_str) {
@@ -430,14 +475,7 @@ fn main() {
                                                     for id in ids {
                                                         let virtual_path_str = format!("{}?session_id={}", path_str, id);
                                                         let virtual_path = PathBuf::from(virtual_path_str);
-                                                        match process_single_file(
-                                                            &virtual_path,
-                                                            agent.as_deref(),
-                                                            &pricing_map_shared,
-                                                            &db_path,
-                                                            &db_write_lock,
-                                                            true, // force_update
-                                                        ) {
+                                                        match run_watch_process(&virtual_path) {
                                                             Ok(_) => println!("  - 성공적으로 적재(vscdb 세션): {}", id),
                                                             Err(err) => eprintln!("  - 적재 실패 [vscdb 세션 {}]: {}", id, err),
                                                         }
@@ -446,14 +484,7 @@ fn main() {
                                                 Err(err) => eprintln!("  - vscdb 세션 ID 목록 갱신 실패: {:?}", err),
                                             }
                                         } else {
-                                            match process_single_file(
-                                                &file,
-                                                agent.as_deref(),
-                                                &pricing_map_shared,
-                                                &db_path,
-                                                &db_write_lock,
-                                                true, // force_update
-                                            ) {
+                                            match run_watch_process(&file) {
                                                 Ok(_) => println!("  - 성공적으로 적재: {}", file.display()),
                                                 Err(err) => eprintln!("  - 적재 실패 [{}]: {}", file.display(), err),
                                             }
@@ -1088,38 +1119,6 @@ fn main() {
     }
 }
 
-/// 경로를 순회하며 파일 목록을 재귀적으로 수집하는 헬퍼 함수
-fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    if path.is_file() {
-        let path_str = path.to_str().unwrap_or("");
-        if path_str.ends_with("state.vscdb") {
-            // state.vscdb 내의 세션 ID 목록을 조회해 가상 경로로 변형해 인입
-            match adapters::antigravity::get_vscdb_session_ids(path_str) {
-                Ok(ids) => {
-                    for id in ids {
-                        let virtual_path = format!("{}?session_id={}", path_str, id);
-                        files.push(PathBuf::from(virtual_path));
-                    }
-                }
-                Err(err) => {
-                    eprintln!("Error loading vscdb session IDs: {:?}", err);
-                    files.push(path.to_path_buf());
-                }
-            }
-        } else {
-            files.push(path.to_path_buf());
-        }
-    } else if path.is_dir() {
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let child_path = entry.path();
-            collect_files(&child_path, files)?;
-        }
-    }
-    Ok(())
-}
-
-/// 천 단위 마커(콤마)를 포함하는 숫자 포맷팅 헬퍼 함수
 fn format_number(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::new();
@@ -1132,104 +1131,5 @@ fn format_number(n: u64) -> String {
         count += 1;
     }
     result.chars().rev().collect()
-}
-
-/// 단일 파일에 대해 파싱 및 데이터베이스 멱등 적재를 처리합니다.
-fn process_single_file(
-    file_path: &Path,
-    agent_filter: Option<&str>,
-    pricing_cache: &Arc<HashMap<String, crate::model::Pricing>>,
-    db_path: &str,
-    db_write_lock: &Arc<Mutex<()>>,
-    force_update: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let path_str = file_path.to_str().unwrap_or("");
-    let is_vscdb = path_str.contains("state.vscdb");
-    
-    // vscdb의 가상 경로는 실제 파일 경로가 아닌 state.vscdb?session_id=... 형식임
-    let has_vscdb_param = path_str.contains("state.vscdb?session_id=");
-
-    let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if ext != "jsonl" && !is_vscdb && !has_vscdb_param {
-        return Ok(());
-    }
-
-    let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let is_codex = file_name.starts_with("rollout-") || file_name.contains("codex") || agent_filter == Some("codex");
-    let is_antigravity = is_vscdb || has_vscdb_param || file_name.contains("antigravity") || agent_filter == Some("antigravity");
-
-    let parsed_res = if is_antigravity {
-        let adapter = AntigravityAdapter;
-        adapter.parse_session(path_str)
-    } else if is_codex {
-        let adapter = CodexAdapter;
-        adapter.parse_session(path_str)
-    } else {
-        let adapter = ClaudeCodeAdapter;
-        adapter.parse_session(path_str)
-    };
-
-    let mut parsed_session = parsed_res?;
-
-    // cost_usd 계산 및 messages 채움
-    let model_id_opt = parsed_session.session.model_id.as_deref().unwrap_or("unknown");
-    let pricing_info = parsed_session.session.model_id.as_ref()
-        .and_then(|m_id| pricing_cache.get(m_id));
-
-    // 미등록 모델 발견 시 경고
-    if pricing_info.is_none() && model_id_opt != "unknown" {
-        eprintln!(
-            "모델 단가 누락 경고: '{}' 모델의 단가 정보가 pricing 테이블에 없습니다. 기본 fallback 단가를 적용합니다.",
-            model_id_opt
-        );
-    }
-
-    for msg in &mut parsed_session.messages {
-        if msg.role == "assistant" {
-            msg.cost_usd = pricing::calculate_cost_usd(
-                pricing_info,
-                msg.input_tokens,
-                msg.cache_read_input_tokens,
-                msg.cache_creation_input_tokens,
-                msg.output_tokens,
-            );
-        }
-    }
-
-    // DB 적재 진행
-    let _write_guard = db_write_lock.lock().unwrap();
-    let conn = rusqlite::Connection::open(db_path)?;
-    let _ = conn.pragma_update(None, "foreign_keys", "ON");
-    let _ = conn.pragma_update(None, "journal_mode", "WAL");
-    let _ = conn.pragma_update(None, "busy_timeout", &5000);
-
-    let exists = match db::get_session(&conn, &parsed_session.session.session_id)? {
-        Some(_) => true,
-        None => false,
-    };
-
-    if exists {
-        if force_update {
-            // watch / hook 모드 시 멱등성을 위해 기존 데이터 완전 삭제
-            db::delete_session(&conn, &parsed_session.session.session_id)?;
-        } else {
-            // 일반 최초 스캔 시엔 중복 적재 방지를 위해 에러 리턴으로 건너뜀
-            return Err("already_exists".into());
-        }
-    }
-
-    // 정규화 데이터 DB 적재
-    db::insert_session(&conn, &parsed_session.session)?;
-    for msg in &parsed_session.messages {
-        db::insert_message(&conn, msg)?;
-    }
-    for node in &parsed_session.nodes {
-        db::insert_node(&conn, node)?;
-    }
-    for tc in &parsed_session.tool_calls {
-        db::insert_tool_call(&conn, tc)?;
-    }
-
-    Ok(())
 }
 

@@ -5,6 +5,7 @@
 pub mod codex;
 pub mod antigravity;
 pub mod claude_code;
+pub mod ingest;
 
 use serde_json::Value;
 use std::collections::BTreeMap;

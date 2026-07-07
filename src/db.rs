@@ -5,6 +5,8 @@
 
 use rusqlite::{Connection, params};
 use crate::model::{Session, Message, Node, ToolCall, Pricing, SessionReport, AgentReport, ToolReport, McpServerReport, McpToolDetailReport, MalfunctionPattern, MalfunctionDetection, MalfunctionReport};
+use serde::{Serialize, Deserialize};
+use std::collections::HashMap;
 
 /// 데이터베이스 커넥션을 초기화하고 필요한 스키마 테이블 및 인덱스를 생성합니다.
 pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
@@ -211,6 +213,12 @@ pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
     // 10. 오작동 감지용 인덱스 생성
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_malfunction_det_session ON malfunction_detections(session_id);",
+        [],
+    )?;
+
+    // 10-1. 세션별 오작동 패턴 중복 감지 방지용 유니크 인덱스 생성
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_malfunction_det_uniq ON malfunction_detections(session_id, pattern_id);",
         [],
     )?;
 
@@ -1436,7 +1444,7 @@ pub fn insert_malfunction_pattern(
     Ok(conn.last_insert_rowid())
 }
 
-/// 오작동 감지 이력을 등록합니다.
+/// 오작동 감지 이력을 등록합니다. (중복 검출 시 무시하여 멱등성 보장)
 pub fn insert_malfunction_detection(
     conn: &Connection,
     session_id: &str,
@@ -1444,7 +1452,7 @@ pub fn insert_malfunction_detection(
     evidence: &str,
 ) -> Result<i64, rusqlite::Error> {
     conn.execute(
-        "INSERT INTO malfunction_detections (session_id, pattern_id, evidence)
+        "INSERT OR IGNORE INTO malfunction_detections (session_id, pattern_id, evidence)
          VALUES (?1, ?2, ?3)",
         params![session_id, pattern_id, evidence],
     )?;
@@ -1538,5 +1546,188 @@ pub fn get_session_malfunction_reports(
     }
     Ok(list)
 }
+
+/// 필터를 적용하여 오작동 감지 이력 목록을 상세 조회합니다.
+pub fn get_malfunction_detections(
+    conn: &Connection,
+    since: Option<&str>,
+    pattern_name: Option<&str>,
+    agent_type: Option<&str>,
+) -> Result<Vec<MalfunctionReport>, rusqlite::Error> {
+    let mut query = "
+        SELECT md.id, md.session_id, mp.pattern_name, mp.description, md.evidence, md.detected_at
+        FROM malfunction_detections md
+        JOIN malfunction_patterns mp ON md.pattern_id = mp.id
+        JOIN sessions s ON md.session_id = s.session_id
+        WHERE 1=1
+    ".to_string();
+
+    let mut params_vec: Vec<rusqlite::types::Value> = Vec::new();
+
+    if let Some(ref s) = since {
+        query.push_str(" AND md.detected_at >= ? ");
+        params_vec.push(rusqlite::types::Value::Text(s.to_string()));
+    }
+    if let Some(ref p) = pattern_name {
+        query.push_str(" AND mp.pattern_name = ? ");
+        params_vec.push(rusqlite::types::Value::Text(p.to_string()));
+    }
+    if let Some(ref a) = agent_type {
+        query.push_str(" AND s.agent_type = ? ");
+        params_vec.push(rusqlite::types::Value::Text(a.to_string()));
+    }
+
+    query.push_str(" ORDER BY md.id DESC");
+
+    let mut stmt = conn.prepare(&query)?;
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+    
+    let rows = stmt.query_map(&params_refs[..], |row| {
+        Ok(MalfunctionReport {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            pattern_name: row.get(2)?,
+            description: row.get(3)?,
+            evidence: row.get(4)?,
+            detected_at: row.get(5)?,
+        })
+    })?;
+
+    let mut list = Vec::new();
+    for r in rows {
+        list.push(r?);
+    }
+    Ok(list)
+}
+
+/// 오작동 요약 보고용 구조체
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MalfunctionSummary {
+    pub pattern_id: i64,
+    pub pattern_name: String,
+    pub description: Option<String>,
+    pub matching_sessions: i64,
+    pub detection_count: i64,
+    pub first_detected: Option<String>,
+    pub last_detected: Option<String>,
+    pub recent_trend: String,
+}
+
+/// 오작동 패턴별 집계(매칭 세션 수, 누적 건수, 최초/최근 감지 시각, 최근 7일 추세)를 반환합니다.
+pub fn get_malfunction_summary(conn: &Connection) -> Result<Vec<MalfunctionSummary>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT 
+             mp.id, 
+             mp.pattern_name, 
+             mp.description, 
+             COUNT(DISTINCT md.session_id) as matching_sessions, 
+             COUNT(md.id) as detection_count,
+             MIN(md.detected_at) as first_detected, 
+             MAX(md.detected_at) as last_detected
+         FROM malfunction_patterns mp
+         LEFT JOIN malfunction_detections md ON mp.id = md.pattern_id
+         GROUP BY mp.id
+         ORDER BY matching_sessions DESC"
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+        ))
+    })?;
+
+    let mut trend_stmt = conn.prepare(
+        "SELECT 
+             pattern_id,
+             strftime('%Y-%m-%d', detected_at) as det_date,
+             COUNT(*) as cnt
+         FROM malfunction_detections
+         WHERE detected_at >= date('now', '-6 days')
+         GROUP BY pattern_id, det_date"
+    )?;
+
+    let mut trend_map: HashMap<i64, HashMap<String, i64>> = HashMap::new();
+    let trend_rows = trend_stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+
+    for tr in trend_rows {
+        let (pid, date_str, cnt) = tr?;
+        trend_map.entry(pid).or_insert_with(HashMap::new).insert(date_str, cnt);
+    }
+
+    let mut dates = Vec::new();
+    for i in (0..=6).rev() {
+        let date_str = match conn.query_row(
+            &format!("SELECT date('now', '-{} days')", i),
+            [],
+            |r| r.get::<_, String>(0)
+        ) {
+            Ok(d) => d,
+            Err(_) => "".to_string(),
+        };
+        dates.push(date_str);
+    }
+
+    let mut list = Vec::new();
+    for r in rows {
+        let (id, name, desc, matching_sessions, detection_count, first_det, last_det) = r?;
+        
+        let mut trend_parts = Vec::new();
+        let empty_map = HashMap::new();
+        let p_trends = trend_map.get(&id).unwrap_or(&empty_map);
+        for d in &dates {
+            let cnt = p_trends.get(d).copied().unwrap_or(0);
+            trend_parts.push(cnt.to_string());
+        }
+        let recent_trend = trend_parts.join("-");
+
+        list.push(MalfunctionSummary {
+            pattern_id: id,
+            pattern_name: name,
+            description: desc,
+            matching_sessions,
+            detection_count,
+            first_detected: first_det,
+            last_detected: last_det,
+            recent_trend,
+        });
+    }
+
+    Ok(list)
+}
+
+/// since 시간 이후에 생성된 세션 ID 목록에 대해 일괄 오작동 탐지를 실행합니다. (멱등성 보장)
+pub fn scan_and_detect_recent(conn: &Connection, since: &str) -> Result<usize, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT session_id FROM sessions WHERE started_at >= ?1"
+    )?;
+    let rows = stmt.query_map(params![since], |row| row.get::<_, String>(0))?;
+    
+    let mut session_ids = Vec::new();
+    for r in rows {
+        session_ids.push(r?);
+    }
+    
+    let mut count = 0;
+    for sid in &session_ids {
+        if let Ok(_) = crate::detect::malfunctions::analyze_and_detect_malfunctions(conn, sid) {
+            count += 1;
+        }
+    }
+    
+    Ok(count)
+}
+
 
 

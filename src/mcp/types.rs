@@ -410,3 +410,52 @@ pub fn fmt_malfunction_detections(session_id: &str, data: &[MalfunctionReport]) 
     out
 }
 
+/// `get_malfunction_detections` 응답 포매터 — 다차원 필터링 감지 이력 목록
+pub fn fmt_malfunction_detections_v2(data: &[MalfunctionReport]) -> String {
+    if data.is_empty() {
+        return "## 🔍 오작동 감지 이력\n조건에 매칭되는 오작동 감지 이력이 없습니다.".to_string();
+    }
+    let mut out = format!("## ⚠️ 오작동 감지 이력 목록 (총 {}건)\n\n", data.len());
+    out.push_str("| ID | 세션 ID | 패턴명 | 상세 증거 (Evidence) | 감지 시각 |\n");
+    out.push_str("|---|---|---|---|---|\n");
+    for r in data {
+        out.push_str(&format!(
+            "| {} | `{}` | **{}** | {} | {} |\n",
+            r.id,
+            short_id(&r.session_id),
+            r.pattern_name,
+            r.evidence,
+            r.detected_at,
+        ));
+    }
+    out
+}
+
+/// `get_malfunction_summary` 응답 포매터 — 패턴별 집계 리포트
+pub fn fmt_malfunction_summary(data: &[crate::db::MalfunctionSummary]) -> String {
+    if data.is_empty() {
+        return "## 📊 오작동 패턴별 요약\n감지된 통계 데이터가 없습니다.".to_string();
+    }
+    let mut out = "## 📊 오작동 패턴별 집계 요약\n\n".to_string();
+    out.push_str("| 패턴 ID | 패턴명 | 설명 | 매칭 세션 수 | 누적 감지 건수 | 최초 감지 | 최근 감지 | 최근 7일 추세 |\n");
+    out.push_str("|---|---|---|---|---|---|---|---|\n");
+    for s in data {
+        let desc = s.description.as_deref().unwrap_or("—");
+        let first = s.first_detected.as_deref().unwrap_or("—");
+        let last = s.last_detected.as_deref().unwrap_or("—");
+        out.push_str(&format!(
+            "| {} | **{}** | {} | {} | {} | {} | {} | `{}` |\n",
+            s.pattern_id,
+            s.pattern_name,
+            desc,
+            s.matching_sessions,
+            s.detection_count,
+            first,
+            last,
+            s.recent_trend,
+        ));
+    }
+    out
+}
+
+

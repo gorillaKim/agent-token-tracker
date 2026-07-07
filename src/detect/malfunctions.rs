@@ -579,3 +579,74 @@ fn calculate_cyclic_loops(tool_calls: &[ToolCall], window_size: usize) -> usize 
     }
     max_cycles
 }
+
+/// 입력된 JSON 패턴이 유효한 MalfunctionRule 형태인지 파싱을 테스트하고,
+/// 최근 생성된 세션 N개에 대해 오탐(False Positive) 여부를 추정 테스트합니다.
+pub fn validate_malfunction_pattern(
+    conn: &Connection,
+    rules_json: &str,
+    limit: usize,
+) -> Result<(bool, String, f64, bool, Vec<(String, String)>), rusqlite::Error> {
+    let rule: MalfunctionRule = match serde_json::from_str(rules_json) {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok((
+                false,
+                format!("❌ 유효하지 않은 JSON/규칙 형식: {}", e),
+                0.0,
+                false,
+                Vec::new(),
+            ));
+        }
+    };
+
+    let mut stmt = conn.prepare(
+        "SELECT session_id FROM sessions ORDER BY started_at DESC LIMIT ?1"
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |row| row.get::<_, String>(0))?;
+    let mut session_ids = Vec::new();
+    for r in rows {
+        session_ids.push(r?);
+    }
+
+    if session_ids.is_empty() {
+        return Ok((
+            true,
+            "✅ 규칙 형식이 유효합니다. (데이터베이스에 테스트할 세션이 존재하지 않아 FP 추정을 스킵합니다)".to_string(),
+            0.0,
+            false,
+            Vec::new(),
+        ));
+    }
+
+    let total_test_count = session_ids.len();
+    let mut matched_samples = Vec::new();
+
+    for sid in &session_ids {
+        if let Ok(ctx) = SessionMalfunctionContext::load(conn, sid) {
+            let (matched, evidence) = ctx.eval_rule(&rule);
+            if matched {
+                matched_samples.push((sid.clone(), evidence));
+            }
+        }
+    }
+
+    let match_count = matched_samples.len();
+    let match_ratio = (match_count as f64) / (total_test_count as f64);
+    let is_fp_suspect = match_ratio >= 0.3;
+
+    let summary_msg = if is_fp_suspect {
+        format!(
+            "⚠️ 규칙 형식이 유효하나, 최근 테스트한 세션 {}개 중 {}개({:.1}%)가 매칭되어 False Positive(오탐) 확률이 높습니다.",
+            total_test_count, match_count, match_ratio * 100.0
+        )
+    } else {
+        format!(
+            "✅ 규칙 형식이 유효하며, 최근 테스트한 세션 {}개 중 {}개({:.1}%)만 매칭되어 정상 범위 내로 보입니다.",
+            total_test_count, match_count, match_ratio * 100.0
+        )
+    };
+
+    Ok((true, summary_msg, match_ratio, is_fp_suspect, matched_samples))
+}
+
