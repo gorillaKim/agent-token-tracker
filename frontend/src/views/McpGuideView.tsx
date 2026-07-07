@@ -274,6 +274,37 @@ export function McpGuideView() {
         ],
         usage: `{ "force": false }`,
         response: `### 📥 로그 수집(Ingest) 요약 보고\n\n* 🔍 **스캔 경로**: 수집된 감지 디렉토리/파일 2개\n  - \x60/Users/user/.claude/projects\x60\n  - \x60/Users/user/.codex/sessions\x60\n\n| 항목 | 건수 |\n|---|---|\n| 총 발견된 파일 | 4개 |\n| 스캔 진행한 세션 | 4개 |\n| **새로 추가된 세션** | **1개** |\n| 중복 스킵된 세션 | 3개 |\n| 실패한 세션 | 0개 |`
+      },
+      {
+        name: "dismiss_malfunction_detection",
+        desc: "특정 오작동 감지 건에 대해 False Positive(오탐) 여부 마킹을 업데이트하여 예외 처리합니다.",
+        args: [
+          { name: "detection_id", type: "Integer", required: true, desc: "감지 이력 고유 ID." },
+          { name: "is_fp", type: "Boolean", required: true, desc: "오탐 처리 여부 지정값 (`true` 이면 오탐 마킹, `false` 이면 마킹 해제)." }
+        ],
+        usage: `{ "detection_id": 42, "is_fp": true }`,
+        response: `✅ 오작동 감지 건(ID: 42)의 False Positive 해제 상태를 true로 업데이트했습니다.`
+      },
+      {
+        name: "dismiss_session_malfunctions",
+        desc: "특정 세션의 모든 오작동 감지 건에 대해 False Positive(오탐) 여부 마킹을 일괄 업데이트합니다. (8자 이상의 prefix ID 허용)",
+        args: [
+          { name: "session_id", type: "String", required: true, desc: "일괄 처리할 대상 세션 ID 또는 prefix." },
+          { name: "is_fp", type: "Boolean", required: true, desc: "오탐 처리 여부 지정값." }
+        ],
+        usage: `{ "session_id": "test-sess-123", "is_fp": true }`,
+        response: `✅ 세션 (test-sess-123)의 모든 오작동 감지 건의 False Positive 상태를 true로 일괄 업데이트했습니다.`
+      },
+      {
+        name: "export_session_context",
+        desc: "특정 세션의 대화 메시지 및 도구 호출 이력을 시간 순서대로 압축하여 가독성 높은 다이제스트 타임라인 형태로 내보냅니다. 특정 턴 인덱스(around) 및 전후 범위(window)를 설정해 특정 구간만 분석할 수도 있습니다.",
+        args: [
+          { name: "session_id", type: "String", required: true, desc: "타임라인을 내보낼 대상 세션 ID 또는 prefix." },
+          { name: "around", type: "String", required: false, desc: "윈도우 필터링의 기준이 될 turn_index (예: '5')." },
+          { name: "window", type: "Integer", required: false, desc: "기준 턴 전후로 포함시킬 메시지/도구 개수 (기본값: 5)." }
+        ],
+        usage: `{ "session_id": "test-sess-123", "around": "5", "window": 3 }`,
+        response: `## 📁 세션 압축 타임라인 컨텍스트: \x60test-sess-123\x60\n* **에이전트**: \x60claude_code\x60\n* **작업 디렉토리**: \x60/workspace\x60\n\n| 시간 | 역할/도구명 | 내용 다이제스트 | 상태/크기 |\n|---|---|---|---|\n| \x602026-07-07T09:00:00Z\x60 | **👤 User (턴 #5)** | 아니라 다시 제대로 해줘 | — |\n| \x602026-07-07T09:00:02Z\x60 | 🛠️ \x60Edit\x60 | 인자: \x60{"path":"src/App.tsx"}\x60 | ✅ OK (1200자) |\n| \x602026-07-07T09:00:05Z\x60 | **🤖 Agent (턴 #5)** | 캘린더 컴포넌트를 다시 정상 수정했습니다. | — |`
       }
     ]
   };
