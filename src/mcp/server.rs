@@ -23,7 +23,7 @@ use crate::mcp::types::{
     fmt_tool_trend, fmt_tool_offenders, fmt_tool_percentiles,
     fmt_malfunction_patterns, fmt_malfunction_detections,
     fmt_malfunction_detections_v2, fmt_malfunction_summary,
-    fmt_session_detail,
+    fmt_session_detail, fmt_session_context,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -225,6 +225,17 @@ pub struct ValidateMalfunctionPatternParams {
 pub struct IngestLogsParams {
     /// 이미 적재 완료된 파일도 강제 덮어쓰기할지 여부.
     pub force: Option<bool>,
+}
+
+/// `export_session_context` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ExportSessionContextParams {
+    /// 대상 세션 ID 또는 8자 이상의 prefix
+    pub session_id: String,
+    /// 기준 turn_index (선택 사항)
+    pub around: Option<String>,
+    /// 전후 윈도우 크기 (선택 사항, 기본값: 5)
+    pub window: Option<usize>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -568,6 +579,25 @@ impl AtkMcpServer {
         self.handle_resolved_session(&conn, &p.session_id, |full_id| {
             match crate::detect::malfunctions::SessionMalfunctionContext::load(&conn, full_id) {
                 Ok(ctx) => fmt_session_detail(&ctx),
+                Err(e) => format!("❌ 세션 정보 로드 실패: {e}"),
+            }
+        })
+    }
+
+    /// 특정 세션의 메시지 및 도구 호출 이력을 압축하여 타임라인 형태로 내보냅니다.
+    #[tool(description = "특정 세션의 대화 및 도구 사용 이력을 압축 및 요약하여 다이제스트 타임라인을 반환합니다. session_id(세션 ID 또는 8자 이상 prefix)가 필수이며, around(턴 인덱스), window(전후 범위, 기본값 5)를 지정하여 특정 시점 주변만 잘라낼 수 있습니다.")]
+    async fn export_session_context(&self, Parameters(p): Parameters<ExportSessionContextParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        let around_turn = p.around.as_ref()
+            .and_then(|s| s.parse::<u64>().ok());
+        let window_size = p.window.unwrap_or(5);
+
+        self.handle_resolved_session(&conn, &p.session_id, |full_id| {
+            match crate::detect::malfunctions::SessionMalfunctionContext::load(&conn, full_id) {
+                Ok(ctx) => fmt_session_context(&ctx, around_turn, window_size),
                 Err(e) => format!("❌ 세션 정보 로드 실패: {e}"),
             }
         })

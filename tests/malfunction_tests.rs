@@ -392,5 +392,161 @@ mod tests {
         agent_token_tracker::db::dismiss_session_malfunctions(&conn, "sess-for-dismiss", false).unwrap();
         assert!(!agent_token_tracker::db::is_session_malfunction_dismissed(&conn, "sess-for-dismiss").unwrap());
     }
+
+    #[test]
+    fn test_new_malfunction_enhancements() {
+        let db_path = ":memory:";
+        let conn = setup_temp_db(db_path);
+
+        // 1. 테스트용 코호트 세션 데이터들 적재 (F3 Cohort 테스트용)
+        // 코호트 N=5를 맞추기 위해 5개 세션을 생성
+        for i in 1..=5 {
+            let sid = format!("cohort-sess-{}", i);
+            let sess = Session::new(
+                sid.clone(),
+                "claude_code".to_string(),
+                None,
+                "2026-07-07T10:00:00Z".to_string(),
+                None,
+                "/workspace".to_string(),
+                Some("claude-3-5-sonnet".to_string()),
+                1000,
+                100,
+                0,
+                "api".to_string(),
+                None,
+                None,
+            );
+            insert_session(&conn, &sess).unwrap();
+            // 각 세션은 턴 수가 2인 대화를 갖도록 함
+            for t in 1..=2 {
+                let msg = Message::new(
+                    sid.clone(),
+                    t,
+                    "user".to_string(),
+                    100,
+                    0,
+                    0,
+                    0,
+                    0.0,
+                    "2026-07-07T10:00:00Z".to_string(),
+                    Some("normal input".to_string()),
+                );
+                insert_message(&conn, &msg).unwrap();
+            }
+        }
+
+        // 2. 분석 대상 세션 생성 (턴 수 = 10, 정정 신호 포함, FileChurn 포함)
+        let target_sid = "target-analysis-sess";
+        let target_sess = Session::new(
+            target_sid.to_string(),
+            "claude_code".to_string(),
+            None,
+            "2026-07-07T11:00:00Z".to_string(),
+            None,
+            "/workspace".to_string(),
+            Some("claude-3-5-sonnet".to_string()),
+            5000,
+            500,
+            0,
+            "api".to_string(),
+            None,
+            None,
+        );
+        insert_session(&conn, &target_sess).unwrap();
+
+        // 2-1) 정정 메시지가 포함된 메시지 리스트 적재 (턴 수 10개로 코호트 평균 2턴을 훨씬 초과)
+        for t in 1..=10 {
+            let content = if t == 5 {
+                "아니라 다시 제대로 해줘".to_string() // 정정 어휘 매칭 대상
+            } else if t == 8 {
+                "[request interrupted by user]".to_string() // 중단 매칭 대상
+            } else {
+                "일반 명령".to_string()
+            };
+            let msg = Message::new(
+                target_sid.to_string(),
+                t as u64,
+                "user".to_string(),
+                100,
+                0,
+                0,
+                0,
+                0.0,
+                "2026-07-07T11:00:00Z".to_string(),
+                Some(content),
+            );
+            insert_message(&conn, &msg).unwrap();
+        }
+
+        // 2-2) 동일 파일에 대한 8회 이상 Edit 도구 호출 (FileChurn 대상)
+        for i in 1..=8 {
+            let tc = ToolCall::new(
+                target_sid.to_string(),
+                "Edit".to_string(),
+                Some("{\"path\":\"src/App.tsx\",\"content\":\"...\"}".to_string()),
+                format!("hash-{}", i % 2), // 재출현 oscillation (require_hash_revisit 용)
+                true,
+                false,
+                false,
+                None,
+                None,
+                "2026-07-07T11:00:00Z".to_string(),
+            );
+            insert_tool_call(&conn, &tc).unwrap();
+        }
+
+        // 3. 패턴 등록 및 평가 검증
+        // 3-1) UserCorrectionSignal 검증
+        let rule_correct = MalfunctionRule::UserCorrectionSignal {
+            patterns: vec!["다시".to_string(), "아니라".to_string(), "제대로".to_string()],
+            is_regex: false,
+            count_threshold: 1,
+        };
+        let pat_id_correct = insert_malfunction_pattern(
+            &conn,
+            "정정 패턴",
+            None,
+            &serde_json::to_string(&rule_correct).unwrap(),
+        ).unwrap();
+
+        // 3-2) FileChurn 검증
+        let rule_churn = MalfunctionRule::FileChurn {
+            min_edits_same_file: 8,
+            tools: vec!["Edit".to_string()],
+            require_hash_revisit: true,
+        };
+        let pat_id_churn = insert_malfunction_pattern(
+            &conn,
+            "Churn 패턴",
+            None,
+            &serde_json::to_string(&rule_churn).unwrap(),
+        ).unwrap();
+
+        // 3-3) CohortPercentileExceeds 검증 (TurnCount가 90% 이상으로 초과)
+        let rule_cohort = MalfunctionRule::CohortPercentileExceeds {
+            metric: agent_token_tracker::model::CohortMetric::TurnCount,
+            cohort_by: agent_token_tracker::model::CohortKey::AgentType,
+            percentile: 90,
+            min_cohort_n: 5,
+        };
+        let pat_id_cohort = insert_malfunction_pattern(
+            &conn,
+            "코호트 초과 패턴",
+            None,
+            &serde_json::to_string(&rule_cohort).unwrap(),
+        ).unwrap();
+
+        // 4. 분석 수행
+        let detected = analyze_and_detect_malfunctions(&conn, target_sid).unwrap();
+        let detected_ids: Vec<i64> = detected.iter().map(|(id, _)| *id).collect();
+
+        // 5. 검증
+        assert!(detected_ids.contains(&pat_id_correct), "정정 패턴이 감지되어야 합니다.");
+        assert!(detected_ids.contains(&pat_id_churn), "FileChurn 패턴이 감지되어야 합니다.");
+        assert!(detected_ids.contains(&pat_id_cohort), "코호트 이상치 초과 패턴이 감지되어야 합니다.");
+
+        cleanup_temp_db(db_path);
+    }
 }
 

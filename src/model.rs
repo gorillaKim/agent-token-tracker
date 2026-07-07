@@ -406,6 +406,24 @@ impl McpToolDetailReport {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CohortMetric {
+    CostUsd,
+    TurnCount,
+    ToolCallCount,
+    ResultTokens,
+    MaxEditsPerFile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CohortKey {
+    AgentType,
+    Cwd,
+    ModelId,
+}
+
 /// 오작동 규칙 매칭을 위한 Enum 정의
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -471,8 +489,30 @@ pub enum MalfunctionRule {
     /// (사용자 인터랙션 차단) 사용자가 도구 실행(승인)을 거절/취소한 횟수 임계치
     UserInterruptionLimit { count_threshold: usize },
 
+    /// (사용자 정정 신호) 사용자가 이전 발언이나 작업을 수정/정정하도록 요청한 횟수 임계치
+    UserCorrectionSignal {
+        patterns: Vec<String>,
+        is_regex: bool,
+        count_threshold: usize,
+    },
+
+    /// (동일 파일 진전 없는 Churn) 한 파일에 대해 지속적으로 편집/수정이 발생하지만 진전이 없는 루프 상태 감지
+    FileChurn {
+        min_edits_same_file: usize,
+        tools: Vec<String>,
+        require_hash_revisit: bool,
+    },
+
     /// (자식 세션 연쇄 분석) 자식 세션(Subagent 세션) 중 오작동으로 식별된 세션의 개수
     SubagentAnomalyLimit { count_threshold: usize },
+
+    /// (상대/코호트 baseline 이상치 규칙) 동종 세션 대비 비정상 상태 감지
+    CohortPercentileExceeds {
+        metric: CohortMetric,
+        cohort_by: CohortKey,
+        percentile: u8,
+        min_cohort_n: usize,
+    },
 
     /// 시계열 흐름 매칭 (정의된 단계적 규칙이 순서대로 발생했는지 판정)
     Sequence { steps: Vec<MalfunctionRule> },

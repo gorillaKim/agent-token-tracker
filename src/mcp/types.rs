@@ -582,4 +582,117 @@ pub fn fmt_session_detail(ctx: &crate::detect::malfunctions::SessionMalfunctionC
     out
 }
 
+#[derive(Debug)]
+enum TimelineEvent<'a> {
+    Msg(&'a crate::model::Message),
+    Tool(&'a crate::model::ToolCall),
+}
+
+impl<'a> TimelineEvent<'a> {
+    fn created_at(&self) -> &str {
+        match self {
+            TimelineEvent::Msg(m) => &m.created_at,
+            TimelineEvent::Tool(t) => &t.created_at,
+        }
+    }
+}
+
+pub fn fmt_session_context(
+    ctx: &crate::detect::malfunctions::SessionMalfunctionContext,
+    around_turn: Option<u64>,
+    window: usize,
+) -> String {
+    let mut out = String::new();
+    
+    out.push_str(&format!(
+        "## 📁 세션 압축 타임라인 컨텍스트: `{}`\n",
+        ctx.session.session_id
+    ));
+    out.push_str(&format!("* **에이전트**: `{}`\n", ctx.session.agent_type));
+    out.push_str(&format!("* **작업 디렉토리**: `{}`\n\n", ctx.session.cwd));
+
+    // 1. 이벤트 병합 및 시간순 정렬
+    let mut events = Vec::new();
+    for msg in &ctx.messages {
+        events.push(TimelineEvent::Msg(msg));
+    }
+    for tc in &ctx.tool_calls {
+        events.push(TimelineEvent::Tool(tc));
+    }
+    events.sort_by(|a, b| a.created_at().cmp(b.created_at()));
+
+    // 2. 윈도우 범위 설정 (around_turn이 주어지는 경우)
+    let filter_by_turn = around_turn.is_some();
+    let min_turn = around_turn.map(|t| t.saturating_sub(window as u64)).unwrap_or(0);
+    let max_turn = around_turn.map(|t| t.saturating_add(window as u64)).unwrap_or(u64::MAX);
+
+    // 3. 필터링된 이벤트 출력
+    out.push_str("| 시간 | 역할/도구명 | 내용 다이제스트 | 상태/크기 |\n");
+    out.push_str("|---|---|---|---|\n");
+
+    for ev in events {
+        match ev {
+            TimelineEvent::Msg(m) => {
+                if filter_by_turn && (m.turn_index < min_turn || m.turn_index > max_turn) {
+                    continue;
+                }
+                let role_label = match m.role.as_str() {
+                    "user" => "👤 User",
+                    "agent" | "assistant" => "🤖 Agent",
+                    other => other,
+                };
+                let content_summary = m.content.as_deref().unwrap_or("").trim();
+                let summary_truncated = if content_summary.chars().count() > 200 {
+                    let mut s: String = content_summary.chars().take(200).collect();
+                    s.push_str("... (생략)");
+                    s
+                } else {
+                    content_summary.to_string()
+                };
+                let summary_escaped = summary_truncated.replace('\n', " ");
+
+                out.push_str(&format!(
+                    "| `{}` | **{} (턴 #{})** | {} | — |\n",
+                    m.created_at, role_label, m.turn_index, summary_escaped
+                ));
+            }
+            TimelineEvent::Tool(tc) => {
+                let mut parent_turn = 0;
+                for msg in &ctx.messages {
+                    if msg.created_at <= tc.created_at {
+                        parent_turn = msg.turn_index;
+                    }
+                }
+                if filter_by_turn && (parent_turn < min_turn || parent_turn > max_turn) {
+                    continue;
+                }
+
+                let input_str = tc.tool_input.as_deref().unwrap_or("").trim();
+                let input_truncated = if input_str.chars().count() > 150 {
+                    let mut s: String = input_str.chars().take(150).collect();
+                    s.push_str("...");
+                    s
+                } else {
+                    input_str.to_string()
+                };
+                let input_escaped = input_truncated.replace('\n', " ");
+
+                let status_label = if tc.success { "✅ OK" } else { "❌ FAIL" };
+                let size_label = if let Some(chars) = tc.result_char_count {
+                    format!("{}자", chars)
+                } else {
+                    "—".to_string()
+                };
+
+                out.push_str(&format!(
+                    "| `{}` | 🛠️ `{}` | 인자: `{}` | {} ({}) |\n",
+                    tc.created_at, tc.tool_name, input_escaped, status_label, size_label
+                ));
+            }
+        }
+    }
+
+    out
+}
+
 

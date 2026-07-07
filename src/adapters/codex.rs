@@ -91,11 +91,12 @@ impl LogAdapter for CodexAdapter {
                         if let Some(last) = info.get("last_token_usage") {
                             let mut in_t = last.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                             let cache_t = last.get("cached_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let out_t = last.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let mut out_t = last.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                             let tot_t = last.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
 
                             if in_t == 0 && out_t == 0 && tot_t > 0 {
-                                in_t = tot_t;
+                                in_t = (tot_t as f64 * 0.8) as u64;
+                                out_t = tot_t - in_t;
                             }
 
                             if in_t > 0 || out_t > 0 {
@@ -121,8 +122,8 @@ impl LogAdapter for CodexAdapter {
                             let tot_t = total.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
 
                             if in_t == 0 && out_t == 0 && tot_t > 0 {
-                                total_input_tokens = tot_t;
-                                total_output_tokens = 0;
+                                total_input_tokens = (tot_t as f64 * 0.8) as u64;
+                                total_output_tokens = tot_t - total_input_tokens;
                             } else {
                                 total_input_tokens = in_t;
                                 total_output_tokens = out_t;

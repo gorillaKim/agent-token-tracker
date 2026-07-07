@@ -4,7 +4,7 @@
 
 use rusqlite::{Connection, params};
 use crate::db;
-use crate::model::{Session, Message, Node, ToolCall, MalfunctionRule};
+use crate::model::{Session, Message, Node, ToolCall, MalfunctionRule, CohortMetric, CohortKey};
 use regex::Regex;
 use chrono::DateTime;
 use std::collections::HashMap;
@@ -30,6 +30,8 @@ pub struct SessionMalfunctionContext {
     pub max_tool_calls_per_turn: usize,
     pub total_turn_count: usize,
     pub user_denied_count: usize,
+    pub user_interrupt_count: usize,
+    pub max_edits_single_file: usize,
     pub subagent_anomaly_count: usize,
 }
 
@@ -64,8 +66,8 @@ impl SessionMalfunctionContext {
             let prev = &sorted_msgs[i - 1];
             let curr = &sorted_msgs[i];
             
-            // user 메시지 직후 agent 메시지의 시간차를 계산
-            if prev.role == "user" && curr.role == "agent" {
+            // user 메시지 직후 agent/assistant 메시지의 시간차를 계산
+            if prev.role == "user" && (curr.role == "agent" || curr.role == "assistant") {
                 if let (Ok(p_time), Ok(c_time)) = (
                     DateTime::parse_from_rfc3339(&prev.created_at),
                     DateTime::parse_from_rfc3339(&curr.created_at),
@@ -202,6 +204,32 @@ impl SessionMalfunctionContext {
             subagent_anomaly_count = count;
         }
 
+        let mut user_interrupt_count = 0;
+        if session.token_source != "estimated" {
+            for msg in &messages {
+                if msg.role == "user" {
+                    if let Some(ref content) = msg.content {
+                        let content_lower = content.to_lowercase();
+                        if content_lower.contains("interrupted by user") {
+                            user_interrupt_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut file_counts: HashMap<String, usize> = HashMap::new();
+        for tc in &tool_calls {
+            if ["Edit", "Write", "NotebookEdit"].contains(&tc.tool_name.as_str()) {
+                if let Some(ref input) = tc.tool_input {
+                    if let Some(path) = extract_file_path(input) {
+                        *file_counts.entry(path).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        let max_edits_single_file = file_counts.values().copied().max().unwrap_or(0);
+
         Ok(Self {
             session,
             provider,
@@ -222,12 +250,14 @@ impl SessionMalfunctionContext {
             max_tool_calls_per_turn,
             total_turn_count,
             user_denied_count,
+            user_interrupt_count,
+            max_edits_single_file,
             subagent_anomaly_count,
         })
     }
 
     /// 특정 오작동 규칙을 평가하고 (매칭 여부, 매칭 근거 설명)을 반환합니다.
-    pub fn eval_rule(&self, rule: &MalfunctionRule) -> (bool, String) {
+    pub fn eval_rule(&self, conn: &Connection, rule: &MalfunctionRule) -> (bool, String) {
         match rule {
             MalfunctionRule::TargetAgentTypes { agent_types } => {
                 let matched = agent_types.contains(&self.session.agent_type);
@@ -362,12 +392,15 @@ impl SessionMalfunctionContext {
                 (matched, evidence)
             }
             MalfunctionRule::TokenInefficiency { ratio_threshold } => {
-                let is_inefficient = self.token_inefficiency_ratio < *ratio_threshold && self.session.total_input_tokens > 10_000;
+                let is_inefficient = self.token_inefficiency_ratio < *ratio_threshold 
+                    && self.session.total_input_tokens > 10_000
+                    && self.session.token_source == "api"
+                    && self.session.total_output_tokens > 0;
                 let matched = is_inefficient;
                 let evidence = if matched {
-                    format!("토큰 소모 효율성 낮음 감지: 실제 생성 비율 {:.4} (임계치 {:.4}, 누적 입력={})", self.token_inefficiency_ratio, ratio_threshold, self.session.total_input_tokens)
+                    format!("토큰 소모 효율성 낮음 감지: 실제 생성 비율 {:.4} (임계치 {:.4}, 누적 입력={}, 누적 출력={})", self.token_inefficiency_ratio, ratio_threshold, self.session.total_input_tokens, self.session.total_output_tokens)
                 } else {
-                    format!("토큰 소모 효율성 정상: 실제 생성 비율 {:.4} (임계치 {:.4}, 누적 입력={})", self.token_inefficiency_ratio, ratio_threshold, self.session.total_input_tokens)
+                    format!("토큰 소모 효율성 정상: 실제 생성 비율 {:.4} (임계치 {:.4}, 누적 입력={}, 누적 출력={})", self.token_inefficiency_ratio, ratio_threshold, self.session.total_input_tokens, self.session.total_output_tokens)
                 };
                 (matched, evidence)
             }
@@ -399,13 +432,141 @@ impl SessionMalfunctionContext {
                 (matched, evidence)
             }
             MalfunctionRule::UserInterruptionLimit { count_threshold } => {
-                let matched = self.user_denied_count >= *count_threshold;
+                let matched = self.user_interrupt_count >= *count_threshold;
                 let evidence = if matched {
-                    format!("사용자 실행 거절 횟수 초과: 실제 거절 {}회 (임계치 {}회)", self.user_denied_count, count_threshold)
+                    format!("사용자 실행 중단 횟수 초과: 실제 중단 {}회 (임계치 {}회)", self.user_interrupt_count, count_threshold)
                 } else {
-                    format!("사용자 실행 거절 횟수 정상: 실제 거절 {}회 (임계치 {}회)", self.user_denied_count, count_threshold)
+                    format!("사용자 실행 중단 횟수 정상: 실제 중단 {}회 (임계치 {}회)", self.user_interrupt_count, count_threshold)
                 };
                 (matched, evidence)
+            }
+            MalfunctionRule::UserCorrectionSignal { patterns, is_regex, count_threshold } => {
+                let mut matched_count = 0;
+                if self.session.token_source != "estimated" {
+                    for msg in &self.messages {
+                        if msg.role == "user" {
+                            if let Some(ref content) = msg.content {
+                                for pattern in patterns {
+                                    let is_matched = if *is_regex {
+                                        if let Ok(re) = Regex::new(pattern) {
+                                            re.is_match(content)
+                                        } else {
+                                            false
+                                        }
+                                    } else {
+                                        content.contains(pattern)
+                                    };
+                                    if is_matched {
+                                        matched_count += 1;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let matched = matched_count >= *count_threshold;
+                let evidence = if matched {
+                    format!("사용자 정정 신호 감지: 실제 정정 {}회 (임계치 {}회)", matched_count, count_threshold)
+                } else {
+                    format!("사용자 정정 신호 미달: 실제 정정 {}회 (임계치 {}회)", matched_count, count_threshold)
+                };
+                (matched, evidence)
+            }
+            MalfunctionRule::FileChurn { min_edits_same_file, tools, require_hash_revisit } => {
+                if self.session.token_source == "estimated" {
+                    (false, "antigravity 합성 세션 제외".to_string())
+                } else {
+                    let mut file_history: HashMap<String, Vec<&ToolCall>> = HashMap::new();
+                    for tc in &self.tool_calls {
+                        if tools.contains(&tc.tool_name) {
+                            if let Some(ref input) = tc.tool_input {
+                                if let Some(path) = extract_file_path(input) {
+                                    file_history.entry(path).or_default().push(tc);
+                                }
+                            }
+                        }
+                    }
+
+                    let mut max_edits = 0;
+                    let mut has_revisit = false;
+                    let mut target_file_matched = String::new();
+
+                    for (path, calls) in file_history {
+                        let edit_count = calls.len();
+                        if edit_count > max_edits {
+                            max_edits = edit_count;
+                        }
+                        
+                        let mut seen_hashes = std::collections::HashSet::new();
+                        let mut current_revisit = false;
+                        for tc in &calls {
+                            if !tc.input_hash.is_empty() {
+                                if seen_hashes.contains(&tc.input_hash) {
+                                    current_revisit = true;
+                                }
+                                seen_hashes.insert(tc.input_hash.clone());
+                            }
+                        }
+                        if edit_count >= *min_edits_same_file {
+                            if !*require_hash_revisit || current_revisit {
+                                has_revisit = true;
+                                target_file_matched = path;
+                            }
+                        }
+                    }
+
+                    let matched = max_edits >= *min_edits_same_file && (!*require_hash_revisit || has_revisit);
+                    let evidence = if matched {
+                        format!("동일 파일 반복 수정(FileChurn) 감지: 파일='{}', 최대 편집 {}회 (임계치 {}회, hash_revisit={})", target_file_matched, max_edits, min_edits_same_file, require_hash_revisit)
+                    } else {
+                        format!("동일 파일 반복 수정(FileChurn) 미달: 최대 편집 {}회 (임계치 {}회)", max_edits, min_edits_same_file)
+                    };
+                    (matched, evidence)
+                }
+            }
+            MalfunctionRule::CohortPercentileExceeds { metric, cohort_by, percentile, min_cohort_n } => {
+                let cohort_val_opt = match cohort_by {
+                    CohortKey::AgentType => Some(self.session.agent_type.clone()),
+                    CohortKey::Cwd => Some(self.session.cwd.clone()),
+                    CohortKey::ModelId => self.session.model_id.clone(),
+                };
+
+                if let Some(cohort_val) = cohort_val_opt {
+                    match db::get_cohort_session_metrics(conn, &self.session.session_id, cohort_by.clone(), &cohort_val, metric.clone()) {
+                        Ok(mut metrics) => {
+                            if metrics.len() < *min_cohort_n {
+                                (false, format!("코호트 표본 부족: 현재 {}개 (임계치 {}개)", metrics.len(), min_cohort_n))
+                            } else {
+                                // 현재 세션의 실제 메트릭 값 계산
+                                let current_val = match metric {
+                                    CohortMetric::CostUsd => self.total_cost_usd,
+                                    CohortMetric::TurnCount => self.total_turn_count as f64,
+                                    CohortMetric::ToolCallCount => self.tool_calls.len() as f64,
+                                    CohortMetric::ResultTokens => self.tool_calls.iter().map(|tc| tc.result_est_tokens.unwrap_or(0)).sum::<i64>() as f64,
+                                    CohortMetric::MaxEditsPerFile => self.max_edits_single_file as f64,
+                                };
+
+                                // 백분위 기준값 계산
+                                metrics.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                                let len = metrics.len();
+                                let index = (len * (*percentile as usize) / 100).min(len - 1);
+                                let threshold_val = metrics[index];
+
+                                let matched = current_val > threshold_val;
+                                let evidence = if matched {
+                                    format!("코호트 이상치 초과 (Key: {:?}, Metric: {:?}): 실제값 {:.4} > p{} 기준값 {:.4} (표본 {}개)", cohort_by, metric, current_val, percentile, threshold_val, len)
+                                } else {
+                                    format!("코호트 이상치 정상 (Key: {:?}, Metric: {:?}): 실제값 {:.4} <= p{} 기준값 {:.4} (표본 {}개)", cohort_by, metric, current_val, percentile, threshold_val, len)
+                                };
+                                (matched, evidence)
+                            }
+                        }
+                        Err(e) => (false, format!("코호트 조회 실패: {}", e)),
+                    }
+                } else {
+                    (false, format!("코호트 기준값 누락 (Key: {:?})", cohort_by))
+                }
             }
             MalfunctionRule::SubagentAnomalyLimit { count_threshold } => {
                 let matched = self.subagent_anomaly_count >= *count_threshold;
@@ -420,7 +581,7 @@ impl SessionMalfunctionContext {
                 let mut matched = true;
                 let mut evidence_list = Vec::new();
                 for (idx, step) in steps.iter().enumerate() {
-                    let (step_matched, step_evidence) = self.eval_rule(step);
+                    let (step_matched, step_evidence) = self.eval_rule(conn, step);
                     if !step_matched {
                         matched = false;
                         evidence_list.push(format!("단계 {}: 실패 ({})", idx + 1, step_evidence));
@@ -436,7 +597,7 @@ impl SessionMalfunctionContext {
                 let mut matched = true;
                 let mut evidence_list = Vec::new();
                 for cond in conditions {
-                    let (cond_matched, cond_evidence) = self.eval_rule(cond);
+                    let (cond_matched, cond_evidence) = self.eval_rule(conn, cond);
                     evidence_list.push(cond_evidence);
                     if !cond_matched {
                         matched = false;
@@ -449,7 +610,7 @@ impl SessionMalfunctionContext {
                 let mut matched = false;
                 let mut evidence_list = Vec::new();
                 for cond in conditions {
-                    let (cond_matched, cond_evidence) = self.eval_rule(cond);
+                    let (cond_matched, cond_evidence) = self.eval_rule(conn, cond);
                     evidence_list.push(cond_evidence);
                     if cond_matched {
                         matched = true;
@@ -459,7 +620,7 @@ impl SessionMalfunctionContext {
                 (matched, evidence)
             }
             MalfunctionRule::Not { condition } => {
-                let (cond_matched, cond_evidence) = self.eval_rule(condition);
+                let (cond_matched, cond_evidence) = self.eval_rule(conn, condition);
                 let matched = !cond_matched;
                 let evidence = format!("NOT 검증: 내부 조건 결과={} ({})", cond_matched, cond_evidence);
                 (matched, evidence)
@@ -479,7 +640,7 @@ pub fn analyze_and_detect_malfunctions(
 
     for pattern in patterns {
         if let Ok(rule) = serde_json::from_str::<MalfunctionRule>(&pattern.rules_json) {
-            let (is_matched, evidence) = ctx.eval_rule(&rule);
+            let (is_matched, evidence) = ctx.eval_rule(conn, &rule);
             if is_matched {
                 db::insert_malfunction_detection(conn, session_id, pattern.id, &evidence)?;
                 detected.push((pattern.id, evidence));
@@ -624,7 +785,7 @@ pub fn validate_malfunction_pattern(
 
     for sid in &session_ids {
         if let Ok(ctx) = SessionMalfunctionContext::load(conn, sid) {
-            let (matched, evidence) = ctx.eval_rule(&rule);
+            let (matched, evidence) = ctx.eval_rule(conn, &rule);
             if matched {
                 matched_samples.push((sid.clone(), evidence));
             }
@@ -648,5 +809,18 @@ pub fn validate_malfunction_pattern(
     };
 
     Ok((true, summary_msg, match_ratio, is_fp_suspect, matched_samples))
+}
+
+pub fn extract_file_path(tool_input: &str) -> Option<String> {
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(tool_input) {
+        if let Some(obj) = val.as_object() {
+            for key in &["file_path", "path", "target_file", "TargetFile", "targetFile", "absolute_path", "AbsolutePath", "Target"] {
+                if let Some(v) = obj.get(*key).and_then(|v| v.as_str()) {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 

@@ -4,7 +4,7 @@
 //! 멱등하게(재실행 안전하게) 생성하는 마이그레이션을 구현합니다.
 
 use rusqlite::{Connection, params};
-use crate::model::{Session, Message, Node, ToolCall, Pricing, SessionReport, AgentReport, ToolReport, McpServerReport, McpToolDetailReport, MalfunctionPattern, MalfunctionDetection, MalfunctionReport};
+use crate::model::{Session, Message, Node, ToolCall, Pricing, SessionReport, AgentReport, ToolReport, McpServerReport, McpToolDetailReport, MalfunctionPattern, MalfunctionDetection, MalfunctionReport, CohortMetric, CohortKey};
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 
@@ -1805,6 +1805,56 @@ pub fn scan_and_detect_recent(conn: &Connection, since: &str) -> Result<usize, r
         if let Ok(_) = crate::detect::malfunctions::analyze_and_detect_malfunctions(conn, sid) {
             count += 1;
         }
+
+        // F4: is_loop_suspect 업데이트 로직 수행
+        let tool_calls = get_tool_calls_by_session(conn, sid)?;
+        
+        // 1) exact-repeat (run >= 3)
+        let mut i = 0;
+        while i < tool_calls.len() {
+            let mut j = i + 1;
+            while j < tool_calls.len() 
+                && tool_calls[j].tool_name == tool_calls[i].tool_name 
+                && tool_calls[j].input_hash == tool_calls[i].input_hash 
+            {
+                j += 1;
+            }
+            if j - i >= 3 {
+                for idx in i..j {
+                    if let Some(id) = tool_calls[idx].id {
+                        conn.execute(
+                            "UPDATE tool_calls SET is_loop_suspect = 1 WHERE id = ?1",
+                            params![id],
+                        )?;
+                    }
+                }
+            }
+            i = j;
+        }
+
+        // 2) FileChurn (동일 파일 Edit/Write/NotebookEdit 8회 이상)
+        let mut file_calls: HashMap<String, Vec<i64>> = HashMap::new();
+        for tc in &tool_calls {
+            if ["Edit", "Write", "NotebookEdit"].contains(&tc.tool_name.as_str()) {
+                if let Some(ref input) = tc.tool_input {
+                    if let Some(path) = extract_file_path(input) {
+                        if let Some(id) = tc.id {
+                            file_calls.entry(path).or_default().push(id);
+                        }
+                    }
+                }
+            }
+        }
+        for (_path, ids) in file_calls {
+            if ids.len() >= 8 {
+                for id in ids {
+                    conn.execute(
+                        "UPDATE tool_calls SET is_loop_suspect = 1 WHERE id = ?1",
+                        params![id],
+                    )?;
+                }
+            }
+        }
     }
     
     Ok(count)
@@ -1833,6 +1883,120 @@ pub fn is_session_malfunction_dismissed(
     )?;
     let count: i64 = stmt.query_row(params![session_id], |r| r.get(0))?;
     Ok(count > 0)
+}
+
+pub fn get_cohort_session_metrics(
+    conn: &Connection,
+    current_session_id: &str,
+    cohort_by: CohortKey,
+    cohort_value: &str,
+    metric: CohortMetric,
+) -> Result<Vec<f64>, rusqlite::Error> {
+    let key_column = match cohort_by {
+        CohortKey::AgentType => "s.agent_type",
+        CohortKey::Cwd => "s.cwd",
+        CohortKey::ModelId => "s.model_id",
+    };
+
+    let query = match metric {
+        CohortMetric::CostUsd => {
+            format!(
+                "SELECT SUM(m.cost_usd)
+                 FROM messages m
+                 JOIN sessions s ON m.session_id = s.session_id
+                 WHERE {} = ?1 AND s.session_id != ?2 AND s.token_source != 'estimated'
+                 GROUP BY s.session_id",
+                key_column
+            )
+        }
+        CohortMetric::TurnCount => {
+            format!(
+                "SELECT MAX(m.turn_index)
+                 FROM messages m
+                 JOIN sessions s ON m.session_id = s.session_id
+                 WHERE {} = ?1 AND s.session_id != ?2
+                 GROUP BY s.session_id",
+                key_column
+            )
+        }
+        CohortMetric::ToolCallCount => {
+            format!(
+                "SELECT COUNT(tc.id)
+                 FROM tool_calls tc
+                 JOIN sessions s ON tc.session_id = s.session_id
+                 WHERE {} = ?1 AND s.session_id != ?2
+                 GROUP BY s.session_id",
+                key_column
+            )
+        }
+        CohortMetric::ResultTokens => {
+            format!(
+                "SELECT COALESCE(SUM(tc.result_est_tokens), 0)
+                 FROM tool_calls tc
+                 JOIN sessions s ON tc.session_id = s.session_id
+                 WHERE {} = ?1 AND s.session_id != ?2
+                 GROUP BY s.session_id",
+                key_column
+            )
+        }
+        CohortMetric::MaxEditsPerFile => {
+            format!(
+                "SELECT s.session_id
+                 FROM sessions s
+                 WHERE {} = ?1 AND s.session_id != ?2",
+                key_column
+            )
+        }
+    };
+
+    let mut stmt = conn.prepare(&query)?;
+    
+    if metric == CohortMetric::MaxEditsPerFile {
+        let rows = stmt.query_map(params![cohort_value, current_session_id], |row| row.get::<_, String>(0))?;
+        let mut metrics = Vec::new();
+        for r in rows {
+            let sid = r?;
+            if let Ok(tcs) = get_tool_calls_by_session(conn, &sid) {
+                let mut file_counts: HashMap<String, usize> = HashMap::new();
+                for tc in tcs {
+                    if ["Edit", "Write", "NotebookEdit"].contains(&tc.tool_name.as_str()) {
+                        if let Some(ref input) = tc.tool_input {
+                            if let Some(path) = extract_file_path(input) {
+                                *file_counts.entry(path).or_insert(0) += 1;
+                            }
+                        }
+                    }
+                }
+                let max_val = file_counts.values().copied().max().unwrap_or(0) as f64;
+                metrics.push(max_val);
+            }
+        }
+        Ok(metrics)
+    } else {
+        let rows = stmt.query_map(params![cohort_value, current_session_id], |row| row.get::<_, Option<f64>>(0))?;
+        let mut metrics = Vec::new();
+        for r in rows {
+            if let Some(val) = r? {
+                metrics.push(val);
+            } else {
+                metrics.push(0.0);
+            }
+        }
+        Ok(metrics)
+    }
+}
+
+fn extract_file_path(tool_input: &str) -> Option<String> {
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(tool_input) {
+        if let Some(obj) = val.as_object() {
+            for key in &["file_path", "path", "target_file", "TargetFile", "targetFile", "absolute_path", "AbsolutePath", "Target"] {
+                if let Some(v) = obj.get(*key).and_then(|v| v.as_str()) {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 

@@ -216,7 +216,7 @@ pub fn process_single_file(
     }
 
     for msg in &mut parsed_session.messages {
-        if msg.role == "assistant" {
+        if msg.role == "assistant" || msg.role == "agent" {
             msg.cost_usd = crate::pricing::calculate_cost_usd(
                 pricing_info,
                 msg.input_tokens,
