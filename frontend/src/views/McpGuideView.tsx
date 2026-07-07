@@ -228,6 +228,52 @@ export function McpGuideView() {
         ],
         usage: `{ "id": 3 }`,
         response: `✅ 오작동 패턴 삭제 완료 (ID: 3)`
+      },
+      {
+        name: "get_malfunction_detections",
+        desc: "시작일, 패턴명, 에이전트 종류 필터를 바탕으로 전체 오작동 감지 상세 이력 목록을 집계 조회합니다.",
+        args: [
+          { name: "since", type: "String", required: false, desc: "조회 시작일 필터 (예: '2026-07-01')." },
+          { name: "pattern_name", type: "String", required: false, desc: "특정 오작동 패턴명 필터." },
+          { name: "agent_type", type: "String", required: false, desc: "특정 에이전트 종류 필터." }
+        ],
+        usage: `{ "since": "2026-07-01", "agent_type": "claude_code" }`,
+        response: `## ⚠️ 오작동 감지 이력 목록 (총 1건)\n\n| ID | 세션 ID | 패턴명 | 상세 증거 (Evidence) | 감지 시각 |\n|---|---|---|---|---|\n| 1 | \x60test-sess\x60 | **핑퐁 감지** | 임의의 두 도구 간 핑퐁 감지: 실제 왕복 3회 (임계치 2회) | 2026-07-07 |`
+      },
+      {
+        name: "get_malfunction_summary",
+        desc: "등록된 오작동 패턴별 매칭률, 누적 건수, 최초/최근 발생 시간, 최근 7일 추세를 요약 조회합니다.",
+        args: [],
+        usage: `{}`,
+        response: `## 📊 오작동 패턴별 집계 요약\n\n| 패턴 ID | 패턴명 | 설명 | 매칭 세션 수 | 누적 감지 건수 | 최초 감지 | 최근 감지 | 최근 7일 추세 |\n|---|---|---|---|---|---|---|---|\n| 1 | **핑퐁 감지** | 두 도구간 연속 핑퐁 | 2 | 2 | 2026-07-07 | 2026-07-07 | \x600-0-0-0-0-0-2\x60 |`
+      },
+      {
+        name: "scan_and_detect_recent",
+        desc: "특정 시점 이후의 모든 세션에 대해 오작동 감지 엔진을 구동하고 결과를 DB에 멱등하게 적재합니다.",
+        args: [
+          { name: "since", type: "String", required: true, desc: "일괄 감지 기준 시작일 (예: '2026-07-01')." }
+        ],
+        usage: `{ "since": "2026-07-01" }`,
+        response: `✅ 일괄 감지 완료 (분석 수행된 세션: 15개)`
+      },
+      {
+        name: "validate_malfunction_pattern",
+        desc: "오작동 패턴 규칙 JSON의 파싱 유효성을 검사하고, 최근 세션을 테스트해 False Positive(오탐) 가능성을 사전에 진단합니다.",
+        args: [
+          { name: "rules_json", type: "String", required: true, desc: "검증 및 FP 분석 대상 규칙 JSON 문자열." },
+          { name: "limit", type: "Integer", required: false, desc: "테스트해볼 최근 세션 수 (기본값: 30)." }
+        ],
+        usage: `{\n  "rules_json": "{\\"type\\":\\"unexpected_exit\\",\\"value\\":true}",\n  "limit": 10\n}`,
+        response: `### 규칙 검증 결과 요약\n\n⚠️ 규칙 형식이 유효하나, 최근 테스트한 세션 10개 중 4개(40.0%)가 매칭되어 False Positive(오탐) 확률이 높습니다.\n\n#### 🔍 매칭 샘플 세션 및 감지 근거\n| 세션 ID | 감지 근거 (Evidence) |\n|---|---|\n| \x60test-sess\x60 | 예상치 못한 종료 상태 일치: 실제=true |`
+      },
+      {
+        name: "ingest_logs",
+        desc: "로컬 에이전트(Claude Code, Codex, Antigravity)의 로그 파일들을 자동 탐색하여 신규 세션 정보를 데이터베이스에 즉시 동기화합니다.",
+        args: [
+          { name: "force", type: "Boolean", required: false, desc: "이미 동기화된 파일도 강제 재스캔하여 덮어쓸지 여부." }
+        ],
+        usage: `{ "force": false }`,
+        response: `### 📥 로그 수집(Ingest) 요약 보고\n\n* 🔍 **스캔 경로**: 수집된 감지 디렉토리/파일 2개\n  - \x60/Users/user/.claude/projects\x60\n  - \x60/Users/user/.codex/sessions\x60\n\n| 항목 | 건수 |\n|---|---|\n| 총 발견된 파일 | 4개 |\n| 스캔 진행한 세션 | 4개 |\n| **새로 추가된 세션** | **1개** |\n| 중복 스킵된 세션 | 3개 |\n| 실패한 세션 | 0개 |`
       }
     ]
   };
