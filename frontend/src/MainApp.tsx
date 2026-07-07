@@ -222,7 +222,7 @@ export default function MainApp() {
             )}
           </Button>
           {!isSidebarCollapsed && (
-            <span className="px-2 text-[10px] text-muted-foreground/60">Version 0.3.0</span>
+            <span className="px-2 text-[10px] text-muted-foreground/60">Version 0.3.1</span>
           )}
         </div>
       </aside>

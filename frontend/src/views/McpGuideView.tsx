@@ -16,6 +16,29 @@ import {
   Info
 } from "lucide-react";
 import { toast } from "sonner";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
+const markdownComponents = {
+  h2: ({ ...props }) => <h2 className="text-sm font-bold text-foreground border-b border-border/40 pb-1 mt-4 mb-2 flex items-center gap-1.5" {...props} />,
+  h3: ({ ...props }) => <h3 className="text-xs font-semibold text-foreground/90 mt-3 mb-1.5" {...props} />,
+  p: ({ ...props }) => <p className="text-xs text-muted-foreground leading-relaxed mb-2" {...props} />,
+  table: ({ ...props }) => (
+    <div className="my-3 border border-border/40 rounded-lg overflow-x-auto w-full bg-card/10">
+      <table className="w-full border-collapse text-left text-xs min-w-[500px]" {...props} />
+    </div>
+  ),
+  thead: ({ ...props }) => <thead className="bg-card/30 border-b border-border/40" {...props} />,
+  th: ({ ...props }) => <th className="px-3 py-2 font-semibold text-muted-foreground/80 uppercase" {...props} />,
+  tbody: ({ ...props }) => <tbody className="divide-y divide-border/30" {...props} />,
+  td: ({ ...props }) => <td className="px-3 py-2 text-foreground/90" {...props} />,
+  code: ({ ...props }) => (
+    <code className="bg-accent px-1.5 py-0.5 rounded font-mono text-[11px] text-primary" {...props} />
+  ),
+  ul: ({ ...props }) => <ul className="list-disc pl-4 mb-2 space-y-1 text-xs text-muted-foreground" {...props} />,
+  li: ({ ...props }) => <li className="text-xs" {...props} />,
+  strong: ({ ...props }) => <strong className="font-semibold text-foreground" {...props} />,
+};
 
 interface ToolArg {
   name: string;
@@ -169,7 +192,7 @@ export function McpGuideView() {
           { name: "description", type: "String", required: false, desc: "패턴 동작 조건에 대한 상세 설명." },
           { name: "rules_json", type: "String", required: true, desc: "MalfunctionRule Enum이 직렬화된 JSON 규칙 정의 문자열." }
         ],
-        usage: `{ "pattern_name": "심각한 응답 지연", "description": "응답 속도가 120초 이상 지연된 사례", "rules_json": "{\\"type\\":\\"max_response_delay_sec\\",\\"value\\":120}" }`,
+        usage: `{\n  "pattern_name": "심각한 응답 지연",\n  "description": "응답 속도가 120초 이상 지연된 사례",\n  "rules_json": "{\\"type\\":\\"max_response_delay_sec\\",\\"value\\":120}"\n}`,
         response: `✅ 오작동 패턴 등록 완료 (ID: 3)`
       },
       {
@@ -326,14 +349,14 @@ export function McpGuideView() {
                         인자가 필요하지 않은 도구입니다.
                       </div>
                     ) : (
-                      <div className="border border-border/55 rounded-lg overflow-hidden bg-card/10">
-                        <div className="grid grid-cols-12 bg-card/40 px-3 py-2 text-xs font-semibold border-b border-border/55 text-muted-foreground/80 uppercase">
-                          <div className="col-span-3">인자명</div>
-                          <div className="col-span-2">타입</div>
-                          <div className="col-span-2">필수여부</div>
-                          <div className="col-span-5">설명</div>
-                        </div>
-                        <div className="divide-y divide-border/55">
+                      <div className="border border-border/55 rounded-lg overflow-x-auto bg-card/10">
+                        <div className="min-w-[600px] divide-y divide-border/55">
+                          <div className="grid grid-cols-12 bg-card/40 px-3 py-2 text-xs font-semibold border-b border-border/55 text-muted-foreground/80 uppercase">
+                            <div className="col-span-3">인자명</div>
+                            <div className="col-span-2">타입</div>
+                            <div className="col-span-2">필수여부</div>
+                            <div className="col-span-5">설명</div>
+                          </div>
                           {selectedTool.args.map((arg) => (
                             <div key={arg.name} className="grid grid-cols-12 px-3 py-2.5 text-xs items-start font-medium">
                               <div className="col-span-3 font-mono text-foreground font-semibold">{arg.name}</div>
@@ -353,7 +376,7 @@ export function McpGuideView() {
                     )}
                   </div>
 
-                  <div>
+                  <div className="w-full min-w-0 overflow-hidden">
                     <div className="flex justify-between items-center mb-2">
                       <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground/80 flex items-center gap-1.5">
                         <Code className="h-3.5 w-3.5" />
@@ -372,19 +395,21 @@ export function McpGuideView() {
                         )}
                       </Button>
                     </div>
-                    <pre className="p-3.5 bg-zinc-950 text-zinc-300 rounded-lg text-xs font-mono overflow-x-auto border border-border/40">
+                    <pre className="p-3.5 bg-zinc-950 text-zinc-300 rounded-lg text-xs font-mono w-full overflow-x-auto border border-border/40">
                       {selectedTool.usage}
                     </pre>
                   </div>
 
-                  <div>
+                  <div className="w-full min-w-0 overflow-hidden">
                     <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground/80 mb-2 flex items-center gap-1.5">
                       <Terminal className="h-3.5 w-3.5" />
                       마크다운 응답 예시 (Markdown Response)
                     </h3>
-                    <pre className="p-4 bg-zinc-950/70 text-emerald-400/90 rounded-lg text-xs font-mono overflow-x-auto whitespace-pre border border-border/40 max-h-[300px]">
-                      {selectedTool.response}
-                    </pre>
+                    <div className="p-4 bg-zinc-950/45 rounded-lg border border-border/40 max-h-[400px] overflow-y-auto w-full min-w-0">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                        {selectedTool.response}
+                      </ReactMarkdown>
+                    </div>
                   </div>
                 </CardContent>
               </ScrollArea>
