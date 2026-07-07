@@ -468,6 +468,9 @@ impl AtkMcpServer {
     /// 새로운 오작동 패턴을 등록합니다.
     #[tool(description = "새로운 오작동 패턴을 등록합니다. pattern_name(이름), description(설명), rules_json(규칙 JSON 문자열)이 필요합니다.")]
     async fn register_malfunction_pattern(&self, Parameters(p): Parameters<RegisterMalfunctionPatternParams>) -> String {
+        if let Err(e) = serde_json::from_str::<crate::model::MalfunctionRule>(&p.rules_json) {
+            return format!("❌ 등록 실패: 유효하지 않은 규칙 JSON 형식입니다. ({})", e);
+        }
         let conn = match self.conn.lock() {
             Ok(c) => c,
             Err(_) => return "❌ DB 락 취득 실패".to_string(),

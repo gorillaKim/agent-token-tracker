@@ -1050,6 +1050,10 @@ fn main() {
                     }
                 }
                 MalfunctionsSub::Register { name, description, rules } => {
+                    if let Err(e) = serde_json::from_str::<crate::model::MalfunctionRule>(rules) {
+                        eprintln!("❌ 패턴 등록 실패: 유효하지 않은 규칙 JSON 형식입니다. ({})", e);
+                        std::process::exit(1);
+                    }
                     match db::insert_malfunction_pattern(&conn, name, description.as_deref(), rules) {
                         Ok(id) => {
                             println!("✅ 오작동 패턴 등록 성공! (ID: {})", id);
