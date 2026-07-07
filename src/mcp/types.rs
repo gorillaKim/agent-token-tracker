@@ -3,7 +3,7 @@
 //! 에이전트가 읽기 쉬운 컴팩트한 Markdown 형식으로 응답을 생성합니다.
 //! engram MCP 서버와 동일한 응답 철학을 따릅니다.
 
-use crate::model::{AgentReport, SessionReport, ToolReport, McpServerReport, McpToolDetailReport};
+use crate::model::{AgentReport, SessionReport, ToolReport, McpServerReport, McpToolDetailReport, MalfunctionPattern, MalfunctionReport};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 공통 유틸
@@ -359,5 +359,54 @@ pub struct SessionMatch {
     pub total_output_tokens: u64,
     pub started_at: String,
     pub total_cost_usd: f64,
+}
+
+/// `get_malfunction_patterns` 응답 포매터 — 전체 오작동 패턴 목록
+pub fn fmt_malfunction_patterns(data: &[MalfunctionPattern]) -> String {
+    if data.is_empty() {
+        return "## 🔍 오작동 감지 패턴\n등록된 오작동 감지 패턴이 없습니다.".to_string();
+    }
+    let mut out = "## 🔍 등록된 오작동 감지 패턴 목록\n\n".to_string();
+    out.push_str("| ID | 패턴명 | 설명 | 규칙 요약 | 등록 시간 |\n");
+    out.push_str("|---|---|---|---|---|\n");
+    for p in data {
+        let desc = p.description.as_deref().unwrap_or("—");
+        let rules_summary = if p.rules_json.len() > 50 {
+            format!("{}...", &p.rules_json[..47])
+        } else {
+            p.rules_json.clone()
+        };
+        out.push_str(&format!(
+            "| {} | **{}** | {} | `{}` | {} |\n",
+            p.id,
+            p.pattern_name,
+            desc,
+            rules_summary,
+            p.created_at,
+        ));
+    }
+    out
+}
+
+/// `get_session_malfunctions` 및 `analyze_session_malfunctions` 응답 포매터 — 세션의 오작동 감지 이력
+pub fn fmt_malfunction_detections(session_id: &str, data: &[MalfunctionReport]) -> String {
+    if data.is_empty() {
+        return format!("## ✅ 세션 `{}` 오작동 감지 결과\n감지된 오작동 패턴이 없습니다.", short_id(session_id));
+    }
+    let mut out = format!("## ⚠️ 세션 `{}` 오작동 감지 이력 ({}건)\n\n", short_id(session_id), data.len());
+    out.push_str("| ID | 패턴명 | 설명 | 상세 증거 (Evidence) | 감지 시각 |\n");
+    out.push_str("|---|---|---|---|---|\n");
+    for r in data {
+        let desc = r.description.as_deref().unwrap_or("—");
+        out.push_str(&format!(
+            "| {} | **{}** | {} | {} | {} |\n",
+            r.id,
+            r.pattern_name,
+            desc,
+            r.evidence,
+            r.detected_at,
+        ));
+    }
+    out
 }
 

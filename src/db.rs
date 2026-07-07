@@ -4,7 +4,7 @@
 //! 멱등하게(재실행 안전하게) 생성하는 마이그레이션을 구현합니다.
 
 use rusqlite::{Connection, params};
-use crate::model::{Session, Message, Node, ToolCall, Pricing, SessionReport, AgentReport, ToolReport, McpServerReport, McpToolDetailReport};
+use crate::model::{Session, Message, Node, ToolCall, Pricing, SessionReport, AgentReport, ToolReport, McpServerReport, McpToolDetailReport, MalfunctionPattern, MalfunctionDetection, MalfunctionReport};
 
 /// 데이터베이스 커넥션을 초기화하고 필요한 스키마 테이블 및 인덱스를 생성합니다.
 pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
@@ -181,6 +181,36 @@ pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
          ('claude-3-opus', 'anthropic', 15.0, 75.0, 1.5, datetime('now')),
          ('claude-3-haiku', 'anthropic', 0.25, 1.25, 0.03, datetime('now')),
          ('gpt-4o', 'openai', 5.0, 15.0, 2.5, datetime('now'));",
+        [],
+    )?;
+
+    // 8. malfunction_patterns 테이블 생성
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS malfunction_patterns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pattern_name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            rules_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+        [],
+    )?;
+
+    // 9. malfunction_detections 테이블 생성
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS malfunction_detections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+            pattern_id INTEGER NOT NULL REFERENCES malfunction_patterns(id) ON DELETE CASCADE,
+            evidence TEXT NOT NULL,
+            detected_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+        [],
+    )?;
+
+    // 10. 오작동 감지용 인덱스 생성
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_malfunction_det_session ON malfunction_detections(session_id);",
         [],
     )?;
 
@@ -1390,4 +1420,123 @@ pub fn get_tool_percentiles(conn: &Connection, since: Option<&str>) -> Result<Ve
     list.sort_by(|a, b| b.call_count.cmp(&a.call_count));
     Ok(list)
 }
+
+/// 오작동 패턴을 등록합니다. (중복 시 에러 혹은 무시 등의 처리가 되도록 UNIQUE 제약 조건이 걸려 있습니다.)
+pub fn insert_malfunction_pattern(
+    conn: &Connection,
+    pattern_name: &str,
+    description: Option<&str>,
+    rules_json: &str,
+) -> Result<i64, rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO malfunction_patterns (pattern_name, description, rules_json)
+         VALUES (?1, ?2, ?3)",
+        params![pattern_name, description, rules_json],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// 오작동 감지 이력을 등록합니다.
+pub fn insert_malfunction_detection(
+    conn: &Connection,
+    session_id: &str,
+    pattern_id: i64,
+    evidence: &str,
+) -> Result<i64, rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO malfunction_detections (session_id, pattern_id, evidence)
+         VALUES (?1, ?2, ?3)",
+        params![session_id, pattern_id, evidence],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// 모든 오작동 패턴 목록을 조회합니다.
+pub fn get_malfunction_patterns(conn: &Connection) -> Result<Vec<MalfunctionPattern>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, pattern_name, description, rules_json, created_at
+         FROM malfunction_patterns
+         ORDER BY id DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(MalfunctionPattern {
+            id: row.get(0)?,
+            pattern_name: row.get(1)?,
+            description: row.get(2)?,
+            rules_json: row.get(3)?,
+            created_at: row.get(4)?,
+        })
+    })?;
+
+    let mut list = Vec::new();
+    for r in rows {
+        list.push(r?);
+    }
+    Ok(list)
+}
+
+/// 특정 세션에서 감지된 오작동 이력 목록을 조회합니다.
+pub fn get_session_malfunctions(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<MalfunctionDetection>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, session_id, pattern_id, evidence, detected_at
+         FROM malfunction_detections
+         WHERE session_id = ?1
+         ORDER BY id DESC",
+    )?;
+    let rows = stmt.query_map(params![session_id], |row| {
+        Ok(MalfunctionDetection {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            pattern_id: row.get(2)?,
+            evidence: row.get(3)?,
+            detected_at: row.get(4)?,
+        })
+    })?;
+
+    let mut list = Vec::new();
+    for r in rows {
+        list.push(r?);
+    }
+    Ok(list)
+}
+
+/// 오작동 패턴을 삭제합니다.
+pub fn delete_malfunction_pattern(conn: &Connection, id: i64) -> Result<(), rusqlite::Error> {
+    conn.execute("DELETE FROM malfunction_patterns WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// 특정 세션에서 감지된 오작동 이력 및 패턴명을 조인하여 조회합니다.
+pub fn get_session_malfunction_reports(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<MalfunctionReport>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT md.id, md.session_id, mp.pattern_name, mp.description, md.evidence, md.detected_at
+         FROM malfunction_detections md
+         JOIN malfunction_patterns mp ON md.pattern_id = mp.id
+         WHERE md.session_id = ?1
+         ORDER BY md.id DESC",
+    )?;
+    let rows = stmt.query_map(params![session_id], |row| {
+        Ok(MalfunctionReport {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            pattern_name: row.get(2)?,
+            description: row.get(3)?,
+            evidence: row.get(4)?,
+            detected_at: row.get(5)?,
+        })
+    })?;
+
+    let mut list = Vec::new();
+    for r in rows {
+        list.push(r?);
+    }
+    Ok(list)
+}
+
 

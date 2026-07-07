@@ -406,3 +406,116 @@ impl McpToolDetailReport {
     }
 }
 
+/// 오작동 규칙 매칭을 위한 Enum 정의
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MalfunctionRule {
+    /// 대상 에이전트 종류 필터링 (예: ["claude_code", "antigravity"])
+    TargetAgentTypes { agent_types: Vec<String> },
+
+    /// 대상 AI 모델 ID 필터링 (예: ["claude-3-5-sonnet", "gpt-4o"])
+    TargetModelIds { model_ids: Vec<String> },
+
+    /// 대상 AI 제공사/회사 필터링 (예: ["anthropic", "openai", "google"])
+    TargetProviders { providers: Vec<String> },
+
+    /// 예상치 못한 종료 여부 (bool)
+    UnexpectedExit { value: bool },
+
+    /// 답변 지연 시간 임계치 (초 단위)
+    MaxResponseDelaySec { value: u64 },
+
+    /// 특정 도구/스킬의 연속 실패 임계치
+    ConsecutiveToolFailures {
+        tool_name: Option<String>,
+        count_threshold: usize,
+    },
+
+    /// 특정 플러그인 또는 서버의 발동 횟수 임계치
+    PluginTriggerLimit {
+        mcp_server: String,
+        mcp_tool: Option<String>,
+        count_threshold: usize,
+    },
+    
+    /// 정규식(Regex) 기반 유연한 에러 및 로그 패턴 감지
+    ErrorMessagePatterns { 
+        patterns: Vec<String>,
+        is_regex: bool,
+    },
+
+    /// (동적 핑퐁) 임의의 두 도구 간의 왕복 핑퐁 루프 횟수 임계치 (A <-> B)
+    DynamicPingPong { cycles_threshold: usize },
+
+    /// (동적 다중 순환) 3개 이상의 도구가 순환하는 루프 횟수 임계치 (A -> B -> C -> A)
+    DynamicCyclicLoop { 
+        window_size: usize,
+        cycles_threshold: usize,
+    },
+
+    /// (동적 반복) 임의의 동일 도구 연속 반복 호출 횟수 임계치
+    DynamicRepeatedCalls { count_threshold: usize },
+
+    /// (토큰 효율성) 누적 입력 토큰 증가율 대비 유의미한 코드 생성(출력)율이 지나치게 낮음
+    TokenInefficiency { ratio_threshold: f64 },
+
+    /// (비용 임계치) 단일 세션에서 소모한 누적 비용 임계치
+    MaxSessionCostUsd { limit_usd: f64 },
+
+    /// (턴 복잡도) 한 턴 내부에서 연속적으로 호출된 도구의 수 임계치
+    MaxToolCallsPerTurn { count_threshold: usize },
+
+    /// (세션 진전 지연) 전체 대화 세션의 누적 턴 수
+    MaxTurnCount { count_threshold: usize },
+
+    /// (사용자 인터랙션 차단) 사용자가 도구 실행(승인)을 거절/취소한 횟수 임계치
+    UserInterruptionLimit { count_threshold: usize },
+
+    /// (자식 세션 연쇄 분석) 자식 세션(Subagent 세션) 중 오작동으로 식별된 세션의 개수
+    SubagentAnomalyLimit { count_threshold: usize },
+
+    /// 시계열 흐름 매칭 (정의된 단계적 규칙이 순서대로 발생했는지 판정)
+    Sequence { steps: Vec<MalfunctionRule> },
+
+    /// Logical AND 연산자 (하위 모든 조건 만족 시 참)
+    And { conditions: Vec<MalfunctionRule> },
+
+    /// Logical OR 연산자 (하위 조건 중 하나라도 만족 시 참)
+    Or { conditions: Vec<MalfunctionRule> },
+
+    /// Logical NOT 연산자 (하위 조건의 부정)
+    Not { condition: Box<MalfunctionRule> },
+}
+
+/// 오작동 패턴 데이터 모델
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MalfunctionPattern {
+    pub id: i64,
+    pub pattern_name: String,
+    pub description: Option<String>,
+    pub rules_json: String,
+    pub created_at: String,
+}
+
+/// 오작동 탐지 이력 데이터 모델
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MalfunctionDetection {
+    pub id: i64,
+    pub session_id: String,
+    pub pattern_id: i64,
+    pub evidence: String,
+    pub detected_at: String,
+}
+
+/// 오작동 감지 보고서 데이터 모델 (패턴명 조인 결과)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MalfunctionReport {
+    pub id: i64,
+    pub session_id: String,
+    pub pattern_name: String,
+    pub description: Option<String>,
+    pub evidence: String,
+    pub detected_at: String,
+}
+
+

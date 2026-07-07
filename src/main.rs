@@ -144,6 +144,47 @@ enum Commands {
         #[arg(long, help = "조회 시작일 필터 (예: 2026-06-23)")]
         since: Option<String>,
     },
+    #[command(about = "오작동(Malfunction) 감지 규칙 및 감지 이력을 관리합니다.")]
+    Malfunctions {
+        #[command(subcommand)]
+        sub: MalfunctionsSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum MalfunctionsSub {
+    #[command(about = "등록된 모든 오작동 패턴 목록을 출력합니다.")]
+    List,
+
+    #[command(about = "새로운 오작동 패턴을 등록합니다.")]
+    Register {
+        #[arg(long, help = "패턴명 (예: '지연 및 비정상 종료')")]
+        name: String,
+        
+        #[arg(long, help = "패턴 설명")]
+        description: Option<String>,
+        
+        #[arg(long, help = "패턴 규칙 JSON 문자열")]
+        rules: String,
+    },
+
+    #[command(about = "특정 세션에 대해 오작동 감지 엔진을 수행하고 분석 결과를 기록합니다.")]
+    Analyze {
+        #[arg(long, help = "대상 세션 ID")]
+        session_id: String,
+    },
+
+    #[command(about = "특정 세션의 기존 오작동 감지 이력을 조회합니다.")]
+    Session {
+        #[arg(long, help = "대상 세션 ID")]
+        session_id: String,
+    },
+
+    #[command(about = "특정 오작동 패턴을 삭제합니다.")]
+    Delete {
+        #[arg(long, help = "삭제할 패턴 ID")]
+        id: i64,
+    },
 }
 
 /// 스캔 결과를 요약 보고하기 위한 구조체 (이슈 #683 정책 준수)
@@ -947,6 +988,100 @@ fn main() {
                 Err(err) => {
                     eprintln!("백분위 데이터 조회 실패: {}", err);
                     std::process::exit(1);
+                }
+            }
+        }
+        Commands::Malfunctions { sub } => {
+            let conn = match db::init_db(&db_path) {
+                Ok(c) => c,
+                Err(err) => {
+                    eprintln!("데이터베이스 연결 실패: {}", err);
+                    std::process::exit(1);
+                }
+            };
+            match sub {
+                MalfunctionsSub::List => {
+                    match db::get_malfunction_patterns(&conn) {
+                        Ok(list) => {
+                            println!("\n=================================== 등록된 오작동 패턴 목록 ===================================");
+                            println!("| {:<5} | {:<25} | {:<40} |", "ID", "패턴명", "설명");
+                            println!("------------------------------------------------------------------------------------------------");
+                            for p in list {
+                                let desc = p.description.as_deref().unwrap_or("—");
+                                println!("| {:<5} | {:<25} | {:<40} |", p.id, p.pattern_name, desc);
+                            }
+                            println!("================================================================================================");
+                        }
+                        Err(err) => {
+                            eprintln!("패턴 목록 조회 실패: {}", err);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                MalfunctionsSub::Register { name, description, rules } => {
+                    match db::insert_malfunction_pattern(&conn, name, description.as_deref(), rules) {
+                        Ok(id) => {
+                            println!("✅ 오작동 패턴 등록 성공! (ID: {})", id);
+                        }
+                        Err(err) => {
+                            eprintln!("패턴 등록 실패: {}", err);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                MalfunctionsSub::Analyze { session_id } => {
+                    match detect::malfunctions::analyze_and_detect_malfunctions(&conn, session_id) {
+                        Ok(detected) => {
+                            println!("✅ 세션 [{}] 분석 완료. (신규 감지: {}건)", session_id, detected.len());
+                            match db::get_session_malfunction_reports(&conn, session_id) {
+                                Ok(reports) => {
+                                    println!("\n=================================== 세션 오작동 감지 이력 ===================================");
+                                    println!("| {:<5} | {:<25} | {:<50} |", "ID", "패턴명", "상세 증거 (Evidence)");
+                                    println!("---------------------------------------------------------------------------------------------");
+                                    for r in reports {
+                                        println!("| {:<5} | {:<25} | {:<50} |", r.id, r.pattern_name, r.evidence);
+                                    }
+                                    println!("=============================================================================================");
+                                }
+                                Err(err) => {
+                                    eprintln!("결과 조회 실패: {}", err);
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!("분석 수행 실패: {}", err);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                MalfunctionsSub::Session { session_id } => {
+                    match db::get_session_malfunction_reports(&conn, session_id) {
+                        Ok(reports) => {
+                            println!("\n=================================== 세션 오작동 감지 이력 ===================================");
+                            println!("| {:<5} | {:<25} | {:<50} |", "ID", "패턴명", "상세 증거 (Evidence)");
+                            println!("---------------------------------------------------------------------------------------------");
+                            for r in reports {
+                                println!("| {:<5} | {:<25} | {:<50} |", r.id, r.pattern_name, r.evidence);
+                            }
+                            println!("=============================================================================================");
+                        }
+                        Err(err) => {
+                            eprintln!("이력 조회 실패: {}", err);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                MalfunctionsSub::Delete { id } => {
+                    match db::delete_malfunction_pattern(&conn, *id) {
+                        Ok(_) => {
+                            println!("✅ 오작동 패턴 삭제 성공! (ID: {})", id);
+                        }
+                        Err(err) => {
+                            eprintln!("패턴 삭제 실패: {}", err);
+                            std::process::exit(1);
+                        }
+                    }
                 }
             }
         }

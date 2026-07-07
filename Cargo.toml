@@ -32,6 +32,8 @@ notify = "6.1.1"
 rmcp = { version = "2.1", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["full"] }
 schemars = "1.0"
+regex = "1.10"
+chrono = { version = "0.4", features = ["serde"] }
 
 [features]
 default = []

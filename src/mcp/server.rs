@@ -21,6 +21,7 @@ use crate::mcp::types::{
     fmt_loop_suspects_md, fmt_tool_usage, fmt_search_sessions,
     fmt_mcp_plugin_summary, fmt_mcp_plugin_tools,
     fmt_tool_trend, fmt_tool_offenders, fmt_tool_percentiles,
+    fmt_malfunction_patterns, fmt_malfunction_detections,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -125,6 +126,38 @@ pub struct ToolOffendersParams {
 pub struct ToolPercentilesParams {
     /// 조회 시작일 (예: "2026-07-01").
     pub since: Option<String>,
+}
+
+/// `register_malfunction_pattern` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct RegisterMalfunctionPatternParams {
+    /// 오작동 패턴의 고유 이름 (예: "지연 및 비정상 종료")
+    pub pattern_name: String,
+    /// 패턴 설명
+    pub description: Option<String>,
+    /// MalfunctionRule 구조체를 직렬화한 JSON 문자열
+    pub rules_json: String,
+}
+
+/// `analyze_session_malfunctions` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyzeSessionMalfunctionsParams {
+    /// 분석 대상 세션 ID
+    pub session_id: String,
+}
+
+/// `get_session_malfunctions` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct GetSessionMalfunctionsParams {
+    /// 조회 대상 세션 ID
+    pub session_id: String,
+}
+
+/// `delete_malfunction_pattern` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DeleteMalfunctionPatternParams {
+    /// 삭제할 오작동 패턴의 ID (i64)
+    pub id: i64,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -396,6 +429,78 @@ impl AtkMcpServer {
             Err(e) => format!("❌ 조회 실패: {e}"),
         }
     }
+
+    /// 새로운 오작동 패턴을 등록합니다.
+    #[tool(description = "새로운 오작동 패턴을 등록합니다. pattern_name(이름), description(설명), rules_json(규칙 JSON 문자열)이 필요합니다.")]
+    async fn register_malfunction_pattern(&self, Parameters(p): Parameters<RegisterMalfunctionPatternParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        match db::insert_malfunction_pattern(&conn, &p.pattern_name, p.description.as_deref(), &p.rules_json) {
+            Ok(id) => format!("✅ 오작동 패턴 등록 완료 (ID: {})", id),
+            Err(e) => format!("❌ 등록 실패: {e}"),
+        }
+    }
+
+    /// 등록된 오작동 패턴 목록을 조회합니다.
+    #[tool(description = "등록된 모든 오작동 패턴 목록을 조회합니다.")]
+    async fn get_malfunction_patterns(&self) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        match db::get_malfunction_patterns(&conn) {
+            Ok(result) => fmt_malfunction_patterns(&result),
+            Err(e) => format!("❌ 조회 실패: {e}"),
+        }
+    }
+
+    /// 특정 세션을 실시간으로 분석하여 감지된 오작동 내역을 DB에 기록하고, 그 결과를 반환합니다.
+    #[tool(description = "특정 세션에 대해 오작동 감지 엔진을 가동합니다. session_id(세션 ID)가 필요합니다.")]
+    async fn analyze_session_malfunctions(&self, Parameters(p): Parameters<AnalyzeSessionMalfunctionsParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        
+        // 1. 분석 및 오작동 검출 매칭 가동
+        if let Err(e) = crate::detect::malfunctions::analyze_and_detect_malfunctions(&conn, &p.session_id) {
+            return format!("❌ 분석 중 오류 발생: {e}");
+        }
+
+        // 2. 결과 리포트 조회
+        match db::get_session_malfunction_reports(&conn, &p.session_id) {
+            Ok(result) => fmt_malfunction_detections(&p.session_id, &result),
+            Err(e) => format!("❌ 분석 결과 조회 실패: {e}"),
+        }
+    }
+
+    /// 특정 세션에서 이미 감지된 오작동 이력 목록을 조회합니다.
+    #[tool(description = "특정 세션의 기존 오작동 감지 이력을 조회합니다. session_id(세션 ID)가 필요합니다.")]
+    async fn get_session_malfunctions(&self, Parameters(p): Parameters<GetSessionMalfunctionsParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        match db::get_session_malfunction_reports(&conn, &p.session_id) {
+            Ok(result) => fmt_malfunction_detections(&p.session_id, &result),
+            Err(e) => format!("❌ 조회 실패: {e}"),
+        }
+    }
+
+    /// 오작동 패턴을 삭제합니다.
+    #[tool(description = "특정 오작동 패턴을 삭제합니다. id(패턴 ID)가 필요합니다.")]
+    async fn delete_malfunction_pattern(&self, Parameters(p): Parameters<DeleteMalfunctionPatternParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        match db::delete_malfunction_pattern(&conn, p.id) {
+            Ok(_) => format!("✅ 오작동 패턴 삭제 완료 (ID: {})", p.id),
+            Err(e) => format!("❌ 삭제 실패: {e}"),
+        }
+    }
 }
 
 #[tool_handler]
@@ -417,7 +522,10 @@ impl ServerHandler for AtkMcpServer {
              - 프로젝트별 세션: search_sessions {cwd_contains: 'my-project'}\n\
              - 도구별 결과 토큰 추세: get_tool_trend {since: '2026-07-01'}\n\
              - 가장 큰 도구 응답 Top-N: get_tool_offenders {limit: 10}\n\
-             - 도구 결과 크기 백분위 분포: get_tool_percentiles"
+             - 도구 결과 크기 백분위 분포: get_tool_percentiles\n\
+             - 오작동 패턴 목록: get_malfunction_patterns\n\
+             - 세션 오작동 분석: analyze_session_malfunctions {session_id: '...'}\n\
+             - 세션 오작동 이력: get_session_malfunctions {session_id: '...'}"
         )
     }
 }
