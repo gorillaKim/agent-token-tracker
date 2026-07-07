@@ -28,6 +28,9 @@ const SettingsView = lazy(() =>
 const McpServerView = lazy(() =>
   import("./views/McpServerView").then((m) => ({ default: m.McpServerView }))
 );
+const McpGuideView = lazy(() =>
+  import("./views/McpGuideView").then((m) => ({ default: m.McpGuideView }))
+);
 
 // 4. 독립 UI 컴포넌트 임포트 (메인 전용 — 항상 마운트)
 import { SessionDrawer } from "./components/SessionDrawer";
@@ -46,6 +49,7 @@ import {
   Zap,
   Loader2,
   Server,
+  BookOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -61,13 +65,14 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 
-type TabKey = "dashboard" | "calendar" | "analysis" | "settings-general" | "settings-integrations" | "mcp";
+type TabKey = "dashboard" | "calendar" | "analysis" | "settings-general" | "settings-integrations" | "mcp" | "mcp-guide";
 
 const NAV_ITEMS: { key: TabKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: "dashboard", label: "실시간 관측판", icon: LayoutDashboard },
   { key: "calendar", label: "사용량 캘린더", icon: CalendarDays },
   { key: "analysis", label: "세션 심층 분석", icon: Search },
   { key: "mcp", label: "MCP 서버", icon: Server },
+  { key: "mcp-guide", label: "MCP 도구 가이드", icon: BookOpen },
   { key: "settings-general", label: "화면 및 설정", icon: SettingsIcon },
   { key: "settings-integrations", label: "플랫폼 연동", icon: Plug },
 ];
@@ -285,6 +290,8 @@ export default function MainApp() {
             />
           ) : activeTab === "mcp" ? (
             <McpServerView />
+          ) : activeTab === "mcp-guide" ? (
+            <McpGuideView />
           ) : (
             <SettingsView activeSection={activeTab} />
           )}
