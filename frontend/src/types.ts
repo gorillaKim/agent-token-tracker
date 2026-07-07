@@ -36,6 +36,7 @@ export interface LoopDetectionResult {
   session_id: string;
   is_anomaly: boolean;
   signals: LoopSignal[];
+  is_false_positive?: boolean;
 }
 
 export interface DailyTokenUsage {

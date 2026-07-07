@@ -389,20 +389,23 @@ pub fn fmt_malfunction_patterns(data: &[MalfunctionPattern]) -> String {
 }
 
 /// `get_session_malfunctions` 및 `analyze_session_malfunctions` 응답 포매터 — 세션의 오작동 감지 이력
+/// `get_session_malfunctions` 및 `analyze_session_malfunctions` 응답 포매터 — 세션의 오작동 감지 이력
 pub fn fmt_malfunction_detections(session_id: &str, data: &[MalfunctionReport]) -> String {
     if data.is_empty() {
         return format!("## ✅ 세션 `{}` 오작동 감지 결과\n감지된 오작동 패턴이 없습니다.", short_id(session_id));
     }
     let mut out = format!("## ⚠️ 세션 `{}` 오작동 감지 이력 ({}건)\n\n", short_id(session_id), data.len());
-    out.push_str("| ID | 패턴명 | 설명 | 상세 증거 (Evidence) | 감지 시각 |\n");
-    out.push_str("|---|---|---|---|---|\n");
+    out.push_str("| ID | 패턴명 | 설명 | 상태 | 상세 증거 (Evidence) | 감지 시각 |\n");
+    out.push_str("|---|---|---|---|---|---|\n");
     for r in data {
         let desc = r.description.as_deref().unwrap_or("—");
+        let status = if r.is_false_positive { "해제됨 (FP) 🟢" } else { "감지됨 🔴" };
         out.push_str(&format!(
-            "| {} | **{}** | {} | {} | {} |\n",
+            "| {} | **{}** | {} | {} | {} | {} |\n",
             r.id,
             r.pattern_name,
             desc,
+            status,
             r.evidence,
             r.detected_at,
         ));
@@ -416,14 +419,16 @@ pub fn fmt_malfunction_detections_v2(data: &[MalfunctionReport]) -> String {
         return "## 🔍 오작동 감지 이력\n조건에 매칭되는 오작동 감지 이력이 없습니다.".to_string();
     }
     let mut out = format!("## ⚠️ 오작동 감지 이력 목록 (총 {}건)\n\n", data.len());
-    out.push_str("| ID | 세션 ID | 패턴명 | 상세 증거 (Evidence) | 감지 시각 |\n");
-    out.push_str("|---|---|---|---|---|\n");
+    out.push_str("| ID | 세션 ID | 패턴명 | 상태 | 상세 증거 (Evidence) | 감지 시각 |\n");
+    out.push_str("|---|---|---|---|---|---|\n");
     for r in data {
+        let status = if r.is_false_positive { "해제됨 (FP) 🟢" } else { "감지됨 🔴" };
         out.push_str(&format!(
-            "| {} | `{}` | **{}** | {} | {} |\n",
+            "| {} | `{}` | **{}** | {} | {} | {} |\n",
             r.id,
             short_id(&r.session_id),
             r.pattern_name,
+            status,
             r.evidence,
             r.detected_at,
         ));
@@ -437,19 +442,20 @@ pub fn fmt_malfunction_summary(data: &[crate::db::MalfunctionSummary]) -> String
         return "## 📊 오작동 패턴별 요약\n감지된 통계 데이터가 없습니다.".to_string();
     }
     let mut out = "## 📊 오작동 패턴별 집계 요약\n\n".to_string();
-    out.push_str("| 패턴 ID | 패턴명 | 설명 | 매칭 세션 수 | 누적 감지 건수 | 최초 감지 | 최근 감지 | 최근 7일 추세 |\n");
-    out.push_str("|---|---|---|---|---|---|---|---|\n");
+    out.push_str("| 패턴 ID | 패턴명 | 설명 | 매칭 세션 수 | 누적 감지 건수 | 해제 건수 (FP) | 최초 감지 | 최근 감지 | 최근 7일 추세 |\n");
+    out.push_str("|---|---|---|---|---|---|---|---|---|\n");
     for s in data {
         let desc = s.description.as_deref().unwrap_or("—");
         let first = s.first_detected.as_deref().unwrap_or("—");
         let last = s.last_detected.as_deref().unwrap_or("—");
         out.push_str(&format!(
-            "| {} | **{}** | {} | {} | {} | {} | {} | `{}` |\n",
+            "| {} | **{}** | {} | {} | {} | {} | {} | {} | `{}` |\n",
             s.pattern_id,
             s.pattern_name,
             desc,
             s.matching_sessions,
             s.detection_count,
+            s.false_positive_count,
             first,
             last,
             s.recent_trend,

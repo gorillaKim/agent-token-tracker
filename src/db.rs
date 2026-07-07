@@ -222,6 +222,12 @@ pub fn init_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
         [],
     )?;
 
+    // 하위 호환 마이그레이션: is_false_positive 컬럼 추가
+    let _ = conn.execute(
+        "ALTER TABLE malfunction_detections ADD COLUMN is_false_positive INTEGER DEFAULT 0;",
+        [],
+    );
+
     Ok(conn)
 }
 
@@ -1489,18 +1495,20 @@ pub fn get_session_malfunctions(
     session_id: &str,
 ) -> Result<Vec<MalfunctionDetection>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, session_id, pattern_id, evidence, detected_at
+        "SELECT id, session_id, pattern_id, evidence, detected_at, is_false_positive
          FROM malfunction_detections
          WHERE session_id = ?1
          ORDER BY id DESC",
     )?;
     let rows = stmt.query_map(params![session_id], |row| {
+        let is_fp_int: i32 = row.get(5)?;
         Ok(MalfunctionDetection {
             id: row.get(0)?,
             session_id: row.get(1)?,
             pattern_id: row.get(2)?,
             evidence: row.get(3)?,
             detected_at: row.get(4)?,
+            is_false_positive: is_fp_int != 0,
         })
     })?;
 
@@ -1523,13 +1531,14 @@ pub fn get_session_malfunction_reports(
     session_id: &str,
 ) -> Result<Vec<MalfunctionReport>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT md.id, md.session_id, mp.pattern_name, mp.description, md.evidence, md.detected_at
+        "SELECT md.id, md.session_id, mp.pattern_name, mp.description, md.evidence, md.detected_at, md.is_false_positive
          FROM malfunction_detections md
          JOIN malfunction_patterns mp ON md.pattern_id = mp.id
          WHERE md.session_id = ?1
          ORDER BY md.id DESC",
     )?;
     let rows = stmt.query_map(params![session_id], |row| {
+        let is_fp_int: i32 = row.get(6)?;
         Ok(MalfunctionReport {
             id: row.get(0)?,
             session_id: row.get(1)?,
@@ -1537,6 +1546,7 @@ pub fn get_session_malfunction_reports(
             description: row.get(3)?,
             evidence: row.get(4)?,
             detected_at: row.get(5)?,
+            is_false_positive: is_fp_int != 0,
         })
     })?;
 
@@ -1547,17 +1557,18 @@ pub fn get_session_malfunction_reports(
     Ok(list)
 }
 
-/// 필터를 적용하여 오작동 감지 이력 목록을 상세 조회합니다. (페이지네이션 지원)
+/// 필터를 적용하여 오작동 감지 이력 목록을 상세 조회합니다. (페이지네이션 및 False Positive 필터 지원)
 pub fn get_malfunction_detections(
     conn: &Connection,
     since: Option<&str>,
     pattern_name: Option<&str>,
     agent_type: Option<&str>,
+    is_false_positive: Option<bool>,
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<Vec<MalfunctionReport>, rusqlite::Error> {
     let mut query = "
-        SELECT md.id, md.session_id, mp.pattern_name, mp.description, md.evidence, md.detected_at
+        SELECT md.id, md.session_id, mp.pattern_name, mp.description, md.evidence, md.detected_at, md.is_false_positive
         FROM malfunction_detections md
         JOIN malfunction_patterns mp ON md.pattern_id = mp.id
         JOIN sessions s ON md.session_id = s.session_id
@@ -1578,6 +1589,10 @@ pub fn get_malfunction_detections(
         query.push_str(" AND s.agent_type = ? ");
         params_vec.push(rusqlite::types::Value::Text(a.to_string()));
     }
+    if let Some(fp) = is_false_positive {
+        query.push_str(" AND md.is_false_positive = ? ");
+        params_vec.push(rusqlite::types::Value::Integer(if fp { 1 } else { 0 }));
+    }
 
     query.push_str(" ORDER BY md.id DESC");
 
@@ -1594,6 +1609,7 @@ pub fn get_malfunction_detections(
     let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
     
     let rows = stmt.query_map(&params_refs[..], |row| {
+        let is_fp_int: i32 = row.get(6)?;
         Ok(MalfunctionReport {
             id: row.get(0)?,
             session_id: row.get(1)?,
@@ -1601,6 +1617,7 @@ pub fn get_malfunction_detections(
             description: row.get(3)?,
             evidence: row.get(4)?,
             detected_at: row.get(5)?,
+            is_false_positive: is_fp_int != 0,
         })
     })?;
 
@@ -1609,6 +1626,19 @@ pub fn get_malfunction_detections(
         list.push(r?);
     }
     Ok(list)
+}
+
+/// 특정 오작동 감지 건의 False Positive(이상증상 아님) 여부 마킹을 업데이트합니다.
+pub fn dismiss_malfunction_detection(
+    conn: &Connection,
+    detection_id: i64,
+    is_fp: bool,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE malfunction_detections SET is_false_positive = ?1 WHERE id = ?2",
+        params![if is_fp { 1 } else { 0 }, detection_id],
+    )?;
+    Ok(())
 }
 
 /// 세션 prefix 해석 결과 열거형
@@ -1655,6 +1685,7 @@ pub struct MalfunctionSummary {
     pub description: Option<String>,
     pub matching_sessions: i64,
     pub detection_count: i64,
+    pub false_positive_count: i64,
     pub first_detected: Option<String>,
     pub last_detected: Option<String>,
     pub recent_trend: String,
@@ -1669,6 +1700,7 @@ pub fn get_malfunction_summary(conn: &Connection) -> Result<Vec<MalfunctionSumma
              mp.description, 
              COUNT(DISTINCT md.session_id) as matching_sessions, 
              COUNT(md.id) as detection_count,
+             SUM(CASE WHEN md.is_false_positive != 0 THEN 1 ELSE 0 END) as false_positive_count,
              MIN(md.detected_at) as first_detected, 
              MAX(md.detected_at) as last_detected
          FROM malfunction_patterns mp
@@ -1684,8 +1716,9 @@ pub fn get_malfunction_summary(conn: &Connection) -> Result<Vec<MalfunctionSumma
             row.get::<_, Option<String>>(2)?,
             row.get::<_, i64>(3)?,
             row.get::<_, i64>(4)?,
-            row.get::<_, Option<String>>(5)?,
+            row.get::<_, i64>(5)?,
             row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
         ))
     })?;
 
@@ -1728,7 +1761,7 @@ pub fn get_malfunction_summary(conn: &Connection) -> Result<Vec<MalfunctionSumma
 
     let mut list = Vec::new();
     for r in rows {
-        let (id, name, desc, matching_sessions, detection_count, first_det, last_det) = r?;
+        let (id, name, desc, matching_sessions, detection_count, false_positive_count, first_det, last_det) = r?;
         
         let mut trend_parts = Vec::new();
         let empty_map = HashMap::new();
@@ -1745,6 +1778,7 @@ pub fn get_malfunction_summary(conn: &Connection) -> Result<Vec<MalfunctionSumma
             description: desc,
             matching_sessions,
             detection_count,
+            false_positive_count,
             first_detected: first_det,
             last_detected: last_det,
             recent_trend,
@@ -1774,6 +1808,31 @@ pub fn scan_and_detect_recent(conn: &Connection, since: &str) -> Result<usize, r
     }
     
     Ok(count)
+}
+
+/// 특정 세션의 모든 오작동 감지 건의 False Positive(이상증상 아님) 여부 마킹을 업데이트합니다.
+pub fn dismiss_session_malfunctions(
+    conn: &Connection,
+    session_id: &str,
+    is_fp: bool,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE malfunction_detections SET is_false_positive = ?1 WHERE session_id = ?2",
+        params![if is_fp { 1 } else { 0 }, session_id],
+    )?;
+    Ok(())
+}
+
+/// 특정 세션이 오작동 해제(False Positive) 마킹이 되어 있는지 여부를 반환합니다.
+pub fn is_session_malfunction_dismissed(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<bool, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT COUNT(*) FROM malfunction_detections WHERE session_id = ?1 AND is_false_positive != 0"
+    )?;
+    let count: i64 = stmt.query_row(params![session_id], |r| r.get(0))?;
+    Ok(count > 0)
 }
 
 

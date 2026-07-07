@@ -171,10 +171,30 @@ pub struct GetMalfunctionDetectionsParams {
     pub pattern_name: Option<String>,
     /// 특정 에이전트 타입 필터.
     pub agent_type: Option<String>,
+    /// False Positive(이상증상 아님) 해제 여부 필터.
+    pub is_false_positive: Option<bool>,
     /// 최대 조회 개수 (페이지네이션)
     pub limit: Option<i64>,
     /// 오프셋 (페이지네이션)
     pub offset: Option<i64>,
+}
+
+/// `dismiss_malfunction_detection` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DismissMalfunctionDetectionParams {
+    /// 감지 이력 고유 ID
+    pub detection_id: i64,
+    /// False Positive(이상증상 아님) 여부
+    pub is_fp: bool,
+}
+
+/// `dismiss_session_malfunctions` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DismissSessionMalfunctionsParams {
+    /// 세션 ID (또는 8자 이상 prefix)
+    pub session_id: String,
+    /// False Positive(이상증상 아님) 여부
+    pub is_fp: bool,
 }
 
 /// `get_session_detail` 파라미터
@@ -603,7 +623,7 @@ impl AtkMcpServer {
     }
 
     /// 조건에 매칭되는 오작동 감지 상세 이력 목록을 집계 조회합니다.
-    #[tool(description = "조건(since, pattern_name, agent_type, limit, offset)을 지정하여 매칭되는 오작동 감지 상세 이력 목록을 집계 조회합니다.")]
+    #[tool(description = "조건(since, pattern_name, agent_type, is_false_positive, limit, offset)을 지정하여 매칭되는 오작동 감지 상세 이력 목록을 집계 조회합니다.")]
     async fn get_malfunction_detections(&self, Parameters(p): Parameters<GetMalfunctionDetectionsParams>) -> String {
         let conn = match self.conn.lock() {
             Ok(c) => c,
@@ -614,11 +634,60 @@ impl AtkMcpServer {
             p.since.as_deref(),
             p.pattern_name.as_deref(),
             p.agent_type.as_deref(),
+            p.is_false_positive,
             p.limit,
             p.offset,
         ) {
             Ok(result) => fmt_malfunction_detections_v2(&result),
             Err(e) => format!("❌ 조회 실패: {e}"),
+        }
+    }
+
+    /// 특정 오작동 감지 건의 False Positive(이상증상 아님) 여부 마킹을 업데이트합니다.
+    #[tool(description = "특정 오작동 감지 건의 False Positive(이상증상 아님) 여부 마킹을 업데이트합니다.")]
+    async fn dismiss_malfunction_detection(&self, Parameters(p): Parameters<DismissMalfunctionDetectionParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        match db::dismiss_malfunction_detection(&conn, p.detection_id, p.is_fp) {
+            Ok(_) => format!("✅ 오작동 감지 건(ID: {})의 False Positive 해제 상태를 {}로 업데이트했습니다.", p.detection_id, p.is_fp),
+            Err(e) => format!("❌ 업데이트 실패: {e}"),
+        }
+    }
+
+    /// 특정 세션의 모든 오작동 감지 건에 대해 False Positive(이상증상 아님) 여부 마킹을 일괄 업데이트합니다.
+    #[tool(description = "특정 세션의 모든 오작동 감지 건에 대해 False Positive(이상증상 아님) 여부 마킹을 일괄 업데이트합니다. (8자 이상 prefix 허용)")]
+    async fn dismiss_session_malfunctions(&self, Parameters(p): Parameters<DismissSessionMalfunctionsParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        
+        let resolved = match db::resolve_session_id(&conn, &p.session_id) {
+            Ok(res) => res,
+            Err(e) => return format!("❌ 세션 ID 해석 실패: {e}"),
+        };
+
+        match resolved {
+            db::ResolvedSession::Single(full_id) => {
+                match db::dismiss_session_malfunctions(&conn, &full_id, p.is_fp) {
+                    Ok(_) => format!("✅ 세션 ({})의 모든 오작동 감지 건의 False Positive 상태를 {}로 일괄 업데이트했습니다.", full_id, p.is_fp),
+                    Err(e) => format!("❌ 일괄 업데이트 실패: {e}"),
+                }
+            }
+            db::ResolvedSession::Multiple(candidates) => {
+                let mut resp = "⚠️ 입력한 Prefix 에 매칭되는 세션이 여러 개 존재합니다. 아래 세션 목록 중 정확한 ID를 다시 입력해주세요:\n\n| Session ID (8자 이상 Prefix) | 에이전트 종류 | 시작 시각 |\n| --- | --- | --- |\n".to_string();
+                for cid in candidates {
+                    let sess_info = db::get_session(&conn, &cid).ok().flatten();
+                    let (agent, start) = sess_info.map(|s| (s.agent_type, s.started_at)).unwrap_or(("unknown".to_string(), "unknown".to_string()));
+                    resp.push_str(&format!("| `{}` | {} | {} |\n", cid, agent, start));
+                }
+                resp
+            }
+            db::ResolvedSession::None => {
+                format!("❌ 매칭되는 세션을 찾을 수 없습니다. (입력값: {})", p.session_id)
+            }
         }
     }
 

@@ -231,13 +231,33 @@ fn get_loop_signals(days: Option<u32>) -> Result<Vec<LoopDetectionResult>, Strin
         let tool_calls = db::get_tool_calls_by_session(&conn, &s.session_id)
             .unwrap_or_default();
 
-        let detect_res = detect_session_anomalies(&s, &msgs, &tool_calls, &config);
+        let mut detect_res = detect_session_anomalies(&s, &msgs, &tool_calls, &config);
         if detect_res.is_anomaly {
+            if let Ok(dismissed) = db::is_session_malfunction_dismissed(&conn, &s.session_id) {
+                detect_res.is_false_positive = dismissed;
+            }
             anomalies.push(detect_res);
         }
     }
 
     Ok(anomalies)
+}
+
+/// 3-1. 특정 세션의 오작동 감지 건을 일괄 해제 마킹(False Positive)하거나 취소합니다.
+#[tauri::command]
+fn dismiss_session_malfunctions(session_id: String, is_fp: bool) -> Result<(), String> {
+    let conn = get_db_conn()?;
+    db::dismiss_session_malfunctions(&conn, &session_id, is_fp)
+        .map_err(|e| format!("오작동 해제 처리 에러: {}", e))?;
+    Ok(())
+}
+
+/// 3-2. 특정 세션의 오작동이 해제 마킹되어 있는지 여부를 반환합니다.
+#[tauri::command]
+fn is_session_malfunction_dismissed(session_id: String) -> Result<bool, String> {
+    let conn = get_db_conn()?;
+    db::is_session_malfunction_dismissed(&conn, &session_id)
+        .map_err(|e| format!("오작동 해제 여부 조회 실패: {}", e))
 }
 
 /// 사용자 PC 의 현재 로컬 타임존 오프셋을 SQLite date()/datetime()/strftime() 수정자로 반환합니다.
@@ -3793,6 +3813,8 @@ fn main() {
             get_active_sessions,
             get_agent_summaries,
             get_loop_signals,
+            dismiss_session_malfunctions,
+            is_session_malfunction_dismissed,
             get_daily_costs,
             get_daily_token_usage,
             get_daily_usage_in_range,

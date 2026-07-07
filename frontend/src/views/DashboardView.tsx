@@ -245,20 +245,35 @@ export function DashboardView({ setSelectedSessionId }: DashboardViewProps) {
                     </div>
                   ) : (
                     <>
-                      {bottomAnomalies.map((a) => (
-                        <button
-                          key={a.session_id}
-                          onClick={() => setSelectedSessionId(a.session_id)}
-                          className="flex w-full flex-col gap-0.5 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-left transition-colors hover:bg-destructive/10"
-                        >
-                          <span className="truncate font-mono text-xs">
-                            {a.session_id.substring(0, 16)}...
-                          </span>
-                          <span className="text-xs text-destructive">
-                            오작동 시그널 {a.signals.length}개 검출됨
-                          </span>
-                        </button>
-                      ))}
+                      {bottomAnomalies.map((a) => {
+                        const isFp = a.is_false_positive;
+                        return (
+                          <button
+                            key={a.session_id}
+                            onClick={() => setSelectedSessionId(a.session_id)}
+                            className={cn(
+                              "flex w-full flex-col gap-0.5 rounded-md border px-3 py-2.5 text-left transition-colors",
+                              isFp
+                                ? "border-success/30 bg-success/5 hover:bg-success/10 opacity-60"
+                                : "border-destructive/30 bg-destructive/5 hover:bg-destructive/10"
+                            )}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="truncate font-mono text-xs">
+                                {a.session_id.substring(0, 16)}...
+                              </span>
+                              {isFp && (
+                                <Badge variant="outline" className="border-success/30 bg-success/10 text-[10px] text-success px-1 py-0">
+                                  해제됨
+                                </Badge>
+                              )}
+                            </div>
+                            <span className={cn("text-xs", isFp ? "text-success" : "text-destructive")}>
+                              {isFp ? "이상증상 아님 (해제됨)" : `오작동 시그널 ${a.signals.length}개 검출됨`}
+                            </span>
+                          </button>
+                        );
+                      })}
                       {bottomAnomalies.length === 0 && (
                         <div className="py-8 text-center text-sm text-muted-foreground">
                           선택한 기간에 오작동 세션이 없습니다.

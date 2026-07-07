@@ -331,5 +331,66 @@ mod tests {
         assert_eq!(parsed.tool_calls.len(), 1);
         assert!(!parsed.tool_calls[0].success, "is_error가 true이므로 success=false 여야 합니다.");
     }
+
+    #[test]
+    fn test_dismiss_and_false_positive_flow() {
+        let db_path = ":memory:";
+        let conn = setup_temp_db(db_path);
+
+        // 1. 오작동 패턴 등록
+        let pattern_id = insert_malfunction_pattern(
+            &conn,
+            "test_pattern",
+            Some("Description"),
+            "{\"type\":\"RepeatedCalls\",\"max_calls\":3,\"tool_name\":null}",
+        ).unwrap();
+
+        // 2. 세션 및 감지 이력 등록
+        let sess = Session::new(
+            "sess-for-dismiss".to_string(),
+            "claude_code".to_string(),
+            None,
+            "/workspace".to_string(),
+            None,
+            "2026-07-07T12:00:00Z".to_string(),
+            None,
+            0,
+            0,
+            0,
+            "db".to_string(),
+            None,
+            None,
+        );
+        insert_session(&conn, &sess).unwrap();
+
+        agent_token_tracker::db::insert_malfunction_detection(
+            &conn,
+            "sess-for-dismiss",
+            pattern_id,
+            "evidence content",
+        ).unwrap();
+
+        // 3. 초기 상태 검증 (is_false_positive == false)
+        let list_all = agent_token_tracker::db::get_malfunction_detections(&conn, None, None, None, None, None, None).unwrap();
+        assert_eq!(list_all.len(), 1);
+        assert!(!list_all[0].is_false_positive);
+        assert!(!agent_token_tracker::db::is_session_malfunction_dismissed(&conn, "sess-for-dismiss").unwrap());
+
+        // 4. False Positive 마킹 해제
+        agent_token_tracker::db::dismiss_session_malfunctions(&conn, "sess-for-dismiss", true).unwrap();
+
+        // 5. 마킹 해제 상태 검증
+        assert!(agent_token_tracker::db::is_session_malfunction_dismissed(&conn, "sess-for-dismiss").unwrap());
+        let list_fp_only = agent_token_tracker::db::get_malfunction_detections(&conn, None, None, None, Some(true), None, None).unwrap();
+        assert_eq!(list_fp_only.len(), 1);
+        assert!(list_fp_only[0].is_false_positive);
+
+        let list_active_only = agent_token_tracker::db::get_malfunction_detections(&conn, None, None, None, Some(false), None, None).unwrap();
+        assert_eq!(list_active_only.len(), 0);
+
+        // 6. 복원
+        agent_token_tracker::db::dismiss_session_malfunctions(&conn, "sess-for-dismiss", false).unwrap();
+        assert!(!agent_token_tracker::db::is_session_malfunction_dismissed(&conn, "sess-for-dismiss").unwrap());
+    }
 }
 

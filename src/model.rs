@@ -505,6 +505,7 @@ pub struct MalfunctionDetection {
     pub pattern_id: i64,
     pub evidence: String,
     pub detected_at: String,
+    pub is_false_positive: bool,
 }
 
 /// 오작동 감지 보고서 데이터 모델 (패턴명 조인 결과)
@@ -516,6 +517,7 @@ pub struct MalfunctionReport {
     pub description: Option<String>,
     pub evidence: String,
     pub detected_at: String,
+    pub is_false_positive: bool,
 }
 
 

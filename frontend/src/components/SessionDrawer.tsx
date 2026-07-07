@@ -3,6 +3,7 @@ import { Session, LoopDetectionResult, SessionDetails } from "../types";
 import { formatCwd, formatTokens, formatUsd, formatLocalTime } from "../utils/formatters";
 import { LoopDirectionViewer } from "./LoopDirectionViewer";
 import { cn } from "@/lib/utils";
+import { useDismissSessionMalfunctions } from "../hooks/mutations/useMalfunctionMutations";
 import {
   Sheet,
   SheetContent,
@@ -57,6 +58,8 @@ export function SessionDrawer({
 }: SessionDrawerProps) {
   const selectedSess = sessions.find((s) => s.session_id === selectedSessionId);
   const selectedAnomaly = anomalies.find((a) => a.session_id === selectedSessionId);
+  const dismissMutation = useDismissSessionMalfunctions();
+  const isDismissed = selectedAnomaly?.is_false_positive ?? false;
 
   // 낭비 비용(Cost Waste)을 간이 추산합니다. (루핑 또는 실패한 도구 호출 비용 합산)
   let costWasteVal = 0;
@@ -235,19 +238,43 @@ export function SessionDrawer({
             </ScrollArea>
 
             {/* 이상 제어 Interrupt Action (하단 고정) */}
-            <div className="border-t border-border px-6 py-4">
-              <p className="mb-2 text-xs uppercase tracking-wide text-muted-foreground">
-                위험 관리 및 이상 제어
+            <div className="flex flex-col gap-2 border-t border-border px-6 py-4">
+              <p className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">
+                위험 관리 및 오작동 제어
               </p>
-              <Button
-                variant="destructive"
-                className="w-full"
-                onClick={() => onInterrupt(selectedSess.agent_type, selectedSess.cwd)}
-                disabled={interruptLoading}
-              >
-                {interruptLoading && <Loader2 className="h-4 w-4 animate-spin" />}
-                {interruptLoading ? "인터럽트 신호 송신 중..." : "에이전트 강제 종료 (Interrupt)"}
-              </Button>
+              
+              <div className="flex gap-2">
+                {selectedAnomaly && (
+                  <Button
+                    variant="outline"
+                    className={cn(
+                      "flex-1 border-success/30 text-success hover:bg-success/10 hover:text-success",
+                      isDismissed && "bg-success/10"
+                    )}
+                    onClick={() =>
+                      dismissMutation.mutate({
+                        sessionId: selectedSess.session_id,
+                        isFp: !isDismissed,
+                      })
+                    }
+                    disabled={dismissMutation.isPending}
+                  >
+                    {dismissMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                    {isDismissed ? "오작동 복원" : "이상증상 해제 (FP)"}
+                  </Button>
+                )}
+
+                <Button
+                  variant="destructive"
+                  className="flex-1"
+                  onClick={() => onInterrupt(selectedSess.agent_type, selectedSess.cwd)}
+                  disabled={interruptLoading}
+                >
+                  {interruptLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  {interruptLoading ? "인터럽트 송신 중..." : "에이전트 강제 종료"}
+                </Button>
+              </div>
+
               {interruptMessage && (
                 <div className="mt-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
                   {interruptMessage}

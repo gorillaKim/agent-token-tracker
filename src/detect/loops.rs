@@ -11,6 +11,7 @@ pub struct LoopDetectionResult {
     pub session_id: String,
     pub is_anomaly: bool,
     pub signals: Vec<LoopSignal>,
+    pub is_false_positive: bool,
 }
 
 /// 탐지된 개별 이상 징후 시그널
@@ -68,6 +69,7 @@ pub fn detect_session_anomalies(
         session_id: session.session_id.clone(),
         is_anomaly,
         signals,
+        is_false_positive: false,
     }
 }
 
