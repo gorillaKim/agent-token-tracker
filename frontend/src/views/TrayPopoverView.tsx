@@ -44,11 +44,12 @@ export function TrayPopoverView() {
     queryClient.invalidateQueries({ queryKey: queryKeys.subscriptionQuota() });
   };
 
-  const totalAnomalies = anomalies.length;
+  const activeAnomalies = anomalies.filter((a) => !a.is_false_positive);
+  const totalAnomalies = activeAnomalies.length;
 
   const handleBannerClick = async () => {
-    if (anomalies.length > 0) {
-      const firstAnomalySessionId = anomalies[0].session_id;
+    if (activeAnomalies.length > 0) {
+      const firstAnomalySessionId = activeAnomalies[0].session_id;
       try {
         await invoke("focus_main_window", { sessionId: firstAnomalySessionId });
       } catch (e) {

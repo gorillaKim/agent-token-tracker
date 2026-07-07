@@ -80,6 +80,7 @@ export function DashboardView({ setSelectedSessionId }: DashboardViewProps) {
 
   const bottomSessions = bottomSessionsQ.data ?? [];
   const bottomAnomalies = bottomAnomaliesQ.data ?? [];
+  const activeAnomaliesCount = bottomAnomalies.filter((a) => !a.is_false_positive).length;
 
   // 메인 창을 보는 동안 동결되어 미반영된 변경 존재 여부 → 상단 새로고침 배너
   const { dirty, refresh } = useDbDirty();
@@ -227,10 +228,10 @@ export function DashboardView({ setSelectedSessionId }: DashboardViewProps) {
                 <AlertTriangle className="h-4 w-4 text-destructive" />
                 오작동 탐지 현황
                 <Badge
-                  variant={bottomAnomalies.length > 0 ? "destructive" : "secondary"}
+                  variant={activeAnomaliesCount > 0 ? "destructive" : "secondary"}
                   className="ml-auto tabular-nums"
                 >
-                  {bottomAnomalies.length}
+                  {activeAnomaliesCount}
                 </Badge>
               </CardTitle>
             </CardHeader>
