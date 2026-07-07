@@ -1,5 +1,6 @@
 import { useState, useEffect, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { DetectedCredential } from "../types";
 import { useAppUpdate } from "../hooks/useAppUpdate";
 import { useSubscriptionQuota } from "../hooks/queries/useQuotaQuery";
@@ -83,6 +84,14 @@ function StatusBadge({ kind, children }: { kind: StatusKind; children: ReactNode
  * 로그 디렉토리 감시 경로 설정, 수동 API Key 관리 및 로컬 키체인/설정 파일 자동 크리덴셜 연동과 검증 등을 처리합니다.
  */
 export function SettingsView({ activeSection }: SettingsViewProps) {
+  const [appVersion, setAppVersion] = useState<string>("0.2.0");
+
+  useEffect(() => {
+    getVersion()
+      .then((v) => setAppVersion(v))
+      .catch((err) => console.error("getVersion failed", err));
+  }, []);
+
   const {
     state: updateState,
     update: updateInfo,
@@ -569,7 +578,7 @@ export function SettingsView({ activeSection }: SettingsViewProps) {
                 <div className="flex items-center justify-between">
                   <div className="flex flex-col gap-1">
                     <span className="text-sm font-semibold">현재 설치된 버전</span>
-                    <span className="text-xs text-muted-foreground">Version 0.2.0</span>
+                    <span className="text-xs text-muted-foreground">Version {appVersion}</span>
                   </div>
                   <div className="flex items-center gap-3">
                     {updateState === "idle" && (
