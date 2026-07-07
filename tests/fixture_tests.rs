@@ -63,7 +63,7 @@ fn cc_parser_basic_message_count_and_usage() {
 
     // user 1건 + assistant 2건 = 3건 (tool 응답은 role=tool 이므로 별도 처리)
     let user_msgs: Vec<_> = result.messages.iter().filter(|m| m.role == "user").collect();
-    let asst_msgs: Vec<_> = result.messages.iter().filter(|m| m.role == "assistant").collect();
+    let asst_msgs: Vec<_> = result.messages.iter().filter(|m| m.role == "agent").collect();
     assert!(!user_msgs.is_empty(), "user 메시지 1건 이상 필요");
     assert_eq!(asst_msgs.len(), 2, "assistant 메시지 2건 필요");
 
@@ -108,7 +108,7 @@ fn cc_parser_thinking_block_extracted_to_content() {
         .parse_session(&fixture_path("claude_code_thinking.jsonl"))
         .expect("픽스처 파싱 실패");
 
-    let asst_msgs: Vec<_> = result.messages.iter().filter(|m| m.role == "assistant").collect();
+    let asst_msgs: Vec<_> = result.messages.iter().filter(|m| m.role == "agent").collect();
     assert_eq!(asst_msgs.len(), 1, "assistant 메시지 1건 필요");
 
     let content = asst_msgs[0].content.as_ref().expect("thinking content 없음");
@@ -125,7 +125,7 @@ fn cc_parser_thinking_cache_read_tokens() {
         .parse_session(&fixture_path("claude_code_thinking.jsonl"))
         .expect("픽스처 파싱 실패");
 
-    let asst = result.messages.iter().find(|m| m.role == "assistant").expect("assistant 없음");
+    let asst = result.messages.iter().find(|m| m.role == "agent").expect("assistant 없음");
     assert_eq!(asst.input_tokens, 2000);
     assert_eq!(asst.cache_read_input_tokens, 1500);
     assert_eq!(asst.output_tokens, 600);
@@ -139,7 +139,7 @@ fn cc_parser_multi_turn_message_and_tool_counts() {
         .parse_session(&fixture_path("claude_code_multi_turn.jsonl"))
         .expect("픽스처 파싱 실패");
 
-    let asst_count = result.messages.iter().filter(|m| m.role == "assistant").count();
+    let asst_count = result.messages.iter().filter(|m| m.role == "agent").count();
     assert_eq!(asst_count, 3, "assistant 3번 응답 필요");
 
     // tool_use 블록: 첫 번째 asst 1개 + 두 번째 asst 2개 = 3개
@@ -458,7 +458,7 @@ fn price_fixture_parsed_usage_stored_in_db() {
     assert_eq!(stored_msgs.len(), parsed.messages.len(), "적재/조회 메시지 수 일치 필요");
 
     // assistant 메시지의 usage 값 일치 확인
-    let stored_asst = stored_msgs.iter().find(|m| m.role == "assistant").expect("assistant 없음");
+    let stored_asst = stored_msgs.iter().find(|m| m.role == "agent").expect("assistant 없음");
     assert_eq!(stored_asst.input_tokens, 2000);
     assert_eq!(stored_asst.cache_read_input_tokens, 1500);
     assert_eq!(stored_asst.output_tokens, 600);

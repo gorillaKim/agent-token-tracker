@@ -1547,12 +1547,14 @@ pub fn get_session_malfunction_reports(
     Ok(list)
 }
 
-/// 필터를 적용하여 오작동 감지 이력 목록을 상세 조회합니다.
+/// 필터를 적용하여 오작동 감지 이력 목록을 상세 조회합니다. (페이지네이션 지원)
 pub fn get_malfunction_detections(
     conn: &Connection,
     since: Option<&str>,
     pattern_name: Option<&str>,
     agent_type: Option<&str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
 ) -> Result<Vec<MalfunctionReport>, rusqlite::Error> {
     let mut query = "
         SELECT md.id, md.session_id, mp.pattern_name, mp.description, md.evidence, md.detected_at
@@ -1579,6 +1581,15 @@ pub fn get_malfunction_detections(
 
     query.push_str(" ORDER BY md.id DESC");
 
+    if let Some(l) = limit {
+        query.push_str(" LIMIT ? ");
+        params_vec.push(rusqlite::types::Value::Integer(l));
+        if let Some(o) = offset {
+            query.push_str(" OFFSET ? ");
+            params_vec.push(rusqlite::types::Value::Integer(o));
+        }
+    }
+
     let mut stmt = conn.prepare(&query)?;
     let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
     
@@ -1598,6 +1609,42 @@ pub fn get_malfunction_detections(
         list.push(r?);
     }
     Ok(list)
+}
+
+/// 세션 prefix 해석 결과 열거형
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ResolvedSession {
+    None,
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+/// session_id 식별자 또는 prefix를 해석하여 full session_id를 찾아냅니다. (8자 이상 prefix 매칭 지원)
+pub fn resolve_session_id(conn: &Connection, id_or_prefix: &str) -> Result<ResolvedSession, rusqlite::Error> {
+    let mut stmt = conn.prepare("SELECT session_id FROM sessions WHERE session_id = ?1")?;
+    let mut rows = stmt.query_map(params![id_or_prefix], |r| r.get::<_, String>(0))?;
+    if let Some(r) = rows.next() {
+        return Ok(ResolvedSession::Single(r?));
+    }
+
+    if id_or_prefix.len() >= 8 {
+        let pattern = format!("{}%", id_or_prefix);
+        let mut stmt = conn.prepare("SELECT session_id FROM sessions WHERE session_id LIKE ?1 ORDER BY started_at DESC")?;
+        let rows = stmt.query_map(params![pattern], |r| r.get::<_, String>(0))?;
+        let mut matches = Vec::new();
+        for r in rows {
+            matches.push(r?);
+        }
+        if matches.is_empty() {
+            Ok(ResolvedSession::None)
+        } else if matches.len() == 1 {
+            Ok(ResolvedSession::Single(matches.remove(0)))
+        } else {
+            Ok(ResolvedSession::Multiple(matches))
+        }
+    } else {
+        Ok(ResolvedSession::None)
+    }
 }
 
 /// 오작동 요약 보고용 구조체

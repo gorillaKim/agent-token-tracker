@@ -253,5 +253,83 @@ mod tests {
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].0, session_id);
     }
+
+    #[test]
+    fn test_resolve_session_id_prefix() {
+        let db_path = ":memory:";
+        let conn = setup_temp_db(db_path);
+
+        let session_id_1 = "session-abcdef-123456";
+        let session_id_2 = "session-abcdef-789012";
+
+        let session1 = Session::new(
+            session_id_1.to_string(),
+            "claude_code".to_string(),
+            Some("1.0".to_string()),
+            "2026-07-07T09:00:00Z".to_string(),
+            None,
+            "/workspace".to_string(),
+            Some("claude-3-5-sonnet".to_string()),
+            100, 100, 0, "api".to_string(), None, None
+        );
+        let session2 = Session::new(
+            session_id_2.to_string(),
+            "claude_code".to_string(),
+            Some("1.0".to_string()),
+            "2026-07-07T09:00:10Z".to_string(), // started_at이 더 최신
+            None,
+            "/workspace".to_string(),
+            Some("claude-3-5-sonnet".to_string()),
+            100, 100, 0, "api".to_string(), None, None
+        );
+        insert_session(&conn, &session1).unwrap();
+        insert_session(&conn, &session2).unwrap();
+
+        // 1. Exact match 검증
+        let resolved = agent_token_tracker::db::resolve_session_id(&conn, session_id_1).unwrap();
+        assert_eq!(resolved, agent_token_tracker::db::ResolvedSession::Single(session_id_1.to_string()));
+
+        // 2. 8자 미만 prefix (None이어야 함)
+        let resolved = agent_token_tracker::db::resolve_session_id(&conn, "session").unwrap();
+        assert_eq!(resolved, agent_token_tracker::db::ResolvedSession::None);
+
+        // 3. 고유한 단일 prefix (8자 이상)
+        let resolved = agent_token_tracker::db::resolve_session_id(&conn, "session-abcdef-7").unwrap();
+        assert_eq!(resolved, agent_token_tracker::db::ResolvedSession::Single(session_id_2.to_string()));
+
+        // 4. 다중 매칭 prefix (Multiple 반환되어야 함)
+        let resolved = agent_token_tracker::db::resolve_session_id(&conn, "session-abcdef").unwrap();
+        match resolved {
+            agent_token_tracker::db::ResolvedSession::Multiple(matches) => {
+                assert_eq!(matches.len(), 2);
+                assert_eq!(matches[0], session_id_2.to_string()); // ORDER BY started_at DESC 에 의해 최신 세션이 0순위
+                assert_eq!(matches[1], session_id_1.to_string());
+            }
+            _ => panic!("Multiple을 반환해야 합니다."),
+        }
+    }
+
+    #[test]
+    fn test_claude_code_adapter_normalization_and_errors() {
+        let raw_log = r#"
+{"type":"session_start","session_id":"test-claude-sess","agent_type":"claude_code","started_at":"2026-07-07T09:00:00Z","cwd":"/workspace"}
+{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Thinking..."},{"type":"tool_use","id":"call_1","name":"read_file","input":{"path":"src/lib.rs"}}],"usage":{"input_tokens":50,"output_tokens":100}},"timestamp":"2026-07-07T09:00:05Z"}
+{"type":"message","message":{"role":"tool","content":[{"type":"tool_result","tool_use_id":"call_1","content":"error: file not found","is_error":true}],"usage":{"input_tokens":10,"output_tokens":20}},"timestamp":"2026-07-07T09:00:10Z"}
+{"type":"session_end","timestamp":"2026-07-07T09:00:15Z"}
+"#;
+        // claude_code 어댑터를 가동해 파싱을 진행
+        let parsed = agent_token_tracker::adapters::claude_code::ClaudeCodeAdapter::parse_raw_logs(
+            "test-claude-sess",
+            raw_log.as_bytes()
+        ).unwrap();
+        
+        // 1. role이 assistant -> agent 로 정규화되었는지 검증
+        assert_eq!(parsed.messages.len(), 2);
+        assert_eq!(parsed.messages[0].role, "agent");
+        
+        // 2. tool call success가 is_error=true 에 의해 false로 설정되었는지 검증
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert!(!parsed.tool_calls[0].success, "is_error가 true이므로 success=false 여야 합니다.");
+    }
 }
 

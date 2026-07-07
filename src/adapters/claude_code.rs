@@ -16,14 +16,22 @@ pub struct ClaudeCodeAdapter;
 impl LogAdapter for ClaudeCodeAdapter {
     fn parse_session(&self, path: &str) -> Result<NormalizedSession, Box<dyn std::error::Error>> {
         let file = File::open(path)?;
-        let reader = BufReader::new(file);
-
-        // 1. 기본 fallback 메타정보 설정 (파일명 기반)
         let file_name = Path::new(path)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown_session");
+        Self::parse_raw_logs(file_name, file)
+    }
+}
 
+impl ClaudeCodeAdapter {
+    pub fn parse_raw_logs<R: std::io::Read>(
+        file_name: &str,
+        reader: R,
+    ) -> Result<NormalizedSession, Box<dyn std::error::Error>> {
+        let buf_reader = BufReader::new(reader);
+
+        // 1. 기본 fallback 메타정보 설정 (파일명 기반)
         let mut session_id = file_name.to_string();
         let mut agent_version = None;
         let mut started_at = "1970-01-01T00:00:00Z".to_string();
@@ -41,7 +49,7 @@ impl LogAdapter for ClaudeCodeAdapter {
         let mut turn_index = 0;
 
         // 2. JSONL 줄 단위 스트리밍 순회
-        for line_result in reader.lines() {
+        for line_result in buf_reader.lines() {
             let line = line_result?;
             if line.trim().is_empty() {
                 continue;
@@ -146,31 +154,125 @@ impl LogAdapter for ClaudeCodeAdapter {
 
                             // content 블록 파싱하여 텍스트 결합
                             let mut text_content = String::new();
+                            let mut has_tool_result_block = false;
                             if let Some(content_array) = msg_obj.get("content").and_then(|c| c.as_array()) {
                                 for block in content_array {
-                                    let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("unknown");
-                                    match block_type {
-                                        "thinking" => {
-                                            if let Some(thinking_text) = block.get("thinking").and_then(|t| t.as_str()) {
-                                                if !text_content.is_empty() {
-                                                    text_content.push('\n');
+                                    if let Some(b_type) = block.get("type").and_then(|t| t.as_str()) {
+                                        match b_type {
+                                            "text" => {
+                                                if let Some(txt) = block.get("text").and_then(|t| t.as_str()) {
+                                                    if !text_content.is_empty() {
+                                                        text_content.push('\n');
+                                                    }
+                                                    text_content.push_str(txt);
                                                 }
-                                                text_content.push_str("[Thinking] ");
-                                                text_content.push_str(thinking_text);
+                                                nodes.push(Node::new(
+                                                    session_id.clone(),
+                                                    "text".to_string(),
+                                                    true,
+                                                    timestamp.to_string(),
+                                                ));
                                             }
-                                        }
-                                        "text" => {
-                                            if let Some(text_val) = block.get("text").and_then(|t| t.as_str()) {
-                                                if !text_content.is_empty() {
-                                                    text_content.push('\n');
+                                            "thinking" => {
+                                                if let Some(thought) = block.get("thinking").and_then(|t| t.as_str()) {
+                                                    if !text_content.is_empty() {
+                                                        text_content.push('\n');
+                                                    }
+                                                    text_content.push_str("[Thinking] ");
+                                                    text_content.push_str(thought);
                                                 }
-                                                text_content.push_str(text_val);
+                                                nodes.push(Node::new(
+                                                    session_id.clone(),
+                                                    "text".to_string(),
+                                                    true,
+                                                    timestamp.to_string(),
+                                                ));
                                             }
+                                            "tool_use" => {
+                                                nodes.push(Node::new(
+                                                    session_id.clone(),
+                                                    "tool_call".to_string(),
+                                                    true,
+                                                    timestamp.to_string(),
+                                                ));
+
+                                                if let Some(tool_name) =
+                                                    block.get("name").and_then(|n| n.as_str())
+                                                {
+                                                    let tool_input_val =
+                                                        block.get("input").unwrap_or(&Value::Null);
+
+                                                    // 정규화된 tool_input 획득 및 멱등 input_hash 산출
+                                                    let normalized_input_str =
+                                                        super::normalize_tool_input(tool_input_val);
+                                                    let input_hash =
+                                                        super::calculate_input_hash(tool_input_val);
+
+                                                    let (is_mcp, mcp_server, mcp_tool, final_tool_name) = if tool_name.starts_with("mcp__") {
+                                                        let remains = &tool_name["mcp__".len()..];
+                                                        if let Some((srv, tl)) = remains.split_once("__") {
+                                                            (true, Some(srv.to_string()), Some(tl.to_string()), format!("{}/{}", srv, tl))
+                                                        } else {
+                                                            (true, Some("unknown_server".to_string()), Some(remains.to_string()), tool_name.to_string())
+                                                        }
+                                                    } else {
+                                                        (false, None, None, tool_name.to_string())
+                                                    };
+
+                                                    let block_id = block.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                                    let mut tc = ToolCall::new(
+                                                        session_id.clone(),
+                                                        final_tool_name,
+                                                        Some(normalized_input_str),
+                                                        input_hash,
+                                                        true,
+                                                        false,
+                                                        is_mcp,
+                                                        mcp_server,
+                                                        mcp_tool,
+                                                        timestamp.to_string(),
+                                                    );
+                                                    tc.tool_use_id = block_id;
+                                                    tool_calls.push(tc);
+                                                }
+                                            }
+                                            "tool_result" => {
+                                                has_tool_result_block = true;
+                                                let msg_tool_use_id = msg_obj.get("tool_use_id").and_then(|v| v.as_str());
+                                                let tool_use_id = block.get("tool_use_id").and_then(|v| v.as_str()).map(|s| s.to_string())
+                                                    .or_else(|| msg_tool_use_id.map(|s| s.to_string()));
+                                                let is_error = block.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
+                                                let content_val = block.get("content");
+                                                let content_str = match content_val {
+                                                    Some(Value::String(s)) => s.clone(),
+                                                    Some(other) => serde_json::to_string(other).unwrap_or_default(),
+                                                    None => "".to_string(),
+                                                };
+                                                if let Some(id) = tool_use_id {
+                                                    let char_count = content_str.chars().count() as i64;
+                                                    let est_tokens = (char_count + 3) / 4;
+                                                    if let Some(tc) = tool_calls.iter_mut().rev().find(|tc| tc.tool_use_id.as_ref() == Some(&id)) {
+                                                        tc.result_char_count = Some(char_count);
+                                                        tc.result_est_tokens = Some(est_tokens);
+                                                        if is_error {
+                                                            tc.success = false;
+                                                        }
+                                                    } else if let Some(tc) = tool_calls.iter_mut().rev().find(|tc| tc.result_char_count.is_none()) {
+                                                        tc.tool_use_id = Some(id);
+                                                        tc.result_char_count = Some(char_count);
+                                                        tc.result_est_tokens = Some(est_tokens);
+                                                        if is_error {
+                                                            tc.success = false;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
                                         }
-                                        _ => {}
                                     }
                                 }
                             }
+
                             let msg_content_opt = if text_content.is_empty() {
                                 None
                             } else {
@@ -187,122 +289,16 @@ impl LogAdapter for ClaudeCodeAdapter {
                                 }
                             }
 
-                            // 턴 메시지 추가
-                            let msg = Message::new(
-                                session_id.clone(),
-                                turn_index,
-                                role.to_string(),
-                                input_tokens,
-                                cache_read_tokens,
-                                cache_creation_tokens,
-                                output_tokens,
-                                0.0, // cost_usd는 추후 pricing 모듈에서 계산
-                                timestamp.to_string(),
-                                msg_content_opt,
-                            );
-                            messages.push(msg);
-                            turn_index += 1;
+                            let normalized_role = if role == "assistant" {
+                                "agent".to_string()
+                            } else {
+                                role.to_string()
+                            };
 
-                            // content 블록 파싱 (thinking, text, tool_use, tool_result 등)
-                            let msg_tool_use_id = msg_obj.get("tool_use_id").and_then(|v| v.as_str());
-                            let mut has_tool_result_block = false;
-
-                            if let Some(content_array) =
-                                msg_obj.get("content").and_then(|c| c.as_array())
-                            {
-                                for block in content_array {
-                                    let block_type = block
-                                        .get("type")
-                                        .and_then(|t| t.as_str())
-                                        .unwrap_or("unknown");
-                                    match block_type {
-                                        "thinking" | "text" => {
-                                            nodes.push(Node::new(
-                                                session_id.clone(),
-                                                "text".to_string(),
-                                                true,
-                                                timestamp.to_string(),
-                                            ));
-                                        }
-                                        "tool_use" => {
-                                            nodes.push(Node::new(
-                                                session_id.clone(),
-                                                "tool_call".to_string(),
-                                                true,
-                                                timestamp.to_string(),
-                                            ));
-
-                                            if let Some(tool_name) =
-                                                block.get("name").and_then(|n| n.as_str())
-                                            {
-                                                let tool_input_val =
-                                                    block.get("input").unwrap_or(&Value::Null);
-
-                                                // 정규화된 tool_input 획득 및 멱등 input_hash 산출
-                                                let normalized_input_str =
-                                                    super::normalize_tool_input(tool_input_val);
-                                                let input_hash =
-                                                    super::calculate_input_hash(tool_input_val);
-
-                                                let (is_mcp, mcp_server, mcp_tool, final_tool_name) = if tool_name.starts_with("mcp__") {
-                                                    let remains = &tool_name["mcp__".len()..];
-                                                    if let Some((srv, tl)) = remains.split_once("__") {
-                                                        (true, Some(srv.to_string()), Some(tl.to_string()), format!("{}/{}", srv, tl))
-                                                    } else {
-                                                        (true, Some("unknown_server".to_string()), Some(remains.to_string()), tool_name.to_string())
-                                                    }
-                                                } else {
-                                                    (false, None, None, tool_name.to_string())
-                                                };
-
-                                                let block_id = block.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
-                                                let mut tc = ToolCall::new(
-                                                    session_id.clone(),
-                                                    final_tool_name,
-                                                    Some(normalized_input_str),
-                                                    input_hash,
-                                                    true,
-                                                    false,
-                                                    is_mcp,
-                                                    mcp_server,
-                                                    mcp_tool,
-                                                    timestamp.to_string(),
-                                                );
-                                                tc.tool_use_id = block_id;
-                                                tool_calls.push(tc);
-                                            }
-                                        }
-                                        "tool_result" => {
-                                            has_tool_result_block = true;
-                                            let tool_use_id = block.get("tool_use_id").and_then(|v| v.as_str()).map(|s| s.to_string())
-                                                .or_else(|| msg_tool_use_id.map(|s| s.to_string()));
-                                            let content_val = block.get("content");
-                                            let content_str = match content_val {
-                                                Some(Value::String(s)) => s.clone(),
-                                                Some(other) => serde_json::to_string(other).unwrap_or_default(),
-                                                None => "".to_string(),
-                                            };
-                                            if let Some(id) = tool_use_id {
-                                                let char_count = content_str.chars().count() as i64;
-                                                let est_tokens = (char_count + 3) / 4;
-                                                if let Some(tc) = tool_calls.iter_mut().rev().find(|tc| tc.tool_use_id.as_ref() == Some(&id)) {
-                                                    tc.result_char_count = Some(char_count);
-                                                    tc.result_est_tokens = Some(est_tokens);
-                                                } else if let Some(tc) = tool_calls.iter_mut().rev().find(|tc| tc.result_char_count.is_none()) {
-                                                    tc.tool_use_id = Some(id);
-                                                    tc.result_char_count = Some(char_count);
-                                                    tc.result_est_tokens = Some(est_tokens);
-                                                }
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-
-                            // Format B 대응 (role == "tool"이고 content에 tool_result 블록은 없는데 message 레벨에 tool_use_id가 있는 경우)
+                            // Format B 대응
                             if role == "tool" && !has_tool_result_block {
-                                if let Some(id) = msg_tool_use_id {
+                                let is_error = msg_obj.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
+                                if let Some(id) = msg_obj.get("tool_use_id").and_then(|v| v.as_str()) {
                                     let mut accumulated_text = String::new();
                                     if let Some(content_array) = msg_obj.get("content").and_then(|c| c.as_array()) {
                                         for block in content_array {
@@ -319,13 +315,35 @@ impl LogAdapter for ClaudeCodeAdapter {
                                     if let Some(tc) = tool_calls.iter_mut().rev().find(|tc| tc.tool_use_id.as_ref() == Some(&id_str)) {
                                         tc.result_char_count = Some(char_count);
                                         tc.result_est_tokens = Some(est_tokens);
+                                        if is_error {
+                                            tc.success = false;
+                                        }
                                     } else if let Some(tc) = tool_calls.iter_mut().rev().find(|tc| tc.result_char_count.is_none()) {
                                         tc.tool_use_id = Some(id_str);
                                         tc.result_char_count = Some(char_count);
                                         tc.result_est_tokens = Some(est_tokens);
+                                        if is_error {
+                                            tc.success = false;
+                                        }
                                     }
                                 }
                             }
+
+                            // 턴 메시지 추가
+                            let msg = Message::new(
+                                session_id.clone(),
+                                turn_index,
+                                normalized_role,
+                                input_tokens,
+                                cache_read_tokens,
+                                cache_creation_tokens,
+                                output_tokens,
+                                0.0,
+                                timestamp.to_string(),
+                                msg_content_opt,
+                            );
+                            messages.push(msg);
+                            turn_index += 1;
                         }
                     }
                     "session_end" => {
@@ -413,7 +431,7 @@ mod tests {
         assert_eq!(result.messages.len(), 2);
         assert_eq!(result.messages[0].role, "user");
         assert_eq!(result.messages[0].content, Some("안녕".to_string()));
-        assert_eq!(result.messages[1].role, "assistant");
+        assert_eq!(result.messages[1].role, "agent");
         assert_eq!(result.messages[1].input_tokens, 100);
         assert_eq!(result.messages[1].cache_read_input_tokens, 40);
         assert_eq!(result.messages[1].output_tokens, 50);

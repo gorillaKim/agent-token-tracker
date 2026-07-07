@@ -23,6 +23,7 @@ use crate::mcp::types::{
     fmt_tool_trend, fmt_tool_offenders, fmt_tool_percentiles,
     fmt_malfunction_patterns, fmt_malfunction_detections,
     fmt_malfunction_detections_v2, fmt_malfunction_summary,
+    fmt_session_detail,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -170,6 +171,17 @@ pub struct GetMalfunctionDetectionsParams {
     pub pattern_name: Option<String>,
     /// 특정 에이전트 타입 필터.
     pub agent_type: Option<String>,
+    /// 최대 조회 개수 (페이지네이션)
+    pub limit: Option<i64>,
+    /// 오프셋 (페이지네이션)
+    pub offset: Option<i64>,
+}
+
+/// `get_session_detail` 파라미터
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct GetSessionDetailParams {
+    /// 조회 대상 세션 ID 또는 8자 이상의 prefix
+    pub session_id: String,
 }
 
 /// `scan_and_detect_recent` 파라미터
@@ -494,37 +506,87 @@ impl AtkMcpServer {
         }
     }
 
+    fn handle_resolved_session<F>(&self, conn: &Connection, session_id: &str, f: F) -> String
+    where
+        F: FnOnce(&str) -> String,
+    {
+        match db::resolve_session_id(conn, session_id) {
+            Ok(db::ResolvedSession::Single(full_id)) => f(&full_id),
+            Ok(db::ResolvedSession::Multiple(candidates)) => {
+                let mut out = format!("⚠️ 여러 개의 세션이 매칭되었습니다. 정확한 session_id를 명시해 주세요.\n\n");
+                out.push_str("| 후보 세션 ID | 에이전트 | 시작 시각 |\n");
+                out.push_str("|---|---|---|\n");
+                for cand in candidates {
+                    let mut agent = "unknown".to_string();
+                    let mut started = "unknown".to_string();
+                    if let Ok(mut stmt) = conn.prepare("SELECT agent_type, started_at FROM sessions WHERE session_id = ?1") {
+                        if let Ok(mut rows) = stmt.query(rusqlite::params![cand]) {
+                            if let Ok(Some(row)) = rows.next() {
+                                agent = row.get(0).unwrap_or(agent);
+                                started = row.get(1).unwrap_or(started);
+                            }
+                        }
+                    }
+                    out.push_str(&format!("| `{}` | `{}` | {} |\n", cand, agent, started));
+                }
+                out
+            }
+            Ok(db::ResolvedSession::None) => {
+                format!("❌ 세션을 찾을 수 없습니다. (입력값: `{}`)", session_id)
+            }
+            Err(e) => format!("❌ 식별자 해석 실패: {e}"),
+        }
+    }
+
+    /// 특정 세션의 종합적인 상세 정보 및 감지 엔진 권위의 루프 시그널 정보들을 조회합니다.
+    #[tool(description = "특정 세션의 상세 메타 정보, 토큰/비용 누계, 도구 호출 빈도, 엔진 판정 루프 시그널 및 오펜더 목록을 상세 조회합니다. session_id(세션 ID 또는 8자 이상 prefix)가 필요합니다.")]
+    async fn get_session_detail(&self, Parameters(p): Parameters<GetSessionDetailParams>) -> String {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return "❌ DB 락 취득 실패".to_string(),
+        };
+        self.handle_resolved_session(&conn, &p.session_id, |full_id| {
+            match crate::detect::malfunctions::SessionMalfunctionContext::load(&conn, full_id) {
+                Ok(ctx) => fmt_session_detail(&ctx),
+                Err(e) => format!("❌ 세션 정보 로드 실패: {e}"),
+            }
+        })
+    }
+
     /// 특정 세션을 실시간으로 분석하여 감지된 오작동 내역을 DB에 기록하고, 그 결과를 반환합니다.
-    #[tool(description = "특정 세션에 대해 오작동 감지 엔진을 가동합니다. session_id(세션 ID)가 필요합니다.")]
+    #[tool(description = "특정 세션에 대해 오작동 감지 엔진을 가동합니다. session_id(세션 ID 또는 8자 이상 prefix)가 필요합니다.")]
     async fn analyze_session_malfunctions(&self, Parameters(p): Parameters<AnalyzeSessionMalfunctionsParams>) -> String {
         let conn = match self.conn.lock() {
             Ok(c) => c,
             Err(_) => return "❌ DB 락 취득 실패".to_string(),
         };
         
-        // 1. 분석 및 오작동 검출 매칭 가동
-        if let Err(e) = crate::detect::malfunctions::analyze_and_detect_malfunctions(&conn, &p.session_id) {
-            return format!("❌ 분석 중 오류 발생: {e}");
-        }
-
-        // 2. 결과 리포트 조회
-        match db::get_session_malfunction_reports(&conn, &p.session_id) {
-            Ok(result) => fmt_malfunction_detections(&p.session_id, &result),
-            Err(e) => format!("❌ 분석 결과 조회 실패: {e}"),
-        }
+        self.handle_resolved_session(&conn, &p.session_id, |full_id| {
+            // 1. 분석 및 오작동 검출 매칭 가동
+            if let Err(e) = crate::detect::malfunctions::analyze_and_detect_malfunctions(&conn, full_id) {
+                return format!("❌ 분석 중 오류 발생: {e}");
+            }
+            // 2. 결과 리포트 조회
+            match db::get_session_malfunction_reports(&conn, full_id) {
+                Ok(result) => fmt_malfunction_detections(full_id, &result),
+                Err(e) => format!("❌ 분석 결과 조회 실패: {e}"),
+            }
+        })
     }
 
     /// 특정 세션에서 이미 감지된 오작동 이력 목록을 조회합니다.
-    #[tool(description = "특정 세션의 기존 오작동 감지 이력을 조회합니다. session_id(세션 ID)가 필요합니다.")]
+    #[tool(description = "특정 세션의 기존 오작동 감지 이력을 조회합니다. session_id(세션 ID 또는 8자 이상 prefix)가 필요합니다.")]
     async fn get_session_malfunctions(&self, Parameters(p): Parameters<GetSessionMalfunctionsParams>) -> String {
         let conn = match self.conn.lock() {
             Ok(c) => c,
             Err(_) => return "❌ DB 락 취득 실패".to_string(),
         };
-        match db::get_session_malfunction_reports(&conn, &p.session_id) {
-            Ok(result) => fmt_malfunction_detections(&p.session_id, &result),
-            Err(e) => format!("❌ 조회 실패: {e}"),
-        }
+        self.handle_resolved_session(&conn, &p.session_id, |full_id| {
+            match db::get_session_malfunction_reports(&conn, full_id) {
+                Ok(result) => fmt_malfunction_detections(full_id, &result),
+                Err(e) => format!("❌ 조회 실패: {e}"),
+            }
+        })
     }
 
     /// 오작동 패턴을 삭제합니다.
@@ -541,7 +603,7 @@ impl AtkMcpServer {
     }
 
     /// 조건에 매칭되는 오작동 감지 상세 이력 목록을 집계 조회합니다.
-    #[tool(description = "조건(since, pattern_name, agent_type)을 지정하여 매칭되는 오작동 감지 상세 이력 목록을 집계 조회합니다.")]
+    #[tool(description = "조건(since, pattern_name, agent_type, limit, offset)을 지정하여 매칭되는 오작동 감지 상세 이력 목록을 집계 조회합니다.")]
     async fn get_malfunction_detections(&self, Parameters(p): Parameters<GetMalfunctionDetectionsParams>) -> String {
         let conn = match self.conn.lock() {
             Ok(c) => c,
@@ -552,6 +614,8 @@ impl AtkMcpServer {
             p.since.as_deref(),
             p.pattern_name.as_deref(),
             p.agent_type.as_deref(),
+            p.limit,
+            p.offset,
         ) {
             Ok(result) => fmt_malfunction_detections_v2(&result),
             Err(e) => format!("❌ 조회 실패: {e}"),

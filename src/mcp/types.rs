@@ -458,4 +458,122 @@ pub fn fmt_malfunction_summary(data: &[crate::db::MalfunctionSummary]) -> String
     out
 }
 
+/// `get_session_detail` 응답 포매터 — 세션의 입체적 상세 이력
+pub fn fmt_session_detail(ctx: &crate::detect::malfunctions::SessionMalfunctionContext) -> String {
+    let mut out = String::new();
+    
+    // 1. 세션 기본 정보
+    let ended = ctx.session.ended_at.as_deref().unwrap_or("진행 중 (또는 비정상 종료 ⚠️)");
+    let unexpected = if ctx.session.ended_at.is_none() { "Yes ⚠️" } else { "No" };
+    let model = ctx.session.model_id.as_deref().unwrap_or("—");
+    
+    out.push_str(&format!(
+        "## 🔍 세션 상세 분석: `{}`\n\n",
+        ctx.session.session_id
+    ));
+    
+    out.push_str("### 📋 메타 데이터\n");
+    out.push_str(&format!("* **에이전트**: `{}`\n", ctx.session.agent_type));
+    out.push_str(&format!("* **모델 ID**: `{}`\n", model));
+    out.push_str(&format!("* **작업 디렉토리**: `{}`\n", ctx.session.cwd));
+    out.push_str(&format!("* **시작 일시**: `{}`\n", ctx.session.started_at));
+    out.push_str(&format!("* **종료 일시**: `{}`\n", ended));
+    out.push_str(&format!("* **예상치 못한 종료 (Unexpected Exit)**: `{}`\n\n", unexpected));
+
+    // 2. 누적 집계 (Totals)
+    let total_cost = ctx.messages.iter().map(|m| m.cost_usd).sum::<f64>();
+    let turn_count = ctx.messages.len();
+    out.push_str("### 📊 누적 통계\n");
+    out.push_str(&format!("* **입력 토큰**: `{}`\n", fmt_tokens(ctx.session.total_input_tokens)));
+    out.push_str(&format!("* **출력 토큰**: `{}`\n", fmt_tokens(ctx.session.total_output_tokens)));
+    out.push_str(&format!("* **총 추정 비용**: `{}`\n", fmt_cost(total_cost)));
+    out.push_str(&format!("* **총 도구 호출 수**: `{}`\n", ctx.tool_calls.len()));
+    out.push_str(&format!("* **총 대화 턴 수**: `{}`\n\n", turn_count));
+
+    // 3. 도구 호출 빈도표 (tool_frequency)
+    use std::collections::HashMap;
+    let mut tool_freq: HashMap<String, u64> = HashMap::new();
+    for tc in &ctx.tool_calls {
+        *tool_freq.entry(tc.tool_name.clone()).or_insert(0) += 1;
+    }
+    let mut sorted_freq: Vec<(String, u64)> = tool_freq.into_iter().collect();
+    sorted_freq.sort_by(|a, b| b.1.cmp(&a.1));
+
+    out.push_str("### 🛠️ 도구 호출 빈도 (상위 N)\n");
+    if sorted_freq.is_empty() {
+        out.push_str("호출된 도구가 없습니다.\n\n");
+    } else {
+        out.push_str("| 도구명 | 호출 수 |\n");
+        out.push_str("|---|---|\n");
+        for (name, count) in sorted_freq.iter().take(10) {
+            out.push_str(&format!("| `{}` | {} |\n", name, count));
+        }
+        out.push_str("\n");
+    }
+
+    // 4. MCP 서버 빈도표 (mcp_server_frequency)
+    out.push_str("### 🔌 MCP 서버 호출 빈도\n");
+    if ctx.mcp_server_counts.is_empty() {
+        out.push_str("호출된 MCP 서버가 없습니다.\n\n");
+    } else {
+        let mut sorted_mcp: Vec<(String, usize)> = ctx.mcp_server_counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        sorted_mcp.sort_by(|a, b| b.1.cmp(&a.1));
+        out.push_str("| MCP 서버 | 호출 수 |\n");
+        out.push_str("|---|---|\n");
+        for (server, count) in sorted_mcp {
+            out.push_str(&format!("| `{}` | {} |\n", server, count));
+        }
+        out.push_str("\n");
+    }
+
+    // 5. 엔진 권위의 루프 시그널 정보 (loop_signals)
+    let mut max_tool_fail_cnt = 0;
+    let mut max_tool_fail_name = "—".to_string();
+    for (tname, cnt) in &ctx.tool_consecutive_failures_map {
+        if *cnt > max_tool_fail_cnt {
+            max_tool_fail_cnt = *cnt;
+            max_tool_fail_name = tname.clone();
+        }
+    }
+    let fail_detail = if max_tool_fail_cnt > 0 {
+        format!("{}회 연속 실패 (도구: `{}`)", max_tool_fail_cnt, max_tool_fail_name)
+    } else {
+        "0회".to_string()
+    };
+
+    out.push_str("### 🚨 오작동 및 루프 시그널 (ATK 권위값)\n");
+    out.push_str(&format!("* **동일 도구 & 인풋 최대 연속 반복 (`dynamic_repeated_calls`)**: `{}회`\n", ctx.max_repeated_calls));
+    out.push_str(&format!("* **최대 핑퐁 사이클 반복 (`dynamic_ping_pong`)**: `{}회`\n", ctx.max_ping_pong_cycles));
+    out.push_str(&format!("* **최대 순환 루프 반복 (`dynamic_cyclic_loop`)**: `{}회`\n", ctx.max_cyclic_loop_cycles));
+    out.push_str(&format!("* **최대 도구 연속 실패 (`max_consecutive_tool_failures`)**: `{}`\n", fail_detail));
+    out.push_str(&format!("* **한 턴 내 최대 도구 호출 횟수 (`max_tool_calls_per_turn`)**: `{}회`\n\n", ctx.max_tool_calls_per_turn));
+
+    // 6. 결과 페이로드 오펜더 (top_result_offenders)
+    let mut offenders: Vec<&crate::model::ToolCall> = ctx.tool_calls.iter()
+        .filter(|tc| tc.result_est_tokens.is_some())
+        .collect();
+    offenders.sort_by(|a, b| b.result_est_tokens.unwrap_or(0).cmp(&a.result_est_tokens.unwrap_or(0)));
+
+    out.push_str("### 📦 결과 페이로드 오펜더 (Top 5)\n");
+    if offenders.is_empty() {
+        out.push_str("반환된 결과 페이로드 데이터가 없습니다.\n");
+    } else {
+        out.push_str("| 도구명 | 일시 | 결과 글자 수 | 추정 토큰 수 |\n");
+        out.push_str("|---|---|---|---|\n");
+        for tc in offenders.iter().take(5) {
+            let chars = tc.result_char_count.unwrap_or(0);
+            let tokens = tc.result_est_tokens.unwrap_or(0);
+            out.push_str(&format!(
+                "| `{}` | {} | {} | {} |\n",
+                tc.tool_name,
+                tc.created_at,
+                fmt_tokens(chars as u64),
+                fmt_tokens(tokens as u64)
+            ));
+        }
+    }
+    
+    out
+}
+
 
