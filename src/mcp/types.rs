@@ -613,8 +613,12 @@ pub fn fmt_session_context(
 
     // 1. 이벤트 병합 및 시간순 정렬
     let mut events = Vec::new();
+    let mut seen_messages = std::collections::HashSet::new();
     for msg in &ctx.messages {
-        events.push(TimelineEvent::Msg(msg));
+        let key = (msg.turn_index, &msg.role, msg.content.as_deref().unwrap_or(""));
+        if seen_messages.insert(key) {
+            events.push(TimelineEvent::Msg(msg));
+        }
     }
     for tc in &ctx.tool_calls {
         events.push(TimelineEvent::Tool(tc));
