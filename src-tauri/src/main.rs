@@ -1175,7 +1175,9 @@ fn update_tray_status(app_handle: &AppHandle) {
     }
 }
 
-fn toggle_tray_popover(app: &AppHandle, _click_pos: tauri::PhysicalPosition<f64>) {
+fn toggle_tray_popover(app: &AppHandle, click_pos: tauri::PhysicalPosition<f64>) {
+    use tauri::Manager;
+
     #[cfg(target_os = "macos")]
     {
         let panel = match app.get_webview_panel("tray-popover") {
@@ -1194,9 +1196,30 @@ fn toggle_tray_popover(app: &AppHandle, _click_pos: tauri::PhysicalPosition<f64>
             // 팝오버가 보이지 않는다. NonactivatingPanel + show_and_make_key(orderFrontRegardless)
             // 조합이 앱 활성화 없이 현재 Space 위로 팝오버를 올려주므로 활성화 호출은 하지 않는다.
             if let Some(window) = app.get_webview_window("tray-popover") {
-                use tauri_plugin_positioner::{WindowExt, Position};
-                if let Err(e) = window.move_window(Position::TrayCenter) {
-                    eprintln!("[Tray] move_window 에러: {:?}", e);
+                let target_monitor = app.monitor_from_point(click_pos.x, click_pos.y).ok().flatten();
+                let scale_factor = target_monitor.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
+                
+                let mut x = click_pos.x - (160.0 * scale_factor); // 팝업 너비(320.0)의 절반
+                let y = click_pos.y + (12.0 * scale_factor); // 상단 바에서 약간 띄움
+
+                if let Some(ref m) = target_monitor {
+                    let monitor_left = m.position().x as f64;
+                    let monitor_right = monitor_left + (m.size().width as f64);
+                    let width_physical = 320.0 * scale_factor;
+
+                    if x < monitor_left {
+                        x = monitor_left;
+                    }
+                    if x + width_physical > monitor_right {
+                        x = monitor_right - width_physical;
+                    }
+                }
+
+                if let Err(e) = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+                    x: x as i32,
+                    y: y as i32,
+                })) {
+                    eprintln!("[Tray] set_position 에러: {:?}", e);
                 }
             } else {
                 eprintln!("[Tray] get_webview_window('tray-popover')가 None입니다.");
@@ -1219,8 +1242,23 @@ fn toggle_tray_popover(app: &AppHandle, _click_pos: tauri::PhysicalPosition<f64>
         if is_visible {
             let _ = window.hide();
         } else {
-            let x = click_pos.x - 160.0;
-            let y = click_pos.y + 10.0;
+            let target_monitor = app.monitor_from_point(click_pos.x, click_pos.y).ok().flatten();
+            let scale_factor = target_monitor.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
+            let mut x = click_pos.x - (160.0 * scale_factor);
+            let y = click_pos.y + (10.0 * scale_factor);
+
+            if let Some(ref m) = target_monitor {
+                let monitor_left = m.position().x as f64;
+                let monitor_right = monitor_left + (m.size().width as f64);
+                let width_physical = 320.0 * scale_factor;
+
+                if x < monitor_left {
+                    x = monitor_left;
+                }
+                if x + width_physical > monitor_right {
+                    x = monitor_right - width_physical;
+                }
+            }
             
             let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
                 x: x as i32,

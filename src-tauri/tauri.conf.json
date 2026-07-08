@@ -1,6 +1,6 @@
 {
   "productName": "Agent Token Tracker",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "identifier": "com.atk.desktop",
   "build": {
     "beforeDevCommand": "echo 'Using manual dev server'",
