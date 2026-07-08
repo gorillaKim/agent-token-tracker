@@ -6,9 +6,21 @@ use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
 
 use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter, Manager};
 use notify::{Watcher, RecursiveMode};
 use keyring::Entry;
+
+pub static POPOVER_SHOWN_AT_MS: AtomicU64 = AtomicU64::new(0);
+pub static POPOVER_HIDDEN_AT_MS: AtomicU64 = AtomicU64::new(0);
+pub const POPOVER_AUTO_HIDE_GRACE_MS: u64 = 200;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 #[cfg(target_os = "macos")]
 use tauri_nspanel::{tauri_panel, ManagerExt, WebviewWindowExt};
@@ -1177,6 +1189,7 @@ fn update_tray_status(app_handle: &AppHandle) {
 
 fn toggle_tray_popover(app: &AppHandle, click_pos: tauri::PhysicalPosition<f64>) {
     use tauri::Manager;
+    let now = now_ms();
 
     #[cfg(target_os = "macos")]
     {
@@ -1190,11 +1203,13 @@ fn toggle_tray_popover(app: &AppHandle, click_pos: tauri::PhysicalPosition<f64>)
 
         if panel.is_visible() {
             panel.hide();
+            POPOVER_HIDDEN_AT_MS.store(now, Ordering::Relaxed);
         } else {
-            // 주의: 여기서 NSApplication.activateIgnoringOtherApps 를 호출하면 액세서리 앱이 강제
-            // 활성화되며, 다른 앱이 네이티브 전체화면(별도 Space)일 때 그 Space 에서 벗어나
-            // 팝오버가 보이지 않는다. NonactivatingPanel + show_and_make_key(orderFrontRegardless)
-            // 조합이 앱 활성화 없이 현재 Space 위로 팝오버를 올려주므로 활성화 호출은 하지 않는다.
+            let elapsed_since_hide = now.saturating_sub(POPOVER_HIDDEN_AT_MS.load(Ordering::Relaxed));
+            if elapsed_since_hide < 300 {
+                return;
+            }
+
             if let Some(window) = app.get_webview_window("tray-popover") {
                 let target_monitor = app.monitor_from_point(click_pos.x, click_pos.y).ok().flatten();
                 let scale_factor = target_monitor.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
@@ -1224,6 +1239,8 @@ fn toggle_tray_popover(app: &AppHandle, click_pos: tauri::PhysicalPosition<f64>)
             } else {
                 eprintln!("[Tray] get_webview_window('tray-popover')가 None입니다.");
             }
+
+            POPOVER_SHOWN_AT_MS.store(now, Ordering::Relaxed);
             panel.show_and_make_key();
         }
     }
@@ -1241,7 +1258,13 @@ fn toggle_tray_popover(app: &AppHandle, click_pos: tauri::PhysicalPosition<f64>)
         let is_visible = window.is_visible().unwrap_or(false);
         if is_visible {
             let _ = window.hide();
+            POPOVER_HIDDEN_AT_MS.store(now, Ordering::Relaxed);
         } else {
+            let elapsed_since_hide = now.saturating_sub(POPOVER_HIDDEN_AT_MS.load(Ordering::Relaxed));
+            if elapsed_since_hide < 300 {
+                return;
+            }
+
             let target_monitor = app.monitor_from_point(click_pos.x, click_pos.y).ok().flatten();
             let scale_factor = target_monitor.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
             let mut x = click_pos.x - (160.0 * scale_factor);
@@ -1265,6 +1288,7 @@ fn toggle_tray_popover(app: &AppHandle, click_pos: tauri::PhysicalPosition<f64>)
                 y: y as i32,
             }));
             
+            POPOVER_SHOWN_AT_MS.store(now, Ordering::Relaxed);
             let _ = window.show();
             let _ = window.set_focus();
         }
@@ -3680,11 +3704,6 @@ fn main() {
                 }
             });
 
-            // 팝오버 닫힘 시간 추적을 위한 스레드 안전 변수
-            let last_hide = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now() - std::time::Duration::from_secs(1)));
-            let last_hide_for_blur = last_hide.clone();
-            let last_hide_for_click = last_hide.clone();
-
             // 3. 프로그램적으로 tray-popover 윈도우 생성
             let popover_builder = tauri::WebviewWindowBuilder::new(
                 app,
@@ -3741,17 +3760,21 @@ fn main() {
             let popover_clone = popover.clone();
             popover.on_window_event(move |event| {
                 if let tauri::WindowEvent::Focused(false) = event {
-                    #[cfg(target_os = "macos")]
-                    {
-                        // hides_on_deactivate가 처리하지만, tauri 윈도우 가시성 동기화를 명시적으로 hide
-                        let _ = popover_clone.hide();
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        let _ = popover_clone.hide();
-                    }
-                    if let Ok(mut last) = last_hide_for_blur.lock() {
-                        *last = std::time::Instant::now();
+                    let now = now_ms();
+                    let elapsed = {
+                        let shown = POPOVER_SHOWN_AT_MS.load(Ordering::Relaxed);
+                        now.saturating_sub(shown)
+                    };
+                    if elapsed >= POPOVER_AUTO_HIDE_GRACE_MS {
+                        #[cfg(target_os = "macos")]
+                        {
+                            let _ = popover_clone.hide();
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            let _ = popover_clone.hide();
+                        }
+                        POPOVER_HIDDEN_AT_MS.store(now, Ordering::Relaxed);
                     }
                 }
             });
@@ -3824,11 +3847,6 @@ fn main() {
 
                     if let tauri::tray::TrayIconEvent::Click { button, button_state, position, .. } = event {
                         if button == tauri::tray::MouseButton::Left && button_state == tauri::tray::MouseButtonState::Up {
-                            if let Ok(last) = last_hide_for_click.lock() {
-                                if last.elapsed() < std::time::Duration::from_millis(250) {
-                                    return;
-                                }
-                            }
                             let app = tray.app_handle();
                             toggle_tray_popover(app, position);
                         }
